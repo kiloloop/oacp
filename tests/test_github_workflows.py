@@ -56,5 +56,7 @@ def test_release_workflow_publishes_with_trusted_publishing() -> None:
     release_job = workflow["jobs"]["github-release"]
     assert set(release_job["needs"]) == {"build", "publish-pypi"}
     assert release_job["permissions"]["contents"] == "write"
-    assert release_job["steps"][0]["uses"].startswith("actions/download-artifact@")
-    assert "gh release create" in release_job["steps"][-1]["run"]
+    release_step_names = {step["name"]: step for step in release_job["steps"]}
+    assert release_step_names["Check out repository"]["uses"].startswith("actions/checkout@")
+    assert release_step_names["Download release artifacts"]["uses"].startswith("actions/download-artifact@")
+    assert "gh release create" in release_step_names["Create GitHub Release"]["run"]
