@@ -1,0 +1,333 @@
+# Dispatch State Machine
+#
+# Defines valid states and transitions for task_request dispatch lifecycle.
+# Two tracks: agent-side (handling a task_request) and dispatcher-side (orchestrator tracking).
+# Reference: docs/protocol/inbox_outbox.md
+#
+# Modeled after packet_states.yaml. All agent replies MUST set parent_message_id
+# to the original task_request's id.
+
+version: "0.1.0"
+
+# ── Agent-Side States ────────────────────────────────────────────────────────
+#
+# States an agent moves through when handling a task_request message.
+#
+# Flow:
+#   received → accepted → working → pr_opened → in_review → done
+#      ↘          ↘ rejected    ↘ blocked    ↑        |
+#    rejected      ↘ blocked                 └── changes_requested
+#
+#   Any pre-working state can reject. blocked can resume → working.
+
+agent_states:
+  received:
+    description: "task_request delivered to agent inbox"
+    entered_by: "system"
+    notification_required: false
+
+  accepted:
+    description: "Agent has read and accepted the task"
+    entered_by: "agent"
+    notification_required: false
+    notification_recommended: true
+    note: "Ack recommended for P0/P1 tasks"
+
+  working:
+    description: "Agent is actively implementing"
+    entered_by: "agent"
+    notification_required: false
+
+  pr_opened:
+    description: "Agent has opened a PR (work-in-progress)"
+    entered_by: "agent"
+    notification_required: true
+    notification_fields:
+      subject_prefix: "WIP:"
+      required: ["related_pr"]
+    note: "PR opened is NOT done. This is a progress update only."
+
+  in_review:
+    description: "PR is under cross-agent review"
+    entered_by: "agent or reviewer"
+    notification_required: true
+    notification_fields:
+      type: "review_request"
+      required: ["related_pr"]
+
+  changes_requested:
+    description: "Reviewer requested changes on the PR"
+    entered_by: "reviewer"
+    notification_required: true
+    notification_fields:
+      type: "review_feedback"
+      required: ["related_pr"]
+
+  done:
+    description: "Task complete — PR merged or deliverable provided"
+    entered_by: "agent"
+    notification_required: true
+    notification_fields:
+      subject_prefix: "Re:"
+      required_one_of:
+        - ["merge_sha"]
+        - ["results_summary"]
+    terminal: true
+    note: "For PR-based tasks, done = PR merged, not opened."
+
+  rejected:
+    description: "Agent cannot or will not complete the task"
+    entered_by: "agent"
+    notification_required: true
+    notification_fields:
+      subject_prefix: "Rejected:"
+      required: ["reason"]
+    terminal: true
+
+  blocked:
+    description: "Agent is blocked and cannot continue"
+    entered_by: "agent"
+    notification_required: true
+    notification_fields:
+      subject_prefix: "Blocked:"
+      required: ["blocker_details"]
+    note: "Can resume to working once blocker is resolved"
+
+  failed:
+    description: "Agent crashed or encountered an unrecoverable error"
+    entered_by: "agent or system"
+    notification_required: true
+    notification_fields:
+      subject_prefix: "Failed:"
+      required: ["failure_details"]
+    note: "Distinct from blocked (recoverable) and rejected (intentional). Retry requires explicit dispatcher authorization to prevent retry storms."
+
+# ── Agent-Side Transitions ───────────────────────────────────────────────────
+
+agent_transitions:
+  - from: "received"
+    to: "accepted"
+    trigger: "Agent reads and accepts the task_request"
+    role: "agent"
+
+  - from: "received"
+    to: "rejected"
+    trigger: "Agent determines task is infeasible or out of scope"
+    role: "agent"
+
+  - from: "accepted"
+    to: "rejected"
+    trigger: "Agent finds task infeasible after initial assessment"
+    role: "agent"
+
+  - from: "accepted"
+    to: "blocked"
+    trigger: "Agent discovers blocker before starting work"
+    role: "agent"
+
+  - from: "accepted"
+    to: "working"
+    trigger: "Agent begins implementation"
+    role: "agent"
+
+  - from: "working"
+    to: "pr_opened"
+    trigger: "Agent opens a pull request"
+    role: "agent"
+
+  - from: "working"
+    to: "done"
+    trigger: "Non-PR task completed (research, advisory)"
+    role: "agent"
+
+  - from: "working"
+    to: "blocked"
+    trigger: "Agent encounters a blocker"
+    role: "agent"
+
+  - from: "pr_opened"
+    to: "in_review"
+    trigger: "Agent requests cross-agent review"
+    role: "agent"
+
+  - from: "in_review"
+    to: "changes_requested"
+    trigger: "Reviewer requests changes"
+    role: "reviewer"
+
+  - from: "changes_requested"
+    to: "pr_opened"
+    trigger: "Agent addresses review feedback"
+    role: "agent"
+
+  - from: "in_review"
+    to: "done"
+    trigger: "PR merged after review approval"
+    role: "agent"
+    guard: "pr_merged AND review_approved"
+
+  - from: "pr_opened"
+    to: "done"
+    trigger: "PR merged (self-review or pre-approved)"
+    role: "agent"
+    guard: "pr_merged AND review_approved"
+
+  - from: "blocked"
+    to: "working"
+    trigger: "Blocker resolved, agent resumes"
+    role: "agent"
+
+  - from: "working"
+    to: "failed"
+    trigger: "Agent crashes or encounters unrecoverable error"
+    role: "agent or system"
+
+  - from: "in_review"
+    to: "failed"
+    trigger: "Agent or reviewer crashes during review"
+    role: "agent or system"
+
+  - from: "failed"
+    to: "working"
+    trigger: "Dispatcher authorizes retry after failure triage"
+    role: "dispatcher"
+    guard: "dispatcher_authorization"
+
+# ── Dispatcher-Side States ───────────────────────────────────────────────────
+#
+# States the orchestrator uses to track dispatches.
+#
+# Flow:
+#   Sent → In progress → In review → Done
+#     ↘ Ack'd ↗          ↘ Responded (non-PR tasks)
+#     ↘ Overdue (SLA timeout, computed)
+#     ↘ Blocked / Rejected (terminal)
+
+dispatcher_states:
+  sent:
+    description: "Dispatch message written to agent inbox"
+    trigger: "send_inbox_message.py completes"
+
+  ackd:
+    description: "Agent acknowledged receipt"
+    trigger: "Ack notification received from agent"
+
+  in_progress:
+    description: "Within SLA window, no PR yet"
+    trigger: "Default state after sent/ackd, within SLA"
+
+  in_review:
+    description: "Agent opened PR, under review"
+    trigger: "WIP notification received with related_pr"
+
+  done:
+    description: "Task complete — PR merged or deliverable confirmed"
+    trigger: "Final notification with merge SHA or results"
+
+  responded:
+    description: "Agent replied to non-PR task (research, advisory)"
+    trigger: "Reply notification for non-PR task_request"
+    terminal: true
+    note: "Terminal state for non-PR tasks. Equivalent to 'done' for PR-based tasks."
+
+  blocked:
+    description: "Agent reported a blocker"
+    trigger: "Blocked notification from agent"
+
+  rejected:
+    description: "Agent rejected the task"
+    trigger: "Rejection notification from agent"
+
+  overdue:
+    description: "No response beyond SLA threshold (computed, not reported)"
+    trigger: "Computed by dispatcher based on priority SLA"
+
+# ── Brainstorm Lifecycle ────────────────────────────────────────────────────
+#
+# Brainstorm messages follow a simpler lifecycle than task_request.
+# No PR, no review loop. Agent researches freely and delivers a report.
+#
+# Agent flow:
+#   received → researching → report_delivered
+#
+# Dispatcher flow:
+#   Sent → In progress → Responded
+#
+# brainstorm_followup amends scope mid-flight — does not reset state.
+
+brainstorm_agent_states:
+  received:
+    description: "brainstorm_request delivered to agent inbox"
+    entered_by: "system"
+
+  researching:
+    description: "Agent is researching, analyzing, and drafting report"
+    entered_by: "agent"
+
+  report_delivered:
+    description: "Agent has written feasibility report to outbox"
+    entered_by: "agent"
+    notification_required: true
+    notification_fields:
+      subject_prefix: "Re:"
+      required: ["results_summary"]
+    terminal: true
+
+brainstorm_agent_transitions:
+  - from: "received"
+    to: "researching"
+    trigger: "Agent reads and begins research"
+    role: "agent"
+
+  - from: "researching"
+    to: "report_delivered"
+    trigger: "Agent completes analysis and writes report"
+    role: "agent"
+
+brainstorm_followup_handling:
+  description: "brainstorm_followup amends the scope of an in-progress brainstorm"
+  rules:
+    - "References the parent brainstorm_request via parent_message_id"
+    - "Does not create a new dispatch — appended to the existing brainstorm scope"
+    - "If agent has already delivered R1, followup content is incorporated into R2"
+    - "Multiple followups can stack before the next round"
+
+# ── SLA Thresholds ───────────────────────────────────────────────────────────
+
+sla:
+  P0:
+    first_response: "2h"
+    description: "Production incident, blocking all work"
+  P1:
+    first_response: "24h"
+    description: "Due today, time-sensitive"
+  P2:
+    first_response: "48h"
+    description: "Standard priority"
+  P3:
+    first_response: null
+    description: "Nice-to-have, no SLA"
+
+# ── Constraints ──────────────────────────────────────────────────────────────
+
+constraints:
+  threading:
+    - "All agent replies MUST set parent_message_id to the original task_request id"
+    - "Conversation threading propagates across the dispatch lifecycle"
+  notifications:
+    - "WIP notification at PR-open is required (subject prefix: 'WIP:')"
+    - "Final notification after merge/completion is required (subject prefix: 'Re:')"
+    - "Ack notification on receipt is optional but recommended for P0/P1"
+    - "Blocked/Rejected notifications are required immediately"
+  done_criteria:
+    - "For PR-based tasks: done = PR merged, not opened"
+    - "For non-PR tasks: done = deliverable provided or question answered"
+    - "Final notification must include merge_sha (PR tasks) or results_summary (non-PR tasks)"
+  dispatcher_terminal_states:
+    - "done — PR merged or deliverable confirmed (PR-based tasks)"
+    - "responded — agent replied with results (non-PR tasks)"
+    - "rejected — agent rejected the task"
+  inbox_file_lifecycle:
+    - "Dispatch state is tracked via message replies (parent_message_id threading), NOT by retaining the original inbox file"
+    - "Agents delete the original task_request from inbox after processing (per inbox_outbox.md Lifecycle step 5)"
+    - "Long-lived states (blocked, in_review) persist in dispatcher tracking (dispatches.md), not as inbox files"

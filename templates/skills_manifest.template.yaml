@@ -1,0 +1,35 @@
+# Skills Manifest — declares capabilities available to agents in this project.
+# Tiered: "core" skills are required for all agents; "optional" are role-specific.
+#
+# Usage: Copy to projects/<project>/skills_manifest.yaml and customize.
+
+version: "0.1.0"
+# CUSTOMIZE: project name
+project: ""
+
+skills:
+  core:  # Required for all agents in this project
+    - id: ""           # CUSTOMIZE: skill identifier
+      description: ""  # CUSTOMIZE: what this skill covers
+      compatible_runtimes: [claude, codex, gemini]  # CUSTOMIZE: which runtimes support this
+
+    # Example core skills (uncomment and customize):
+    # - id: code_review
+    #   description: "Review PRs for correctness, security, and style compliance"
+    #   compatible_runtimes: [claude, codex, gemini]
+    # - id: implementation
+    #   description: "Implement features and bug fixes following project conventions"
+    #   compatible_runtimes: [claude, codex, gemini]
+
+  optional:  # Specialized skills for specific roles
+    - id: ""           # CUSTOMIZE: skill identifier
+      description: ""  # CUSTOMIZE: what this skill covers
+      compatible_runtimes: []  # CUSTOMIZE: which runtimes support this
+
+    # Example optional skills (uncomment and customize):
+    # - id: testing
+    #   description: "Write and maintain unit/integration/e2e test suites"
+    #   compatible_runtimes: [claude, codex]
+    # - id: deployment
+    #   description: "Manage CI/CD pipelines, releases, and infrastructure"
+    #   compatible_runtimes: [claude]

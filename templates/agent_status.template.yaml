@@ -1,0 +1,21 @@
+# Agent Status Template
+# Location: projects/<project>/agents/<agent_name>/status.yaml
+# See: docs/protocol/runtime_capabilities.md
+
+runtime: claude               # claude | codex | gemini | human | unknown
+model: claude-opus-4-6        # model version identifier
+status: available              # available | busy | offline
+current_task: ""               # free-text description of current work (empty if idle)
+capabilities:                  # canonical capability keys — see protocol spec
+  - headless
+  - mcp_tools
+  - shell_access
+  - git_ops
+  - github_cli
+  - subagents
+  - parallel_teams
+  - web_search
+  - session_memory
+  - notifications
+  - async_tasks
+updated_at: "2026-02-16T20:00:00Z"   # ISO 8601 UTC — updated on every status change

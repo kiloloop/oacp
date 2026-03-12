@@ -1,0 +1,219 @@
+# github_actions_quality_gate.yaml — GitHub Actions quality gate template
+#
+# Copy to .github/workflows/quality_gate.yaml in your project repo and
+# customize the variables below.
+#
+# What it does:
+#   1. Triggers on PR events (opened, synchronize, review_submitted)
+#   2. Locates the findings packet for this PR's branch
+#   3. Runs check_quality_gate.py to evaluate the quality gate
+#   4. Posts a PR comment with the verdict
+#   5. Sets the check status to pass/fail
+#
+# Requires:
+#   - scripts/check_quality_gate.py from oacp
+#   - Findings packets in the agent hub project workspace
+#
+# Customization points are marked with "# CUSTOMIZE:" comments.
+
+name: Quality Gate
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+  pull_request_review:
+    types: [submitted]
+
+# CUSTOMIZE: add concurrency group to avoid duplicate runs
+concurrency:
+  group: quality-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  # CUSTOMIZE: set these to match your environment
+  OACP_HOME: /home/runner/oacp             # Customize for your CI runner. Do NOT use ~ (tilde won't expand in ${{ env.* }} expressions)
+  PROJECT_NAME: ""                        # e.g., my-project
+  OACP_DIR: /home/runner/oacp             # Path to OACP repo checkout. Do NOT use ~ (tilde won't expand in ${{ env.* }} expressions)
+
+jobs:
+  quality-gate:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      checks: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Checkout standards repo
+        uses: actions/checkout@v4
+        with:
+          # CUSTOMIZE: set to your oacp repo URL
+          repository: ""
+          path: standards
+          sparse-checkout: scripts/check_quality_gate.py
+
+      - name: Locate findings packet
+        id: find-packet
+        env:
+          PR_BRANCH: ${{ github.head_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PACKETS_DIR: ${{ env.OACP_HOME }}/projects/${{ env.PROJECT_NAME }}/packets/findings
+        run: |
+          # Strategy: look for the most recent findings packet whose name
+          # contains a topic matching the branch. Packets follow the naming
+          # convention: <YYYYMMDD>_<topic>_<owner>_r<round>.yaml
+          #
+          # CUSTOMIZE: adjust the matching logic if your naming differs.
+
+          # Sanitize branch name to extract a matchable topic slug
+          # e.g., "claude/fix-auth-bug" -> "fix_auth_bug"
+          topic=$(echo "$PR_BRANCH" | sed 's|^[^/]*/||' | tr '-' '_')
+
+          packet=""
+
+          # First: try exact topic match in packet filenames
+          if [ -d "$PACKETS_DIR" ]; then
+            packet=$(ls -t "$PACKETS_DIR"/*"${topic}"*.yaml 2>/dev/null | head -1 || true)
+          fi
+
+          # Second: check for a .packet_id file in the PR branch (optional convention)
+          if [ -z "$packet" ] && [ -f ".packet_id" ]; then
+            packet_id=$(cat .packet_id)
+            candidate="${PACKETS_DIR}/${packet_id}.yaml"
+            if [ -f "$candidate" ]; then
+              packet="$candidate"
+            fi
+          fi
+
+          if [ -z "$packet" ]; then
+            echo "status=skipped" >> "$GITHUB_OUTPUT"
+            echo "message=No findings packet found for branch '${PR_BRANCH}' (topic: ${topic}). Quality gate check skipped." >> "$GITHUB_OUTPUT"
+          else
+            echo "status=found" >> "$GITHUB_OUTPUT"
+            echo "packet=$packet" >> "$GITHUB_OUTPUT"
+            echo "Found packet: $packet"
+          fi
+
+      - name: Run quality gate
+        if: steps.find-packet.outputs.status == 'found'
+        id: gate
+        run: |
+          set +e
+          verdict=$(python3 ${{ env.OACP_DIR }}/scripts/check_quality_gate.py "${{ steps.find-packet.outputs.packet }}")
+          exit_code=$?
+          set -e
+
+          echo "verdict<<VERDICT_EOF" >> "$GITHUB_OUTPUT"
+          echo "$verdict" >> "$GITHUB_OUTPUT"
+          echo "VERDICT_EOF" >> "$GITHUB_OUTPUT"
+
+          if [ "$exit_code" -eq 0 ]; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Format and post PR comment
+        if: steps.find-packet.outputs.status == 'found'
+        uses: actions/github-script@v7
+        env:
+          VERDICT_JSON: ${{ steps.gate.outputs.verdict }}
+          PACKET_PATH: ${{ steps.find-packet.outputs.packet }}
+        with:
+          script: |
+            const verdict = JSON.parse(process.env.VERDICT_JSON);
+            const passed = verdict.gate_passed;
+            const icon = passed ? ':white_check_mark:' : ':x:';
+            const status = passed ? 'PASSED' : 'FAILED';
+
+            const body = [
+              `## ${icon} Quality Gate ${status}`,
+              '',
+              '| Metric | Count |',
+              '|--------|-------|',
+              `| Total findings | ${verdict.total_findings} |`,
+              `| Unresolved P0 | ${verdict.unresolved_p0} |`,
+              `| Unresolved blocking | ${verdict.unresolved_blocking} |`,
+              `| Fixed | ${verdict.fixed} |`,
+              `| Won't fix | ${verdict.wont_fix} |`,
+              '',
+              `Packet: \`${process.env.PACKET_PATH}\``,
+              '',
+              '_Generated by [OACP](https://github.com/<YOUR_ORG>/oacp) quality gate._',
+            ].join('\n');
+
+            // Update or create the comment (avoid duplicates)
+            const marker = '<!-- quality-gate-comment -->';
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+
+            const fullBody = `${marker}\n${body}`;
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: fullBody,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: fullBody,
+              });
+            }
+
+      - name: Post skip comment
+        if: steps.find-packet.outputs.status == 'skipped'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = '<!-- quality-gate-comment -->';
+            const body = `${marker}\n:information_source: ${{ steps.find-packet.outputs.message }}`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body,
+              });
+            }
+
+      - name: Set check status
+        if: steps.find-packet.outputs.status == 'found'
+        run: |
+          if [ "${{ steps.gate.outputs.passed }}" = "true" ]; then
+            echo "Quality gate passed."
+            exit 0
+          else
+            echo "Quality gate FAILED. See PR comment for details."
+            exit 1
+          fi

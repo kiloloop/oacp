@@ -1,0 +1,133 @@
+# Packet State Machine
+#
+# Defines valid states and transitions for the review/fix packet lifecycle.
+# Reference: docs/protocol/multi_agent_shared_workspace.md
+#
+# A packet moves through these states as implementer and reviewer
+# collaborate on a change set. Max 2 async rounds before escalation.
+
+version: "0.1.0"
+
+# ── States ───────────────────────────────────────────────────────────────────
+
+states:
+  submitted:
+    description: "Implementer has created and filled the Review Packet"
+    required_fields:
+      - "packet_id"
+      - "scope"
+      - "risk_map"
+      - "validation_results"
+      - "rollback_notes"
+    entered_by: "implementer"
+
+  in_review:
+    description: "QA/Reviewer is evaluating the Review Packet"
+    required_fields: []
+    entered_by: "reviewer"
+
+  findings_returned:
+    description: "Reviewer has submitted a batched Findings Packet"
+    required_fields:
+      - "findings[].severity"
+      - "findings[].blocking"
+      - "findings[].status"
+    entered_by: "reviewer"
+
+  fixing:
+    description: "Implementer is addressing findings from the current round"
+    required_fields: []
+    entered_by: "implementer"
+
+  merge_decision:
+    description: "Implementer has published a Merge Decision with resolution table"
+    required_fields:
+      - "resolution_table"
+      - "post_fix_validation"
+      - "remaining_blockers"
+    entered_by: "implementer"
+
+  merged:
+    description: "Change is merged; quality gate passed"
+    required_fields: []
+    entered_by: "implementer"
+    terminal: true
+
+  escalated:
+    description: "Unresolved blockers after round 2; requires synchronous decision"
+    required_fields:
+      - "escalation_reason"
+    entered_by: "implementer"
+    terminal: true
+
+# ── Conversation Threading ───────────────────────────────────────────────────
+#
+# When a packet transitions involve a handoff between agents, the triggering
+# inbox message SHOULD include a conversation_id and context_keys so the
+# receiving agent can maintain continuity. The conversation_id propagates
+# across the packet lifecycle — all related inbox messages within a review
+# cycle SHOULD reuse the same conversation_id.
+#
+# See docs/protocol/inbox_outbox.md#conversation-threading for field details.
+
+# ── Transitions ──────────────────────────────────────────────────────────────
+
+transitions:
+  - from: "submitted"
+    to: "in_review"
+    trigger: "Reviewer picks up the Review Packet"
+    role: "reviewer"
+
+  - from: "in_review"
+    to: "findings_returned"
+    trigger: "Reviewer submits batched Findings Packet"
+    role: "reviewer"
+
+  - from: "findings_returned"
+    to: "fixing"
+    trigger: "Implementer begins addressing findings"
+    role: "implementer"
+
+  - from: "fixing"
+    to: "merge_decision"
+    trigger: "Implementer publishes Merge Decision"
+    role: "implementer"
+
+  - from: "merge_decision"
+    to: "merged"
+    trigger: "Quality gate passes and QA signoff recorded with verdict approved"
+    role: "implementer"
+    guard: "quality_gate_passed AND qa_signoff_approved"
+
+  - from: "merge_decision"
+    to: "in_review"
+    trigger: "Round 2 needed — reviewer re-evaluates"
+    role: "reviewer"
+    guard: "round < 2"
+
+  - from: "merge_decision"
+    to: "escalated"
+    trigger: "Unresolved blockers remain after round 2"
+    role: "implementer"
+    guard: "round >= 2 AND has_unresolved_blockers"
+
+# ── Quality Gate ─────────────────────────────────────────────────────────────
+#
+# Evaluated at merge_decision -> merged transition.
+# See scripts/check_quality_gate.py for machine-readable enforcement.
+
+quality_gate:
+  merge_ready_when:
+    - "no unresolved P0 findings"
+    - "no unresolved blocking findings (unless explicitly waived)"
+    - "deferred non-blocking findings are captured in review_lgtm.nits with owner + tracking_ref"
+    - "all requested validation commands recorded with outcomes"
+    - "deploy-affecting changes include rollback notes"
+    - "QA signoff recorded with verdict approved"
+
+# ── Round Limits ─────────────────────────────────────────────────────────────
+
+rounds:
+  max_async: 2
+  escalation_after: 2
+  one_findings_packet_per_reviewer_per_round: true

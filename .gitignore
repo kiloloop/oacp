@@ -1,0 +1,9 @@
+.oacp
+.agent-hub
+AGENTS.md
+CLAUDE.md
+.worktrees/
+__pycache__/
+*.pyc
+build/
+dist/

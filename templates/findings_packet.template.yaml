@@ -1,0 +1,41 @@
+packet_id: ""
+source_review_packet: ""
+reviewer: ""
+round: 1
+created_at_utc: ""
+summary:
+  verdict: ""
+  blocking_count: 0
+  non_blocking_count: 0
+findings:
+  - id: "F-001"
+    severity: "P1"
+    blocking: true
+    status: "open"
+    area: "code"
+    file: ""
+    line: null
+    repro: ""
+    expected: ""
+    evidence: ""
+    # Optional: structured MCP evidence (see docs/protocol/mcp_integration.md)
+    # evidence_attachments:
+    #   - type: "query_result|screenshot|recording|generated_image|forecast|command_output"
+    #     tool: "mcp_bigquery_execute_sql"
+    #     path: "evidence/F-001_description.json"
+    #     summary: "Human-readable summary of what this evidence shows"
+    recommendation: ""
+qa_validation:
+  commands_run:
+    - command: ""
+      result: "pass|fail|warn"
+      # mcp_tool: ""           # Optional: MCP tool name if this was an MCP invocation
+      # attachments:           # Optional: structured output files
+      #   - type: "query_result"
+      #     path: "evidence/validation_result.json"
+      #     summary: ""
+      notes: ""
+  deployment_check:
+    ready: false
+    rollback_verified: false
+    notes: ""

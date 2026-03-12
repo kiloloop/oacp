@@ -1,0 +1,16 @@
+id: ""
+from: ""
+to: ""
+type: "task_request"  # task_request | question | notification | follow_up | handoff | handoff_complete | review_request | review_feedback | review_addressed | review_lgtm
+priority: "P2"
+created_at_utc: ""
+related_packet: ""
+related_pr: ""
+# Conversation threading (optional) — see docs/protocol/inbox_outbox.md#conversation-threading
+conversation_id: ""         # format: conv-<YYYYMMDD>-<agent>-<seq>
+parent_message_id: ""       # id of the message this replies to
+context_keys: |             # key items from prior conversation for continuity
+  Prior context summary here.
+subject: ""
+body: |
+  Message content here.

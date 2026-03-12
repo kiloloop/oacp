@@ -1,0 +1,39 @@
+# Role Definition Template
+# Copy this file and fill in every CUSTOMIZE field for each agent role.
+
+# CUSTOMIZE: role name (e.g., implementer, reviewer, deployer, qa)
+name: ""
+
+# CUSTOMIZE: one-line summary of what this role does
+description: ""
+
+# CUSTOMIZE: areas this role focuses on (e.g., backend, frontend, testing, infra)
+focus_areas: []
+
+# CUSTOMIZE: skill IDs from the project's skills_manifest
+skills: []
+
+# CUSTOMIZE: paths to guardrail files that apply to this role
+# Common guardrails live in templates/guardrails/
+guardrails:
+  - "templates/guardrails/safe_commands.template.md"
+  - "templates/guardrails/secrets_rules.template.md"
+  - "templates/guardrails/coding_standards.template.md"
+  # CUSTOMIZE: add role-specific guardrails here
+
+# CUSTOMIZE: checklist items that must all pass before this role's work is considered done
+definition_of_done: []
+  # Examples:
+  # - "All tests pass"
+  # - "No unresolved P0 findings"
+  # - "Code reviewed and approved"
+  # - "Memory files updated"
+
+# CUSTOMIZE: runtime-specific configuration paths for each agent platform
+runtime_mappings:
+  # CUSTOMIZE: path to Claude agent template or CLAUDE.md override
+  claude: ""
+  # CUSTOMIZE: path to Codex task config
+  codex: ""
+  # CUSTOMIZE: path to Gemini workflow definition
+  gemini: ""

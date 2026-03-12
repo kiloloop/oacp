@@ -1,0 +1,90 @@
+# Skills Manifest Schema
+#
+# Canonical schema definition for skills manifest files.
+# Template: templates/skills_manifest.template.yaml
+#
+# Skills manifests declare what capabilities agents in a project possess,
+# organized into tiers (core vs optional) with runtime compatibility info.
+
+version: "0.1.0"
+
+# ── Schema ───────────────────────────────────────────────────────────────────
+
+schema:
+  top_level:
+    version:
+      type: string
+      required: true
+      description: "Manifest schema version (semver)"
+    project:
+      type: string
+      required: true
+      description: "Project identifier"
+    skills:
+      type: object
+      required: true
+      description: "Skill declarations grouped by tier"
+
+  skills:
+    core:
+      type: "list of skill"
+      required: true
+      description: "Skills required for all agents in this project"
+    optional:
+      type: "list of skill"
+      required: true
+      description: "Specialized skills assigned to specific roles"
+
+  skill:
+    id:
+      type: string
+      required: true
+      description: "Unique skill identifier (snake_case)"
+      examples: ["code_review", "implementation", "testing", "deployment"]
+    description:
+      type: string
+      required: true
+      description: "What this skill covers"
+    compatible_runtimes:
+      type: "list of string"
+      required: true
+      description: "Runtimes that support this skill"
+      allowed_values: ["claude", "codex", "gemini"]
+
+# ── Tier Semantics ───────────────────────────────────────────────────────────
+
+tiers:
+  core:
+    description: "Every agent in the project must have these skills"
+    enforcement: "Validation scripts should warn if an agent's role_definition does not include all core skills"
+  optional:
+    description: "Specialized skills assigned per-role via role_definition.template.yaml"
+    enforcement: "No enforcement — informational for capability discovery"
+
+# ── Relationship to Other Templates ──────────────────────────────────────────
+
+references:
+  role_definition: "templates/roles/role_definition.template.yaml"
+  role_baseline: "templates/roles/role_baseline.template.md"
+  skills_manifest_template: "templates/skills_manifest.template.yaml"
+
+# ── Example ──────────────────────────────────────────────────────────────────
+
+example:
+  version: "0.1.0"
+  project: "my-project"
+  skills:
+    core:
+      - id: "code_review"
+        description: "Review code changes for correctness, security, and style"
+        compatible_runtimes: ["claude", "codex", "gemini"]
+      - id: "testing"
+        description: "Write and run tests, report results"
+        compatible_runtimes: ["claude", "codex"]
+    optional:
+      - id: "deployment"
+        description: "Deploy to staging/production, manage rollbacks"
+        compatible_runtimes: ["claude", "gemini"]
+      - id: "security_audit"
+        description: "Scan for vulnerabilities, review auth flows"
+        compatible_runtimes: ["claude", "gemini"]

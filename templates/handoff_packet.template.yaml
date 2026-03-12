@@ -1,0 +1,27 @@
+# Structured handoff packet template
+# Copy into a project packet folder (or use `make handoff`) before sending.
+
+source_agent: "<source_agent>"
+target_agent: "<target_agent>"
+intent: "<intent>"
+
+artifacts_to_review:
+  - "<file path or PR reference>"
+
+definition_of_done:
+  - "<explicit completion criterion>"
+
+context_bundle:
+  files_touched:
+    - path: "<path>"
+      rationale: "<why changed>"
+  decisions_made:
+    - decision: "<decision made>"
+      alternatives_considered:
+        - "<alternative considered>"
+  blockers_hit:
+    - blocker: "<blocker encountered>"
+      workarounds_attempted:
+        - "<workaround attempted>"
+  suggested_next_steps:
+    - "<next step>"

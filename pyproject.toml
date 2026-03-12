@@ -1,0 +1,66 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "oacp-cli"
+version = "0.1.0rc1"
+description = "Open Agent Coordination Protocol CLI for file-based multi-agent workflows"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [
+  { name = "Kiloloop" },
+]
+dependencies = [
+  "PyYAML>=6.0",
+]
+keywords = ["agents", "cli", "coordination", "oacp", "workflow"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://github.com/kiloloop/oacp"
+Repository = "https://github.com/kiloloop/oacp"
+Documentation = "https://github.com/kiloloop/oacp/blob/main/SPEC.md"
+Issues = "https://github.com/kiloloop/oacp/issues"
+
+[project.scripts]
+oacp = "oacp.cli:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.11.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["oacp"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"scripts/codex_session_init.py" = "oacp/_scripts/codex_session_init.py"
+"scripts/_oacp_env.py" = "oacp/_scripts/_oacp_env.py"
+"scripts/handoff_schema.py" = "oacp/_scripts/handoff_schema.py"
+"scripts/oacp_doctor.py" = "oacp/_scripts/oacp_doctor.py"
+"scripts/init_project_workspace.py" = "oacp/_scripts/init_project_workspace.py"
+"scripts/send_inbox_message.py" = "oacp/_scripts/send_inbox_message.py"
+"scripts/session_lifecycle_hooks.py" = "oacp/_scripts/session_lifecycle_hooks.py"
+"scripts/validate_message.py" = "oacp/_scripts/validate_message.py"
+
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

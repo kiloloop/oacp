@@ -1,0 +1,67 @@
+# agent_card.template.yaml — per-agent metadata card (A2A-compatible)
+#
+# Copy to ~/oacp/projects/<project>/agents/<name>/agent_card.yaml
+# and fill in. One card per agent per project.
+#
+# Bridges the Google A2A Agent Card spec (v0.3.0) with OACP's
+# file-based inbox protocol. Static identity lives here; dynamic state
+# lives in status.yaml (separate file, separate lifecycle).
+
+version: "0.2.0"
+
+# ── Identity ─────────────────────────────────────────────────────────────────
+
+name: ""                          # CUSTOMIZE: agent name (matches inbox/outbox directory)
+runtime: ""                       # CUSTOMIZE: claude | codex | gemini | human
+model: ""                         # CUSTOMIZE: model id (e.g., claude-opus-4-6, gpt-5-codex)
+description: ""                   # CUSTOMIZE: one-line role summary
+
+# ── Skills ───────────────────────────────────────────────────────────────────
+# Structured skill declarations (A2A-compatible AgentSkill shape).
+# Each skill has an id, name, description, and tags for discoverability.
+
+skills:
+  # - id: code_review
+  #   name: Code Review
+  #   description: Reviews PRs for correctness, security, and style
+  #   tags: [review, qa]
+
+# ── Capabilities ─────────────────────────────────────────────────────────────
+# Runtime capabilities from the canonical 13-key set (runtime_capabilities.md).
+
+capabilities:
+  tools: []                       # e.g., ["Bash", "Read", "Edit", "Grep", "Glob", "Write"]
+  languages: []                   # e.g., ["python", "typescript", "bash"]
+  domains: []                     # e.g., ["backend", "infra", "trading"]
+
+# ── Permissions ──────────────────────────────────────────────────────────────
+
+permissions:
+  allowed_dirs: []                # absolute paths this agent may read/write
+  denied_dirs: []                 # absolute paths this agent must not touch
+  allowed_commands: []            # shell commands this agent may execute
+  denied_commands: []             # shell commands this agent must not execute
+  github_operations: []           # e.g., ["pr_comment", "pr_approve", "pr_merge", "issue_create"]
+  max_cost_usd_per_run: null      # optional spending cap per headless invocation
+
+# ── Scheduling ───────────────────────────────────────────────────────────────
+
+availability:
+  schedule: "always"              # "always" | cron expression | "manual"
+  max_concurrent_tasks: 1         # how many tasks this agent handles in parallel
+  timezone: "UTC"                 # IANA timezone for schedule interpretation
+
+# ── Protocol ─────────────────────────────────────────────────────────────────
+
+protocol:
+  inbox_path: ""                  # e.g., agents/<name>/inbox/
+  outbox_path: ""                 # e.g., agents/<name>/outbox/
+  supported_message_types:        # inbox message types this agent processes
+    - task_request
+    - question
+    - notification
+    - handoff
+    - review_request
+    - review_feedback
+    - review_lgtm
+    - follow_up
