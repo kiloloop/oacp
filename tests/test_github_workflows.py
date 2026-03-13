@@ -50,13 +50,29 @@ def test_release_workflow_publishes_with_trusted_publishing() -> None:
     publish_job = workflow["jobs"]["publish-pypi"]
     assert publish_job["environment"]["name"] == "pypi"
     assert publish_job["permissions"]["id-token"] == "write"
-    assert publish_job["steps"][0]["uses"].startswith("actions/download-artifact@")
-    assert publish_job["steps"][-1]["uses"].startswith("pypa/gh-action-pypi-publish@")
+    publish_step_names = {step["name"]: step for step in publish_job["steps"]}
+    assert publish_step_names["Download release artifacts"]["uses"].startswith(
+        "actions/download-artifact@"
+    )
+    assert publish_step_names["Check whether version already exists on PyPI"]["id"] == (
+        "check-pypi-version"
+    )
+    assert publish_step_names["Publish to PyPI"]["if"] == (
+        "steps.check-pypi-version.outputs.version_exists != 'true'"
+    )
+    assert publish_step_names["Publish to PyPI"]["uses"].startswith(
+        "pypa/gh-action-pypi-publish@"
+    )
+    assert publish_step_names["Skip duplicate PyPI publish"]["if"] == (
+        "steps.check-pypi-version.outputs.version_exists == 'true'"
+    )
 
     release_job = workflow["jobs"]["github-release"]
-    assert set(release_job["needs"]) == {"build", "publish-pypi"}
+    assert release_job["needs"] == "build"
     assert release_job["permissions"]["contents"] == "write"
     release_step_names = {step["name"]: step for step in release_job["steps"]}
     assert release_step_names["Check out repository"]["uses"].startswith("actions/checkout@")
     assert release_step_names["Download release artifacts"]["uses"].startswith("actions/download-artifact@")
-    assert "gh release create" in release_step_names["Create GitHub Release"]["run"]
+    assert "gh release view" in release_step_names["Create or update GitHub Release"]["run"]
+    assert "gh release upload" in release_step_names["Create or update GitHub Release"]["run"]
+    assert "gh release create" in release_step_names["Create or update GitHub Release"]["run"]
