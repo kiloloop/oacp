@@ -1,6 +1,10 @@
 # OACP — Open Agent Coordination Protocol
 
+[![PyPI](https://img.shields.io/pypi/v/oacp-cli)](https://pypi.org/project/oacp-cli/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Claude Code](https://img.shields.io/badge/Runtime-Claude_Code-6B4FBB.svg)](https://claude.ai/code)
+[![Codex](https://img.shields.io/badge/Runtime-Codex-74AA9C.svg)](https://openai.com/index/codex/)
+[![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen)](https://github.com/kiloloop/oacp/pulls)
 
 **Empowering solo founders to coordinate AI agents, with human-in-the-loop for control.**
 
