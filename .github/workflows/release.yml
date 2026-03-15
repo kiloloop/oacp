@@ -40,8 +40,9 @@ jobs:
       - name: Build wheel and sdist
         run: python -m build
 
+      # upload-artifact is still on v6; download-artifact moved to v7 for Node 24.
       - name: Upload release artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: python-package-distributions
           path: dist/
@@ -58,18 +59,57 @@ jobs:
 
     steps:
       - name: Download release artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: python-package-distributions
           path: dist/
 
+      - name: Check whether version already exists on PyPI
+        id: check-pypi-version
+        env:
+          # Keep this in sync with [project.name] in pyproject.toml.
+          PACKAGE_NAME: oacp-cli
+          PACKAGE_VERSION: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          package = os.environ["PACKAGE_NAME"]
+          version = os.environ["PACKAGE_VERSION"].removeprefix("v")
+          url = f"https://pypi.org/pypi/{package}/json"
+
+          try:
+              with urllib.request.urlopen(url, timeout=30) as response:
+                  releases = json.load(response).get("releases", {})
+          except urllib.error.HTTPError as exc:
+              if exc.code == 404:
+                  releases = {}
+              else:
+                  raise
+
+          version_exists = version in releases
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"version_exists={'true' if version_exists else 'false'}\n")
+
+          if version_exists:
+              print(f"PyPI already has {package} {version}; skipping publish.")
+          else:
+              print(f"PyPI does not have {package} {version}; proceeding with publish.")
+          PY
+
       - name: Publish to PyPI
+        if: steps.check-pypi-version.outputs.version_exists != 'true'
         uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
 
+      - name: Skip duplicate PyPI publish
+        if: steps.check-pypi-version.outputs.version_exists == 'true'
+        run: echo "PyPI already has ${GITHUB_REF_NAME#v}; skipping upload."
+
   github-release:
-    needs:
-      - build
-      - publish-pypi
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -78,13 +118,19 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
+      # download-artifact v7 is the current Node 24-compatible major.
       - name: Download release artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: python-package-distributions
           path: dist/
 
-      - name: Create GitHub Release
+      - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" dist/* --generate-notes --verify-tag
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* --generate-notes --verify-tag
+          fi

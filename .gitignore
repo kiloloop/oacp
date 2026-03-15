@@ -1,7 +1,9 @@
 .oacp
 .agent-hub
+.agents/
 AGENTS.md
 CLAUDE.md
+GEMINI.md
 .worktrees/
 __pycache__/
 *.pyc
