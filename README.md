@@ -6,6 +6,8 @@
 [![Codex](https://img.shields.io/badge/Runtime-Codex-74AA9C.svg)](https://openai.com/index/codex/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen)](https://github.com/kiloloop/oacp/pulls)
 
+> **[Try the quickstart →](examples/quickstart/)** — send your first message to an AI agent in 5 minutes.
+
 **Empowering solo founders to coordinate AI agents, with human-in-the-loop for control.**
 
 A file-based coordination protocol for multi-agent engineering workflows. OACP defines the message formats, state machines, review processes, and safety rules that enable AI agents on different runtimes to collaborate asynchronously through a shared filesystem.
@@ -31,6 +33,43 @@ When multiple AI agents work on the same codebase, they need a way to:
 - **Stay safe** — baseline safety rules for git operations, credential scoping, and scope discipline
 
 OACP solves this with a filesystem-based protocol that requires no server, no database, and no vendor lock-in. Agents read and write YAML files in a shared directory — that's it.
+
+## Where OACP Fits
+
+Three protocols are shaping multi-agent development. They solve different problems at different layers:
+
+```
+┌─────────────────────────────────────────────┐
+│  A2A — Agent discovery & remote messaging   │  internet-scale
+├─────────────────────────────────────────────┤
+│  OACP — Agent coordination & workflows      │  local filesystem
+├─────────────────────────────────────────────┤
+│  MCP — Agent-to-tool integration            │  tool access
+└─────────────────────────────────────────────┘
+```
+
+**[MCP](https://modelcontextprotocol.io/)** gives agents access to tools and data sources — databases, APIs, file systems. It defines how an agent *calls a tool*.
+
+**[A2A](https://github.com/a2aproject/A2A)** lets agents discover and communicate with each other across the internet. HTTP-based, enterprise-grade, backed by 150+ organizations under the Linux Foundation.
+
+**OACP** coordinates agents working together on the same machine. File-based, zero-infra, designed for dev teams and CI pipelines.
+
+### OACP vs A2A
+
+Both coordinate agents — but for different topologies:
+
+| | A2A | OACP |
+|---|---|---|
+| **Transport** | HTTP/HTTPS — always-on servers | Filesystem — read/write files |
+| **Best for** | Cross-org, internet-routable agents | Local teams, dev machines, CI |
+| **Infrastructure** | TLS, auth, HTTP endpoints | A shared directory |
+| **Offline support** | Agent must be reachable | Native — messages wait in inbox |
+| **Audit trail** | Requires log infrastructure | The inbox directory *is* the log |
+| **Setup** | Deploy servers + configure networking | `oacp init my-project` |
+
+They complement each other. A2A connects agents across the internet. OACP coordinates agents on your machine. A gateway between OACP inboxes and A2A endpoints is a natural bridge — and A2A's own community is [exploring inbox patterns](https://github.com/a2aproject/A2A/discussions/792) that validate this design.
+
+**OACP + MCP work together.** An agent can use MCP to access tools (databases, APIs) while using OACP to coordinate with other agents (review loops, task dispatch, shared memory). Different layers, no conflict.
 
 ## Install
 
@@ -179,7 +218,8 @@ make preflight
 ## Documentation
 
 - [SPEC.md](SPEC.md) — Full protocol specification
-- [QUICKSTART.md](QUICKSTART.md) — 5-minute getting started guide
+- [examples/quickstart/](examples/quickstart/) — Hands-on tutorial: send a message to an AI agent
+- [QUICKSTART.md](QUICKSTART.md) — CLI reference walkthrough
 - [docs/guides/setup.md](docs/guides/setup.md) — Detailed setup guide
 - [docs/guides/adoption.md](docs/guides/adoption.md) — Adoption guide (minimum → full)
 - [docs/protocol/](docs/protocol/) — Individual protocol specs
