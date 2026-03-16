@@ -110,7 +110,7 @@ def _standards_version() -> str:
             return path.read_text(encoding="utf-8").splitlines()[0].strip()
         except (FileNotFoundError, IndexError):
             continue
-    return "0.5.0"
+    return "0.1.0"
 
 
 def _project_facts_template() -> str:
