@@ -36,13 +36,15 @@ OACP solves this with a filesystem-based protocol that requires no server, no da
 
 ## Where OACP Fits
 
-Three protocols are shaping multi-agent development. They solve different problems at different layers:
+Four protocols are shaping multi-agent development. They solve different problems at different layers:
 
 ```
 ┌─────────────────────────────────────────────┐
 │  A2A — Agent discovery & remote messaging   │  internet-scale
 ├─────────────────────────────────────────────┤
-│  OACP — Agent coordination & workflows      │  local filesystem
+│  OACP — Async workflow messaging            │  local filesystem
+├─────────────────────────────────────────────┤
+│  ACP — Client ↔ agent sessions              │  IDE / editor
 ├─────────────────────────────────────────────┤
 │  MCP — Agent-to-tool integration            │  tool access
 └─────────────────────────────────────────────┘
@@ -50,26 +52,26 @@ Three protocols are shaping multi-agent development. They solve different proble
 
 **[MCP](https://modelcontextprotocol.io/)** gives agents access to tools and data sources — databases, APIs, file systems. It defines how an agent *calls a tool*.
 
+**[ACP](https://github.com/agentclientprotocol/agent-client-protocol)** (Agent Client Protocol, by Zed Industries) connects clients to coding agents. JSON-RPC, primarily over stdio today. Adopted by Zed, JetBrains, Neovim, and 28+ agents in its registry.
+
 **[A2A](https://github.com/a2aproject/A2A)** lets agents discover and communicate with each other across the internet. HTTP-based, enterprise-grade, backed by 150+ organizations under the Linux Foundation.
 
-**OACP** coordinates agents working together on the same machine. File-based, zero-infra, designed for dev teams and CI pipelines.
+**OACP** is the async messaging layer for multi-agent workflows — typed workflow messages (task dispatch, code review, handoff, brainstorm) over persistent transport that survives crashes. Zero infrastructure required.
 
-### OACP vs A2A
+### How they compare
 
-Both coordinate agents — but for different topologies:
+| | MCP | ACP | A2A | OACP |
+|---|---|---|---|---|
+| **Solves** | Tool access | Client ↔ agent sessions | Agent discovery + networking | Async workflow coordination |
+| **Transport** | JSON-RPC (stdio/HTTP) | JSON-RPC (stdio; HTTP draft) | HTTP/HTTPS | Filesystem (YAML) |
+| **Best for** | Connecting agents to APIs, DBs, files | IDE ↔ coding agent interaction | Cross-org, internet-routable agents | Local teams, dev machines, CI |
+| **Infrastructure** | MCP server per tool | ACP-capable client + agent | TLS, auth, HTTP endpoints | A shared directory |
+| **Offline support** | N/A (synchronous) | N/A (session-based) | Agent must be reachable | Native — messages wait in inbox |
+| **Setup** | Install MCP server | Use ACP-capable client + agent | Deploy servers + networking | `oacp init my-project` |
 
-| | A2A | OACP |
-|---|---|---|
-| **Transport** | HTTP/HTTPS — always-on servers | Filesystem — read/write files |
-| **Best for** | Cross-org, internet-routable agents | Local teams, dev machines, CI |
-| **Infrastructure** | TLS, auth, HTTP endpoints | A shared directory |
-| **Offline support** | Agent must be reachable | Native — messages wait in inbox |
-| **Audit trail** | Requires log infrastructure | The inbox directory *is* the log |
-| **Setup** | Deploy servers + configure networking | `oacp init my-project` |
+These protocols are **complementary, not competing**. An agent can use MCP to access tools, speak ACP for IDE integration, and check OACP inboxes for multi-agent coordination — different layers, no conflict.
 
-They complement each other. A2A connects agents across the internet. OACP coordinates agents on your machine. A gateway between OACP inboxes and A2A endpoints is a natural bridge — and A2A's own community is [exploring inbox patterns](https://github.com/a2aproject/A2A/discussions/792) that validate this design.
-
-**OACP + MCP work together.** An agent can use MCP to access tools (databases, APIs) while using OACP to coordinate with other agents (review loops, task dispatch, shared memory). Different layers, no conflict.
+A2A connects agents across the internet. OACP coordinates agents on your machine. A gateway between OACP inboxes and A2A endpoints is a natural bridge — and A2A's own community is [exploring inbox patterns](https://github.com/a2aproject/A2A/discussions/792) that validate this design.
 
 ## Install
 
@@ -158,12 +160,14 @@ See [QUICKSTART.md](QUICKSTART.md) for a complete 5-minute walkthrough.
 
 ## Scripts
 
-OACP ships 13 scripts — the key ones you'll use most:
+OACP ships kernel scripts — the key CLI commands you'll use most:
 
-- **`init_project_workspace.sh`** — create a new project workspace (the first script you run)
-- **`send_inbox_message.py`** — send protocol-compliant messages between agents
-- **`preflight.py`** — unified quality checks (CI runs this on every PR)
-- **`oacp_doctor.py`** — environment and workspace health check
+- **`oacp init`** — create a new project workspace (the first command you run)
+- **`oacp add-agent`** — add an agent to an existing project workspace
+- **`oacp setup`** — generate runtime-specific config files (Claude, Codex, Gemini)
+- **`oacp send`** — send protocol-compliant messages between agents
+- **`oacp doctor`** — environment and workspace health check
+- **`oacp validate`** — validate inbox/outbox YAML messages
 
 Run `make help` to see all available Makefile targets, or see [SPEC.md](SPEC.md) for the full script inventory.
 
