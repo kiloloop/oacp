@@ -103,7 +103,7 @@ INBOX_DIR="${OACP_HOME}/projects/${PROJECT}/agents/${AGENT_NAME}/inbox"
 ```
 
 ```bash
-python3 scripts/send_inbox_message.py ${PROJECT} \
+oacp send ${PROJECT} \
   --from ${AGENT_NAME} --to ${RECIPIENT} ...
 ```
 
@@ -137,7 +137,7 @@ Put runtime-specific execution details in `## Runtime Adapters`:
 | File reading | Read tool | `cat` or inline python |
 | YAML parsing | Read tool (raw text, LLM parses) | `python3 yaml.safe_load` |
 | Sandbox | `dangerouslyDisableSandbox: true` for `gh`/`git`/`rm` | Use default permissions; request escalation only when required by environment policy |
-| Subagent spawning | Task tool with model/mode params | Not applicable (single session) |
+| Subagent spawning | Task tool with model/mode params | Native multi-agent tools (`spawn_agent`, `send_input`, `wait_agent`, `close_agent`) |
 | Skill invocation | Skill tool (`/review-loop-reviewer`) | Direct command reference |
 
 ### 4. Action tables are universal

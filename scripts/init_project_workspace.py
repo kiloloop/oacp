@@ -8,9 +8,21 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 from pathlib import Path
 import sys
 from typing import Dict, List, Optional, Sequence, Tuple
+
+DEFAULT_AGENTS = ("claude", "codex", "gemini")
+_AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _validate_agent_name(name: str) -> None:
+    if not _AGENT_NAME_RE.match(name):
+        raise ValueError(
+            f"Invalid agent name '{name}': must start with alphanumeric, "
+            f"contain only [A-Za-z0-9._-], and be 1-64 chars"
+        )
 
 
 DEFAULT_PROJECT_FACTS = """# Project Facts
@@ -24,16 +36,7 @@ DEFAULT_PROJECT_FACTS = """# Project Facts
 - Shared handoff protocol version: v0.2.0
 """
 
-DIRECTORIES = (
-    "agents/codex/inbox",
-    "agents/codex/outbox",
-    "agents/codex/dead_letter",
-    "agents/claude/inbox",
-    "agents/claude/outbox",
-    "agents/claude/dead_letter",
-    "agents/gemini/inbox",
-    "agents/gemini/outbox",
-    "agents/gemini/dead_letter",
+STATIC_DIRECTORIES = (
     "packets/review",
     "packets/findings",
     "packets/test",
@@ -46,16 +49,7 @@ DIRECTORIES = (
     "logs",
 )
 
-GITKEEP_PATHS = (
-    "agents/codex/inbox/.gitkeep",
-    "agents/codex/outbox/.gitkeep",
-    "agents/codex/dead_letter/.gitkeep",
-    "agents/claude/inbox/.gitkeep",
-    "agents/claude/outbox/.gitkeep",
-    "agents/claude/dead_letter/.gitkeep",
-    "agents/gemini/inbox/.gitkeep",
-    "agents/gemini/outbox/.gitkeep",
-    "agents/gemini/dead_letter/.gitkeep",
+STATIC_GITKEEP_PATHS = (
     "packets/review/.gitkeep",
     "packets/findings/.gitkeep",
     "packets/test/.gitkeep",
@@ -64,6 +58,26 @@ GITKEEP_PATHS = (
     "merges/.gitkeep",
     "artifacts/.gitkeep",
 )
+
+AGENT_SUBDIRS = ("inbox", "outbox", "dead_letter")
+
+
+def _agent_dirs(agents: Sequence[str]) -> List[str]:
+    """Return directory paths for the given agents."""
+    dirs: List[str] = []
+    for agent in agents:
+        for sub in AGENT_SUBDIRS:
+            dirs.append(f"agents/{agent}/{sub}")
+    return dirs
+
+
+def _agent_gitkeeps(agents: Sequence[str]) -> List[str]:
+    """Return .gitkeep paths for the given agents."""
+    keeps: List[str] = []
+    for agent in agents:
+        for sub in AGENT_SUBDIRS:
+            keeps.append(f"agents/{agent}/{sub}/.gitkeep")
+    return keeps
 
 
 def _parse_link(value: str) -> Tuple[str, str]:
@@ -92,6 +106,15 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         default=[],
         metavar="SRC:DST",
         help="Create artifacts/DST -> REPO/SRC symlink (repeatable; requires --repo)",
+    )
+    parser.add_argument(
+        "--agents",
+        default=",".join(DEFAULT_AGENTS),
+        help=(
+            "Comma-separated list of agents to create "
+            f"(default: {','.join(DEFAULT_AGENTS)}). "
+            'Pass "" for none.'
+        ),
     )
     return parser.parse_args(list(argv))
 
@@ -141,14 +164,19 @@ def initialize_workspace(
     oacp_root: Path,
     repo_dir: Optional[Path] = None,
     artifact_links: Sequence[Tuple[str, str]] = (),
+    agents: Sequence[str] = DEFAULT_AGENTS,
 ) -> Dict[str, object]:
     _validate_project_name(project_name)
+    for agent in agents:
+        _validate_agent_name(agent)
     project_root = oacp_root / "projects" / project_name
 
-    for relative_dir in DIRECTORIES:
+    all_dirs = _agent_dirs(agents) + list(STATIC_DIRECTORIES)
+    for relative_dir in all_dirs:
         (project_root / relative_dir).mkdir(parents=True, exist_ok=True)
 
-    for relative_path in GITKEEP_PATHS:
+    all_gitkeeps = _agent_gitkeeps(agents) + list(STATIC_GITKEEP_PATHS)
+    for relative_path in all_gitkeeps:
         (project_root / relative_path).touch()
 
     _write_if_missing(project_root / "memory" / "project_facts.md", _project_facts_template())
@@ -206,12 +234,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     oacp_root = resolve_oacp_home()
     repo_dir = Path(args.repo).expanduser().resolve() if args.repo else None
 
+    agents_list: Sequence[str] = (
+        [a.strip() for a in args.agents.split(",") if a.strip()]
+        if args.agents
+        else ()
+    )
+
     try:
         result = initialize_workspace(
             args.project_name,
             oacp_root=oacp_root,
             repo_dir=repo_dir,
             artifact_links=args.link,
+            agents=agents_list,
         )
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)

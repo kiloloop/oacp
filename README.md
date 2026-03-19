@@ -14,6 +14,30 @@ A file-based coordination protocol for multi-agent engineering workflows. OACP d
 
 **OACP is not a framework or SDK.** It is a set of conventions, YAML schemas, and shell scripts that any agent runtime can implement — Claude, Codex, Gemini, or your own.
 
+## Try it now
+
+See if your machine is ready for multi-agent workflows — no project setup required:
+
+```bash
+pip install oacp-cli
+oacp doctor
+```
+
+```
+[-] Environment
+    [+] git — git version 2.47.0
+    [+] python3 — Python 3.12.4
+    [+] gh — gh version 2.62.0 (2024-11-14)
+    [+] ruff — ruff 0.8.1
+    [-] shellcheck — not installed (optional)
+        Install: brew install shellcheck
+    [+] pyyaml — available
+
+No issues found.
+```
+
+Doctor checks your CLI tools, and with `--project` it audits workspace structure, inbox health, YAML schemas, and agent status. See the [full doctor guide](docs/guides/doctor.md) for details.
+
 ### Features
 
 - **Inbox/outbox messaging** — async YAML-based communication with threading, broadcast, and expiry
@@ -224,6 +248,7 @@ make preflight
 - [SPEC.md](SPEC.md) — Full protocol specification
 - [examples/quickstart/](examples/quickstart/) — Hands-on tutorial: send a message to an AI agent
 - [QUICKSTART.md](QUICKSTART.md) — CLI reference walkthrough
+- [docs/guides/doctor.md](docs/guides/doctor.md) — Doctor guide: checks, sample output, common fixes
 - [docs/guides/setup.md](docs/guides/setup.md) — Detailed setup guide
 - [docs/guides/adoption.md](docs/guides/adoption.md) — Adoption guide (minimum → full)
 - [docs/protocol/](docs/protocol/) — Individual protocol specs

@@ -20,7 +20,7 @@ Cross-agent baseline safety rules. All agents (Claude, Codex, Gemini) follow the
 
 - **Delete inbox messages immediately after processing.** For messages that require a reply (`task_request`, `question`, `review_request`), "processed" means reply sent. For `notification` messages, "processed" means read and acknowledged — no reply needed, delete right away. Do not let processed messages accumulate in the inbox.
 - **Never silently consume a message that expects a response** — `task_request`, `question`, and `review_request` always require a reply. `notification` is no-response by default, but requires ack/reply when it reports findings or issues.
-- **Always reply** using `send_inbox_message.py` with `--parent-message-id` to maintain threading.
+- **Always reply** using `oacp send` with `--parent-message-id` to maintain threading.
 - **Idempotent sends** — before sending a response message (e.g., `review_feedback`, `review_addressed`, `review_request`), check the recipient's inbox and your own outbox for an already-sent message matching the same PR + round + type. Skip the send if a duplicate exists. This prevents retry storms when an agent crashes after sending a message but before completing the full workflow, and is re-invoked.
 
 ## Credential Safety
