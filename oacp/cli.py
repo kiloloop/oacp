@@ -19,22 +19,34 @@ HELP_TEXT = """Usage: oacp <command> [args]
 Installable Open Agent Coordination Protocol (OACP) CLI.
 
 Commands:
-  init      Create a project workspace under $OACP_HOME/projects/
-  send      Send a protocol-compliant inbox message
-  doctor    Check environment and workspace health
-  validate  Validate an inbox/outbox YAML message
+  init           Create a project workspace under $OACP_HOME/projects/
+  add-agent      Add an agent to an existing project workspace
+  setup          Generate runtime-specific config files in a repo
+  send           Send a protocol-compliant inbox message
+  org-memory     Initialize org-level memory at $OACP_HOME/org-memory/
+  write-event    Write an event to org-memory/events/
+  doctor         Check environment and workspace health
+  validate       Validate an inbox/outbox YAML message
 
 Examples:
-  oacp doctor
   oacp init my-project --repo /path/to/repo
+  oacp init my-project --agents claude,codex
+  oacp add-agent my-project alice --runtime claude
+  oacp setup claude --project my-project
   oacp send my-project --from codex --to iris --type notification --subject "Done" --body "Completed"
+  oacp org-memory init
+  oacp write-event --agent claude --project my-project --type decision --slug api-convention --body "Use REST for public APIs"
+  oacp doctor
   oacp validate /path/to/message.yaml
-  uvx --from . oacp doctor
 """
 
 SCRIPT_NAMES = {
     "init": "init_project_workspace.py",
+    "add-agent": "add_agent.py",
+    "setup": "setup_runtime.py",
     "send": "send_inbox_message.py",
+    "org-memory": "init_org_memory.py",
+    "write-event": "write_event.py",
     "doctor": "oacp_doctor.py",
     "validate": "validate_message.py",
 }

@@ -20,13 +20,13 @@ git clone https://github.com/kiloloop/oacp.git
 ## 2) Initialize project workspace
 
 ```bash
-scripts/init_project_workspace.sh <project>
+oacp init <project>
 ```
 
 With artifact symlinks from a repo checkout:
 
 ```bash
-scripts/init_project_workspace.sh <project> --repo /path/to/repo
+oacp init <project> --repo /path/to/repo
 ```
 
 ## 3) Set up templates

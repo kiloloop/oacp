@@ -22,6 +22,7 @@ from oacp_doctor import (  # noqa: E402
     DoctorCategory,
     DoctorResult,
     Severity,
+    apply_fixes,
     check_agent_status,
     check_environment,
     check_inbox_health,
@@ -417,6 +418,127 @@ class TestRunDoctor(unittest.TestCase):
             self.assertIn("Inbox Health", cat_names)
             self.assertIn("Schemas", cat_names)
             self.assertIn("Agent Status", cat_names)
+
+
+class TestApplyFixes(unittest.TestCase):
+    """Tests for the --fix path."""
+
+    def _make_workspace(self, tmp, agents):
+        """Create a minimal workspace with the given agent directories."""
+        oacp_dir = Path(tmp)
+        project_dir = oacp_dir / "projects" / "test"
+        for agent in agents:
+            (project_dir / "agents" / agent).mkdir(parents=True)
+        # workspace.json
+        _write(project_dir / "workspace.json", json.dumps({
+            "project_name": "test",
+            "agents": agents,
+        }))
+        # template
+        tmpl_dir = oacp_dir / "templates"
+        tmpl_dir.mkdir(parents=True, exist_ok=True)
+        _write(tmpl_dir / "agent_status.template.yaml", (
+            "runtime: claude\n"
+            "model: claude-opus-4-6\n"
+            "status: available\n"
+            'updated_at: "2026-02-16T20:00:00Z"\n'
+        ))
+        return oacp_dir
+
+    def test_create_status_sets_correct_runtime(self):
+        """status.yaml created by --fix should have the agent's runtime, not 'claude'."""
+        with tempfile.TemporaryDirectory() as tmp:
+            oacp_dir = self._make_workspace(tmp, ["codex"])
+            cats = run_doctor(project="test", oacp_dir=oacp_dir)
+            fixed = apply_fixes(cats, oacp_dir, "test")
+
+            self.assertTrue(any("codex/status.yaml" in f for f in fixed))
+
+            import yaml
+            status_file = oacp_dir / "projects" / "test" / "agents" / "codex" / "status.yaml"
+            data = yaml.safe_load(status_file.read_text())
+            self.assertEqual(data["runtime"], "codex")
+
+    def test_create_status_unknown_runtime(self):
+        """Agents not in VALID_RUNTIMES get runtime: unknown."""
+        with tempfile.TemporaryDirectory() as tmp:
+            oacp_dir = self._make_workspace(tmp, ["iris"])
+            cats = run_doctor(project="test", oacp_dir=oacp_dir)
+            fixed = apply_fixes(cats, oacp_dir, "test")
+
+            self.assertTrue(any("iris/status.yaml" in f for f in fixed))
+
+            import yaml
+            status_file = oacp_dir / "projects" / "test" / "agents" / "iris" / "status.yaml"
+            data = yaml.safe_load(status_file.read_text())
+            self.assertEqual(data["runtime"], "unknown")
+
+    def test_create_status_claude_stays_claude(self):
+        """Claude agent gets runtime: claude (template default is correct)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            oacp_dir = self._make_workspace(tmp, ["claude"])
+            cats = run_doctor(project="test", oacp_dir=oacp_dir)
+            apply_fixes(cats, oacp_dir, "test")
+
+            import yaml
+            status_file = oacp_dir / "projects" / "test" / "agents" / "claude" / "status.yaml"
+            data = yaml.safe_load(status_file.read_text())
+            self.assertEqual(data["runtime"], "claude")
+
+    def test_fix_missing_inbox(self):
+        """--fix creates missing inbox directories."""
+        with tempfile.TemporaryDirectory() as tmp:
+            oacp_dir = Path(tmp)
+            project_dir = oacp_dir / "projects" / "test"
+            # Create agent dir without inbox
+            (project_dir / "agents" / "claude").mkdir(parents=True)
+            _write(project_dir / "workspace.json", json.dumps({
+                "project_name": "test", "agents": ["claude"],
+            }))
+
+            cats = run_doctor(project="test", oacp_dir=oacp_dir)
+            fixed = apply_fixes(cats, oacp_dir, "test")
+
+            self.assertTrue(any("inbox" in f for f in fixed))
+            self.assertTrue((project_dir / "agents" / "claude" / "inbox").is_dir())
+
+    def test_fix_stale_status(self):
+        """--fix updates stale status.yaml timestamps."""
+        with tempfile.TemporaryDirectory() as tmp:
+            oacp_dir = Path(tmp)
+            project_dir = oacp_dir / "projects" / "test"
+            agent_dir = project_dir / "agents" / "claude"
+            (agent_dir / "inbox").mkdir(parents=True)
+            _write(agent_dir / "status.yaml", (
+                "runtime: claude\n"
+                "status: available\n"
+                'updated_at: "2020-01-01T00:00:00Z"\n'
+            ))
+            _write(project_dir / "workspace.json", json.dumps({
+                "project_name": "test", "agents": ["claude"],
+            }))
+
+            cats = run_doctor(project="test", oacp_dir=oacp_dir)
+            fixed = apply_fixes(cats, oacp_dir, "test")
+
+            self.assertTrue(any("timestamp" in f for f in fixed))
+            import yaml
+            data = yaml.safe_load((agent_dir / "status.yaml").read_text())
+            # Should be recent, not 2020
+            self.assertNotIn("2020", data["updated_at"])
+
+    def test_fix_idempotent(self):
+        """Running --fix twice produces no fixes on the second run."""
+        with tempfile.TemporaryDirectory() as tmp:
+            oacp_dir = self._make_workspace(tmp, ["codex"])
+            cats = run_doctor(project="test", oacp_dir=oacp_dir)
+            fixed1 = apply_fixes(cats, oacp_dir, "test")
+            self.assertTrue(len(fixed1) > 0)
+
+            # Second run
+            cats2 = run_doctor(project="test", oacp_dir=oacp_dir)
+            fixed2 = apply_fixes(cats2, oacp_dir, "test")
+            self.assertEqual(len(fixed2), 0)
 
 
 if __name__ == "__main__":

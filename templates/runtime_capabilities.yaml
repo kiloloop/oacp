@@ -1,0 +1,40 @@
+# Default capabilities per runtime. Used by `oacp add-agent --runtime`.
+# Customize per your environment — these are sensible defaults.
+# See: docs/protocol/runtime_capabilities.md
+
+claude:
+  model: claude
+  capabilities:
+    - headless
+    - mcp_tools
+    - shell_access
+    - git_ops
+    - github_cli
+    - subagents
+    - parallel_teams
+    - web_search
+    - session_memory
+    - notifications
+    - async_tasks
+
+codex:
+  model: codex
+  capabilities:
+    - headless
+    - shell_access
+    - git_ops
+    - github_cli
+    - subagents
+    - web_search
+    - session_memory
+
+gemini:
+  model: gemini
+  capabilities:
+    - mcp_tools
+    - shell_access
+    - git_ops
+    - github_cli
+    - web_search
+    - browser
+    - session_memory

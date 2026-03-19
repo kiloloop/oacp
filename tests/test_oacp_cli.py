@@ -41,6 +41,22 @@ class TestOacpCli(unittest.TestCase):
         run_script.assert_called_once_with("oacp_doctor.py", ["--json"])
 
     @mock.patch("oacp.cli._run_script", return_value=0)
+    def test_dispatches_add_agent(self, run_script) -> None:
+        code, stdout, stderr = self._run(["add-agent", "demo", "alice", "--runtime", "claude"])
+        self.assertEqual(code, 0)
+        run_script.assert_called_once_with(
+            "add_agent.py", ["demo", "alice", "--runtime", "claude"]
+        )
+
+    @mock.patch("oacp.cli._run_script", return_value=0)
+    def test_dispatches_setup(self, run_script) -> None:
+        code, stdout, stderr = self._run(["setup", "claude", "--project", "demo"])
+        self.assertEqual(code, 0)
+        run_script.assert_called_once_with(
+            "setup_runtime.py", ["claude", "--project", "demo"]
+        )
+
+    @mock.patch("oacp.cli._run_script", return_value=0)
     def test_help_for_subcommand(self, run_script) -> None:
         code, stdout, stderr = self._run(["help", "send"])
         self.assertEqual(code, 0)
@@ -53,6 +69,12 @@ class TestOacpCli(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(stdout, "")
         self.assertIn("unknown command", stderr)
+
+    def test_help_text_includes_new_commands(self) -> None:
+        code, stdout, stderr = self._run(["--help"])
+        self.assertEqual(code, 0)
+        self.assertIn("add-agent", stdout)
+        self.assertIn("setup", stdout)
 
     def test_run_script_restores_sys_path_after_nested_mutation(self) -> None:
         script_path = "/tmp/send_inbox_message.py"

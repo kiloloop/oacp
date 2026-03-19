@@ -1,6 +1,6 @@
 # Cross-Runtime Parity Matrix
 
-**Date**: 2026-02-15
+**Date**: 2026-03-16
 
 This is a capability comparison across 3 agent runtimes (Claude Code, Codex, Gemini), compiled from each runtime's self-report. Use this as a reference when deciding which agent to assign for a given task.
 
@@ -11,8 +11,8 @@ This is a capability comparison across 3 agent runtimes (Claude Code, Codex, Gem
 | Capability             | Claude (Claude Code CLI)                                                   | Codex (Desktop App)                                                                            | Gemini                                                                |
 | ---------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
 | Spawn background tasks | Yes — Task tool + Bash `run_in_background`                                 | Yes — shell background processes                                                               | Yes — `run_command` async mode                                        |
-| Spawn subagents        | Yes — typed agents (Explore, Plan, general-purpose, code-reviewer, etc.)   | No — no native subagent API                                                                    | Partial — `browser_subagent` only                                     |
-| Parallel agent teams   | Yes — TeamCreate, task lists, SendMessage, broadcast                       | Partial — inbox coordination only, no internal team orchestration                              | No — parallel tool calls but no independent agent instances           |
+| Spawn subagents        | Yes — typed agents (Explore, Plan, general-purpose, code-reviewer, etc.)   | Yes — native `spawn_agent` lifecycle with `default`, `explorer`, and `worker` agents          | Partial — `browser_subagent` only                                     |
+| Parallel agent teams   | Yes — TeamCreate, task lists, SendMessage, broadcast                       | Partial — parallel spawned agents are supported, but there is no team/task-list primitive      | No — parallel tool calls but no independent agent instances           |
 | MCP tools              | Yes — extensible via MCP servers                                           | Partial — APIs available, no servers configured                                                | Yes — MCP server support                                              |
 | Web search             | Yes — native WebSearch tool                                                | Yes — web search/fetch tools                                                                   | Yes — native `search_web` tool                                        |
 | Browser interaction    | Partial — WebFetch (read-only, HTML→markdown)                              | Partial — web fetch/open/click flow, not full automation                                       | Yes — full browser control (click, type, navigate, screenshot, video) |

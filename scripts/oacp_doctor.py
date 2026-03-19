@@ -12,6 +12,7 @@ Usage:
     oacp_doctor.py --json                       # machine-readable output
     oacp_doctor.py --project <name> --json      # full + JSON
     oacp_doctor.py --project <name> -o report.txt  # save report to file
+    oacp_doctor.py --project <name> --fix          # auto-fix safe issues
 
 Exit codes:
     0 — no errors (warnings are non-blocking)
@@ -23,6 +24,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -86,6 +88,7 @@ class DoctorResult:
     severity: Severity
     message: str
     fix_hint: str = ""
+    fixable: str = ""  # fix action key: "mkdir_inbox", "create_status", "update_status"
 
 
 @dataclass
@@ -298,6 +301,7 @@ def check_inbox_health(
                 severity=Severity.warn,
                 message=f"{agent_name}/inbox — directory missing",
                 fix_hint=f"mkdir -p {inbox_dir}",
+                fixable="mkdir_inbox",
             ))
             continue
 
@@ -494,6 +498,7 @@ def check_agent_status(
                 severity=Severity.warn,
                 message=f"{agent_name}/status.yaml — not found",
                 fix_hint="Create status.yaml from templates/agent_status.template.yaml",
+                fixable="create_status",
             ))
             continue
 
@@ -517,6 +522,7 @@ def check_agent_status(
                                     f"(updated {int(age_hours)}h ago)"
                                 ),
                                 fix_hint="Agent may have exited without clean close",
+                                fixable="update_status",
                             ))
                             continue
             except Exception:
@@ -587,8 +593,19 @@ def _use_color() -> bool:
     return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
 
 
-def _write_report(categories: List[DoctorCategory], fh: Any, *, color: bool = False) -> None:
+def _write_report(
+    categories: List[DoctorCategory],
+    fh: Any,
+    *,
+    color: bool = False,
+    fixed: Optional[List[str]] = None,
+) -> None:
     """Write flutter-doctor-style report to a file handle."""
+    if fixed:
+        fh.write("Auto-fixed:\n")
+        for desc in fixed:
+            fh.write(f"  - {desc}\n")
+        fh.write("\n")
     for i, cat in enumerate(categories):
         if i > 0:
             fh.write("\n")
@@ -624,15 +641,16 @@ def _write_report(categories: List[DoctorCategory], fh: Any, *, color: bool = Fa
         fh.write(f"\033[32m{msg}{COLOR_RESET}\n" if color else f"{msg}\n")
 
 
-def print_report(categories: List[DoctorCategory]) -> None:
+def print_report(categories: List[DoctorCategory], *, fixed: Optional[List[str]] = None) -> None:
     """Print flutter-doctor-style report to stdout."""
-    _write_report(categories, sys.stdout, color=_use_color())
+    _write_report(categories, sys.stdout, color=_use_color(), fixed=fixed)
 
 
-def _build_json(categories: List[DoctorCategory]) -> Dict[str, Any]:
+def _build_json(categories: List[DoctorCategory], *, fixed: Optional[List[str]] = None) -> Dict[str, Any]:
     """Build JSON-serializable dict from categories."""
     output: Dict[str, Any] = {
         "has_errors": has_errors(categories),
+        "fixed": fixed or [],
         "categories": [],
     }
     for cat in categories:
@@ -654,9 +672,93 @@ def _build_json(categories: List[DoctorCategory]) -> Dict[str, Any]:
     return output
 
 
-def print_json(categories: List[DoctorCategory]) -> None:
+def print_json(categories: List[DoctorCategory], *, fixed: Optional[List[str]] = None) -> None:
     """Print machine-readable JSON output to stdout."""
-    print(json.dumps(_build_json(categories), indent=2))
+    print(json.dumps(_build_json(categories, fixed=fixed), indent=2))
+
+
+# ── Fix ───────────────────────────────────────────────────────────────────
+
+
+def apply_fixes(
+    categories: List[DoctorCategory],
+    oacp_dir: Path,
+    project: str,
+) -> List[str]:
+    """Apply auto-fixes for fixable results. Returns list of fix descriptions."""
+    fixed: List[str] = []
+    project_dir = oacp_dir / "projects" / project
+    template_path = oacp_dir / "templates" / "agent_status.template.yaml"
+    # Fall back to repo-bundled template
+    repo_template = Path(__file__).resolve().parent.parent / "templates" / "agent_status.template.yaml"
+
+    for cat in categories:
+        for result in cat.results:
+            if not result.fixable:
+                continue
+
+            # Extract agent name from result.name (e.g. "claude/inbox" → "claude")
+            agent_name = result.name.split("/")[0]
+            agent_dir = project_dir / "agents" / agent_name
+
+            if result.fixable == "mkdir_inbox":
+                inbox_dir = agent_dir / "inbox"
+                inbox_dir.mkdir(parents=True, exist_ok=True)
+                result.severity = Severity.ok
+                result.message = f"{agent_name}/inbox — created"
+                result.fix_hint = ""
+                result.fixable = ""
+                fixed.append(f"Created {agent_name}/inbox/")
+
+            elif result.fixable == "create_status":
+                status_file = agent_dir / "status.yaml"
+                # Find template: workspace copy first, then repo-bundled
+                tmpl = template_path if template_path.is_file() else repo_template
+                if tmpl.is_file():
+                    content = tmpl.read_text(encoding="utf-8")
+                    now_str = dt.datetime.now(dt.timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    )
+                    # Set runtime to agent name (if recognized) or "unknown"
+                    runtime = agent_name if agent_name in VALID_RUNTIMES else "unknown"
+                    content = re.sub(
+                        r'^runtime:.*$',
+                        f'runtime: {runtime}',
+                        content,
+                        flags=re.MULTILINE,
+                    )
+                    content = content.replace(
+                        'updated_at: "2026-02-16T20:00:00Z"',
+                        f'updated_at: "{now_str}"',
+                    )
+                    status_file.write_text(content, encoding="utf-8")
+                    result.severity = Severity.ok
+                    result.message = f"{agent_name}/status.yaml — created from template"
+                    result.fix_hint = ""
+                    result.fixable = ""
+                    fixed.append(f"Created {agent_name}/status.yaml")
+
+            elif result.fixable == "update_status":
+                status_file = agent_dir / "status.yaml"
+                if status_file.is_file():
+                    now_str = dt.datetime.now(dt.timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    )
+                    text = status_file.read_text(encoding="utf-8")
+                    text = re.sub(
+                        r'^updated_at:.*$',
+                        f'updated_at: "{now_str}"',
+                        text,
+                        flags=re.MULTILINE,
+                    )
+                    status_file.write_text(text, encoding="utf-8")
+                    result.severity = Severity.ok
+                    result.message = f"{agent_name}/status.yaml — timestamp updated"
+                    result.fix_hint = ""
+                    result.fixable = ""
+                    fixed.append(f"Updated {agent_name}/status.yaml timestamp")
+
+    return fixed
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────
@@ -683,6 +785,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="Output machine-readable JSON",
     )
     parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="Auto-fix safe issues (missing inbox dirs, missing/stale status.yaml)",
+    )
+    parser.add_argument(
         "-o",
         "--output",
         default=None,
@@ -701,20 +808,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         oacp_dir=oacp_dir,
     )
 
+    fixed: List[str] = []
+    if args.fix and args.project:
+        fixed = apply_fixes(categories, oacp_dir, args.project)
+
     if args.json_output:
-        print_json(categories)
+        print_json(categories, fixed=fixed)
     else:
-        print_report(categories)
+        print_report(categories, fixed=fixed)
 
     if args.output:
         out_path = Path(args.output).expanduser().resolve()
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as fh:
             if args.json_output:
-                json.dump(_build_json(categories), fh, indent=2)
+                json.dump(_build_json(categories, fixed=fixed), fh, indent=2)
                 fh.write("\n")
             else:
-                _write_report(categories, fh)
+                _write_report(categories, fh, fixed=fixed)
         print(f"\nReport saved to {out_path}", file=sys.stderr)
 
     return 1 if has_errors(categories) else 0

@@ -445,7 +445,7 @@ The kernel boundary was established through a classification audit of all projec
 
 OACP ships a **kernel** — the minimal set of scripts, templates, and docs needed to adopt the protocol. Everything else is internal tooling for advanced orchestration workflows.
 
-### Kernel Scripts (12)
+### Kernel Scripts (14)
 
 These scripts ship with the OSS release. Most are stdlib-only Python or POSIX shell with no external dependencies beyond `python3`, `git`, and `gh`. Exception: `preflight.py` also requires `ruff`, `shellcheck`, and optionally `pyyaml` for YAML validation.
 
@@ -454,15 +454,17 @@ These scripts ship with the OSS release. Most are stdlib-only Python or POSIX sh
 | `check_quality_gate.py` | Validates findings packets against merge-readiness criteria |
 | `create_handoff_packet.py` | CLI for creating structured handoff packets |
 | `handoff_schema.py` | Shared validation library for handoff and message schemas |
-| `oacp_doctor.py` | Environment and workspace health check (flutter-doctor-style) |
+| `oacp_doctor.py` | Environment and workspace health check (flutter-doctor-style) — CLI: `oacp doctor` |
 | `init_packet.sh` | Bootstraps review/findings/merge packet directories |
-| `init_project_workspace.sh` | Creates a new project workspace — first script any adopter runs |
+| `init_project_workspace.py` | Creates a new project workspace — CLI: `oacp init` |
+| `add_agent.py` | Add an agent to an existing project workspace — CLI: `oacp add-agent` |
+| `setup_runtime.py` | Generate runtime-specific config files — CLI: `oacp setup` |
 | `normalize_findings.py` | Converts raw reviewer output to canonical findings YAML |
 | `preflight.py` | Unified quality checks — CI runs this on every PR |
-| `send_inbox_message.py` | CLI for all inbox messaging — protocol-essential |
+| `send_inbox_message.py` | CLI for all inbox messaging — CLI: `oacp send` |
 | `update_workspace.sh` | Idempotent workspace sync across protocol versions |
 | `validate_agent_card.py` | Validates agent card YAML against the schema |
-| `validate_message.py` | Validates inbox/outbox message YAML against the schema |
+| `validate_message.py` | Validates inbox/outbox message YAML — CLI: `oacp validate` |
 
 ### Kernel Templates (19)
 
@@ -494,28 +496,30 @@ A file is **kernel** if an external adopter needs it to use the base protocol. A
 
 ```bash
 # 1. Initialize a project workspace
-scripts/init_project_workspace.sh <project-name>
+oacp init <project-name>
 
 # 2. Verify environment health
-make doctor ARGS="--project <project-name>"
+oacp doctor --project <project-name>
 
-# 3. Send a task request
-python3 scripts/send_inbox_message.py <project> \
+# 3. Add an agent to the workspace
+oacp add-agent <project-name> alice --runtime claude
+
+# 4. Send a task request
+oacp send <project> \
   --from claude --to codex --type task_request \
-  --subject "Implement feature X" --body "Details..." \
-  --oacp-dir "$OACP_HOME"
+  --subject "Implement feature X" --body "Details..."
 
-# 4. Check inbox for messages
+# 5. Check inbox for messages
 # (list YAML files in agents/<name>/inbox/)
 
-# 5. Run quality checks
+# 6. Run quality checks
 make preflight
 
-# 6. Validate a message file
-python3 scripts/validate_message.py path/to/message.yaml
+# 7. Validate a message file
+oacp validate path/to/message.yaml
 
-# 7. Initialize review packets
-scripts/init_packet.sh <project> <packet_id>
+# 8. Initialize review packets
+scripts/init_packet.sh <project> <packet_id>  # (no CLI wrapper yet)
 ```
 
 ## Cross-References
