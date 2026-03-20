@@ -44,6 +44,21 @@ permissions:
   github_operations: []           # e.g., ["pr_comment", "pr_approve", "pr_merge", "issue_create"]
   max_cost_usd_per_run: null      # optional spending cap per headless invocation
 
+# ── Routing ──────────────────────────────────────────────────────────────
+
+routing_rules:
+  primary: []                       # preferred target agents for outbound work
+  avoid: []                         # agents to avoid routing to
+
+# ── Trust & Quota ────────────────────────────────────────────────────────
+
+trust_level: standard               # untrusted | standard | elevated | admin
+
+quota:
+  max_cost_usd_per_month: null      # optional monthly spending cap
+  reset_day: 1                      # day of month to reset quota (1-28)
+  warn_threshold: 0.8               # fraction of quota that triggers a warning
+
 # ── Scheduling ───────────────────────────────────────────────────────────────
 
 availability:

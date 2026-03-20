@@ -42,6 +42,9 @@ OPTIONAL_FIELDS = (
     "permissions",
     "availability",
     "protocol",
+    "routing_rules",
+    "trust_level",
+    "quota",
 )
 
 ALLOWED_FIELDS = set(REQUIRED_FIELDS + OPTIONAL_FIELDS)
@@ -86,6 +89,8 @@ SKILL_ALLOWED_FIELDS = SKILL_REQUIRED_FIELDS | SKILL_OPTIONAL_FIELDS
 
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+
+ALLOWED_TRUST_LEVELS = {"untrusted", "standard", "elevated", "admin"}
 
 ALLOWED_GITHUB_OPS = {
     "pr_comment",
@@ -394,6 +399,49 @@ def validate_agent_card(data: Dict[str, Any]) -> List[str]:
                             errors.append(
                                 f"protocol.supported_message_types: unknown type '{mt_str}'"
                             )
+
+    # routing_rules
+    rr = data.get("routing_rules")
+    if rr is not None:
+        if not isinstance(rr, dict):
+            errors.append("field 'routing_rules' must be a mapping")
+        else:
+            for rr_key in ("primary", "avoid"):
+                rr_val = rr.get(rr_key)
+                if rr_val is not None and not isinstance(rr_val, list):
+                    errors.append(f"routing_rules.{rr_key} must be a list")
+
+    # trust_level
+    tl = data.get("trust_level")
+    if tl is not None:
+        tl_str = str(tl).strip()
+        if tl_str and tl_str not in ALLOWED_TRUST_LEVELS:
+            errors.append(
+                f"field 'trust_level' must be one of: {', '.join(sorted(ALLOWED_TRUST_LEVELS))}"
+            )
+
+    # quota
+    qt = data.get("quota")
+    if qt is not None:
+        if not isinstance(qt, dict):
+            errors.append("field 'quota' must be a mapping")
+        else:
+            rd = qt.get("reset_day")
+            if rd is not None:
+                try:
+                    rd_val = int(rd)
+                    if rd_val < 1 or rd_val > 28:
+                        errors.append("quota.reset_day must be an integer between 1 and 28")
+                except (ValueError, TypeError):
+                    errors.append("quota.reset_day must be an integer")
+            wt = qt.get("warn_threshold")
+            if wt is not None:
+                try:
+                    wt_val = float(wt)
+                    if wt_val < 0.0 or wt_val > 1.0:
+                        errors.append("quota.warn_threshold must be a float between 0.0 and 1.0")
+                except (ValueError, TypeError):
+                    errors.append("quota.warn_threshold must be a float")
 
     return errors
 

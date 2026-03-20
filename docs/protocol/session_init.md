@@ -60,11 +60,14 @@ The init sequence has 6 steps in a fixed order. Each step is classified as **req
 
 **Location:** `$OACP_HOME/projects/<project>/memory/`
 
+The top-level files in `memory/` are the active working set. `memory/archive/` is historical storage and is not loaded by default at session start.
+
 **Loading order:**
 
 1. `project_facts.md` — agent roles, repo structure, architecture, conventions. Read first because it provides the mental model for everything else.
 2. `decision_log.md` — timestamped decisions with rationale. Read second to understand what has been decided and why.
-3. `open_threads.md` — unresolved issues, blocked epics, cross-agent coordination. Read last because it builds on the context from facts and decisions.
+3. `open_threads.md` — unresolved issues, blocked epics, cross-agent coordination. Read third because it builds on the context from facts and decisions.
+4. `known_debt.md` — verified unresolved debt, recurring pain points, and cleanup items that future sessions should keep in view.
 
 **Conflict resolution:** If memory files contradict project rules (e.g., `project_facts.md` says "use pytest" but `CLAUDE.md` says "use make test"), project rules win. Memory files may be stale; project rules are maintained alongside the code.
 

@@ -111,6 +111,12 @@ class TestDirectoryCreation(unittest.TestCase):
             run_update(root)
             self.assertTrue(os.path.isdir(os.path.join(root, "logs")))
 
+    def test_creates_memory_archive_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_workspace(tmp)
+            run_update(root)
+            self.assertTrue(os.path.isdir(os.path.join(root, "memory", "archive")))
+
     def test_creates_all_expected_dirs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = make_workspace(tmp)
@@ -120,7 +126,7 @@ class TestDirectoryCreation(unittest.TestCase):
                 "agents/claude/inbox", "agents/claude/outbox", "agents/claude/dead_letter",
                 "agents/gemini/inbox", "agents/gemini/outbox", "agents/gemini/dead_letter",
                 "packets/review", "packets/findings", "packets/test", "packets/deploy",
-                "checkpoints", "merges", "memory", "artifacts", "state", "logs",
+                "checkpoints", "merges", "memory", "memory/archive", "artifacts", "state", "logs",
             ]
             for d in expected:
                 self.assertTrue(os.path.isdir(os.path.join(root, d)), f"Missing: {d}")
@@ -179,7 +185,7 @@ class TestMemoryFiles(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = make_workspace(tmp)
             run_update(root)
-            for f in ("project_facts.md", "decision_log.md", "open_threads.md"):
+            for f in ("project_facts.md", "decision_log.md", "open_threads.md", "known_debt.md"):
                 path = os.path.join(root, "memory", f)
                 self.assertTrue(os.path.isfile(path), f"Missing: memory/{f}")
                 self.assertGreater(os.path.getsize(path), 0, f"Empty: memory/{f}")
@@ -195,6 +201,16 @@ class TestMemoryFiles(unittest.TestCase):
             run_update(root)
             with open(facts_path) as f:
                 self.assertEqual(f.read(), sentinel)
+
+    def test_creates_known_debt_template(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_workspace(tmp)
+            run_update(root)
+            known_debt_path = os.path.join(root, "memory", "known_debt.md")
+            with open(known_debt_path) as f:
+                content = f.read()
+            self.assertIn("# Known Debt", content)
+            self.assertIn("| Item | Severity | Date Found | Source | Status |", content)
 
 
 class TestNeverRemovesFiles(unittest.TestCase):
@@ -230,6 +246,19 @@ class TestDryRun(unittest.TestCase):
                 for f in filenames:
                     entries.add(os.path.join(dirpath, f))
             self.assertEqual(len(entries), 0, f"Dry-run created files: {entries}")
+
+    def test_dry_run_counts_missing_known_debt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_workspace(tmp)
+            run_update(root)
+            os.remove(os.path.join(root, "memory", "known_debt.md"))
+
+            result = run_update(root, "--dry-run")
+
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("file memory/known_debt.md (dry-run)", result.stdout)
+            self.assertIn("1 created", result.stdout)
+            self.assertFalse(os.path.exists(os.path.join(root, "memory", "known_debt.md")))
 
 
 class TestSymlinks(unittest.TestCase):

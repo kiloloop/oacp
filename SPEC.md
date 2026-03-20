@@ -29,28 +29,36 @@ Full specification: [`docs/protocol/inbox_outbox.md`](docs/protocol/inbox_outbox
 Agents communicate through a shared filesystem using YAML messages. Each agent has an inbox and outbox directory within a project workspace:
 
 ```
-$OACP_HOME/projects/<project>/
-├── agents/
+$OACP_HOME/
+├── agents/                          # Global agent profiles
 │   ├── claude/
-│   │   ├── inbox/          # Other agents write here
-│   │   ├── outbox/         # Claude's sent messages (copies)
-│   │   ├── status.yaml     # Dynamic agent state
-│   │   └── agent_card.yaml # Static agent identity
-│   ├── codex/
-│   │   ├── inbox/
-│   │   ├── outbox/
-│   │   └── ...
-│   └── gemini/
-│       └── ...
-├── memory/                  # Shared durable memory
-│   ├── project_facts.md
-│   ├── decision_log.md
-│   └── open_threads.md
-├── packets/                 # Review/findings artifacts
-│   ├── review/
-│   └── findings/
-├── merges/                  # Merge decision records
-└── workspace.json           # Project metadata
+│   │   └── profile.yaml            # Global identity defaults
+│   └── codex/
+│       └── profile.yaml
+└── projects/<project>/
+    ├── agents/
+    │   ├── claude/
+    │   │   ├── inbox/               # Other agents write here
+    │   │   ├── outbox/              # Claude's sent messages (copies)
+    │   │   ├── status.yaml          # Dynamic agent state
+    │   │   └── agent_card.yaml      # Static agent identity (overrides global)
+    │   ├── codex/
+    │   │   ├── inbox/
+    │   │   ├── outbox/
+    │   │   └── ...
+    │   └── gemini/
+    │       └── ...
+    ├── memory/                      # Shared durable memory
+    │   ├── project_facts.md
+    │   ├── decision_log.md
+    │   ├── open_threads.md
+    │   └── known_debt.md
+    │   └── archive/
+    ├── packets/                     # Review/findings artifacts
+    │   ├── review/
+    │   └── findings/
+    ├── merges/                      # Merge decision records
+    └── workspace.json               # Project metadata
 ```
 
 ### Message Format
@@ -315,8 +323,11 @@ Location: `$OACP_HOME/projects/<project>/memory/`
 | `project_facts.md` | Agent roles, repo structure, architecture, conventions |
 | `decision_log.md` | Timestamped decisions with rationale |
 | `open_threads.md` | Unresolved issues, blocked epics, cross-agent coordination |
+| `known_debt.md` | Verified unresolved debt and recurring cleanup items |
 
-All runtimes read these at session start. Only stable, verified outcomes are written here. Promotion flows through merge decisions via a project-defined durable-memory promotion mechanism.
+The top-level `memory/` files are the active working set. Historical memory can be moved into `memory/archive/`, which is not loaded at session start by default.
+
+All runtimes read the active memory files at session start. Only stable, verified outcomes are written here. Promotion flows through merge decisions via a project-defined durable-memory promotion mechanism.
 
 #### 2. Handoff Messages with Context Keys (ephemeral)
 
@@ -330,7 +341,7 @@ Review packets, findings packets, and merge decisions form a structured audit tr
 
 | Sync Point | Direction | Action |
 |------------|-----------|--------|
-| Session start | Memory → Agent | Read all 3 memory files |
+| Session start | Memory → Agent | Read all 4 active memory files (not `memory/archive/`) |
 | Task completion | Agent → Memory | Write stable outcomes via merge decision |
 | Handoff | Agent → Agent | Include `conversation_id` + `context_keys` |
 | Review cycle start | Packets → Agent | Read relevant packet history |
@@ -342,7 +353,7 @@ Agents follow a 6-step init sequence at session start:
 
 1. **Load global rules** (required) — safety defaults, tool preferences
 2. **Load project rules** (required) — repo structure, conventions
-3. **Load durable memory** (required) — project facts, decisions, open threads
+3. **Load durable memory** (required) — project facts, decisions, open threads, known debt
 4. **Check inbox** (optional) — summarize pending messages
 5. **Load skills/tools** (optional) — runtime-specific capabilities
 6. **Report status** (required) — update `status.yaml`
@@ -445,7 +456,7 @@ The kernel boundary was established through a classification audit of all projec
 
 OACP ships a **kernel** — the minimal set of scripts, templates, and docs needed to adopt the protocol. Everything else is internal tooling for advanced orchestration workflows.
 
-### Kernel Scripts (14)
+### Kernel Scripts (18)
 
 These scripts ship with the OSS release. Most are stdlib-only Python or POSIX shell with no external dependencies beyond `python3`, `git`, and `gh`. Exception: `preflight.py` also requires `ruff`, `shellcheck`, and optionally `pyyaml` for YAML validation.
 
@@ -458,9 +469,13 @@ These scripts ship with the OSS release. Most are stdlib-only Python or POSIX sh
 | `init_packet.sh` | Bootstraps review/findings/merge packet directories |
 | `init_project_workspace.py` | Creates a new project workspace — CLI: `oacp init` |
 | `add_agent.py` | Add an agent to an existing project workspace — CLI: `oacp add-agent` |
+| `agent_profile.py` | Two-tier agent profile management — CLI: `oacp agent` |
+| `memory_cli.py` | Archive or restore project memory files — CLI: `oacp memory` |
 | `setup_runtime.py` | Generate runtime-specific config files — CLI: `oacp setup` |
 | `normalize_findings.py` | Converts raw reviewer output to canonical findings YAML |
 | `preflight.py` | Unified quality checks — CI runs this on every PR |
+| `promote_to_archive.py` | Move a non-standard memory file into `memory/archive/` |
+| `restore_from_archive.py` | Restore an archived memory file into the active `memory/` working set |
 | `send_inbox_message.py` | CLI for all inbox messaging — CLI: `oacp send` |
 | `update_workspace.sh` | Idempotent workspace sync across protocol versions |
 | `validate_agent_card.py` | Validates agent card YAML against the schema |

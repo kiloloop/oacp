@@ -55,7 +55,9 @@ $OACP_HOME/projects/my-first-project/
 ├── memory/
 │   ├── project_facts.md
 │   ├── decision_log.md
-│   └── open_threads.md
+│   ├── open_threads.md
+│   ├── known_debt.md
+│   └── archive/
 ├── packets/
 │   ├── review/
 │   └── findings/
@@ -82,7 +84,7 @@ Check inbox: ls $OACP_HOME/projects/my-first-project/agents/claude/inbox/
 OACP workspace: $OACP_HOME/projects/my-first-project/
 ```
 
-**Other runtimes** — point your agent's system prompt at the workspace path and instruct it to read `memory/project_facts.md` at session start.
+**Other runtimes** — point your agent's system prompt at the workspace path and instruct it to read the standard `memory/` files at session start.
 
 For full runtime setup (role templates, guardrails, skills), see [docs/guides/setup.md](docs/guides/setup.md).
 

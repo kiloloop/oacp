@@ -82,9 +82,16 @@ def _render_status_yaml(
 
 
 def _render_agent_card_yaml(
-    agent_name: str, runtime: str, caps: Dict[str, Any]
+    agent_name: str,
+    runtime: str,
+    caps: Dict[str, Any],
+    global_profile: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Render an agent_card.yaml by filling in the template placeholders."""
+    """Render an agent_card.yaml by filling in the template placeholders.
+
+    If *global_profile* is provided, its identity fields (model, description)
+    are used as defaults instead of the runtime_capabilities template.
+    """
     template = _load_template("agent_card.template.yaml")
     # Fill in identity fields
     template = template.replace(
@@ -94,14 +101,42 @@ def _render_agent_card_yaml(
         'runtime: ""', f'runtime: "{runtime}"', 1
     )
     model = caps.get("model", runtime)
+    # Escape quotes and newlines for safe YAML scalar interpolation
+    model = str(model).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
     template = template.replace(
         'model: ""', f'model: "{model}"', 1
     )
+    description = f"{agent_name} agent ({runtime} runtime)"
+    if global_profile and global_profile.get("description"):
+        # Escape quotes and newlines for safe YAML scalar interpolation
+        raw = str(global_profile["description"])
+        description = raw.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
     template = template.replace(
         'description: ""',
-        f'description: "{agent_name} agent ({runtime} runtime)"',
+        f'description: "{description}"',
         1,
     )
+    # Strip profile-tier sections from scaffolded cards — these fields are
+    # meant to be inherited from the global profile, not set per-project.
+    # Keeping them in the card template (for documentation) but removing from
+    # rendered output prevents template defaults from masking global values.
+    lines = template.split("\n")
+    filtered: List[str] = []
+    skip_section = False
+    for line in lines:
+        stripped = line.strip()
+        # Detect section headers to skip
+        if stripped.startswith("# ── Routing") or stripped.startswith("# ── Trust"):
+            skip_section = True
+            continue
+        # Stop skipping at the next major section
+        if skip_section and stripped.startswith("# ──"):
+            skip_section = False
+        if skip_section:
+            continue
+        filtered.append(line)
+    template = "\n".join(filtered)
+
     # Fill in protocol paths
     template = template.replace(
         'inbox_path: ""',
@@ -186,9 +221,28 @@ def add_agent(
         else:
             skipped_files.append(str(gitkeep.relative_to(project_dir)))
 
+    # Check for global profile defaults
+    global_profile = None
+    global_profile_path = oacp_root / "agents" / agent_name / "profile.yaml"
+    if global_profile_path.is_file():
+        try:
+            if yaml is not None:
+                global_profile = yaml.safe_load(
+                    global_profile_path.read_text(encoding="utf-8")
+                )
+                if not isinstance(global_profile, dict):
+                    global_profile = None
+        except Exception as exc:
+            print(f"Warning: could not load global profile for '{agent_name}': {exc}", file=sys.stderr)
+            global_profile = None
+
     # Optional runtime-specific files
     if runtime is not None:
         caps = _load_runtime_capabilities().get(runtime, {})
+        # If global profile exists, use its identity fields as defaults
+        if global_profile:
+            if global_profile.get("model"):
+                caps["model"] = global_profile["model"]
 
         status_content = _render_status_yaml(agent_name, runtime, caps)
         status_path = agent_dir / "status.yaml"
@@ -197,7 +251,7 @@ def add_agent(
         else:
             skipped_files.append(str(status_path.relative_to(project_dir)))
 
-        card_content = _render_agent_card_yaml(agent_name, runtime, caps)
+        card_content = _render_agent_card_yaml(agent_name, runtime, caps, global_profile)
         card_path = agent_dir / "agent_card.yaml"
         if _write_if_missing(card_path, card_content):
             created_files.append(str(card_path.relative_to(project_dir)))

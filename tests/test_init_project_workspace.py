@@ -27,6 +27,8 @@ class TestInitializeWorkspace(unittest.TestCase):
             self.assertTrue((project_root / "agents" / "gemini" / "inbox").is_dir())
             self.assertTrue((project_root / "packets" / "review").is_dir())
             self.assertTrue((project_root / "memory" / "project_facts.md").is_file())
+            self.assertTrue((project_root / "memory" / "known_debt.md").is_file())
+            self.assertTrue((project_root / "memory" / "archive").is_dir())
 
             workspace = json.loads((project_root / "workspace.json").read_text(encoding="utf-8"))
             self.assertEqual(workspace["project_name"], "demo")
@@ -74,6 +76,21 @@ class TestInitializeWorkspace(unittest.TestCase):
             # Static dirs still created
             self.assertTrue((project_root / "packets" / "review").is_dir())
             self.assertTrue((project_root / "memory" / "project_facts.md").is_file())
+            self.assertTrue((project_root / "memory" / "known_debt.md").is_file())
+            self.assertTrue((project_root / "memory" / "archive").is_dir())
+
+    def test_known_debt_template_has_expected_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hub_root = Path(tmpdir)
+            result = initialize_workspace("demo", oacp_root=hub_root)
+
+            project_root = Path(result["project_root"])
+            known_debt = (project_root / "memory" / "known_debt.md").read_text(
+                encoding="utf-8"
+            )
+
+            self.assertIn("# Known Debt", known_debt)
+            self.assertIn("| Item | Severity | Date Found | Source | Status |", known_debt)
 
     def test_artifact_links_require_repo(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -106,4 +123,3 @@ class TestInitializeWorkspace(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

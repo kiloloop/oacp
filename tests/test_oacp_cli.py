@@ -49,6 +49,16 @@ class TestOacpCli(unittest.TestCase):
         )
 
     @mock.patch("oacp.cli._run_script", return_value=0)
+    def test_dispatches_memory_namespace(self, run_script) -> None:
+        code, stdout, stderr = self._run(["memory", "archive", "demo", "notes.md"])
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "")
+        run_script.assert_called_once_with(
+            "memory_cli.py", ["archive", "demo", "notes.md"]
+        )
+
+    @mock.patch("oacp.cli._run_script", return_value=0)
     def test_dispatches_setup(self, run_script) -> None:
         code, stdout, stderr = self._run(["setup", "claude", "--project", "demo"])
         self.assertEqual(code, 0)
@@ -74,6 +84,7 @@ class TestOacpCli(unittest.TestCase):
         code, stdout, stderr = self._run(["--help"])
         self.assertEqual(code, 0)
         self.assertIn("add-agent", stdout)
+        self.assertIn("memory", stdout)
         self.assertIn("setup", stdout)
 
     def test_run_script_restores_sys_path_after_nested_mutation(self) -> None:
