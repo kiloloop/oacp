@@ -21,6 +21,8 @@ Installable Open Agent Coordination Protocol (OACP) CLI.
 Commands:
   init           Create a project workspace under $OACP_HOME/projects/
   add-agent      Add an agent to an existing project workspace
+  agent          Manage global agent profiles (init, show, list)
+  memory         Archive or restore project memory files
   setup          Generate runtime-specific config files in a repo
   send           Send a protocol-compliant inbox message
   org-memory     Initialize org-level memory at $OACP_HOME/org-memory/
@@ -32,6 +34,7 @@ Examples:
   oacp init my-project --repo /path/to/repo
   oacp init my-project --agents claude,codex
   oacp add-agent my-project alice --runtime claude
+  oacp memory archive my-project research_notes.md
   oacp setup claude --project my-project
   oacp send my-project --from codex --to iris --type notification --subject "Done" --body "Completed"
   oacp org-memory init
@@ -43,6 +46,8 @@ Examples:
 SCRIPT_NAMES = {
     "init": "init_project_workspace.py",
     "add-agent": "add_agent.py",
+    "agent": "agent_profile.py",
+    "memory": "memory_cli.py",
     "setup": "setup_runtime.py",
     "send": "send_inbox_message.py",
     "org-memory": "init_org_memory.py",

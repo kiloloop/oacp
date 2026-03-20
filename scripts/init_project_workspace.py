@@ -36,6 +36,16 @@ DEFAULT_PROJECT_FACTS = """# Project Facts
 - Shared handoff protocol version: v0.2.0
 """
 
+KNOWN_DEBT_TEMPLATE = """# Known Debt
+
+Use this file to track verified, unresolved project debt that future sessions
+should not rediscover from scratch.
+
+| Item | Severity | Date Found | Source | Status |
+| --- | --- | --- | --- | --- |
+| _None yet._ |  |  |  |  |
+"""
+
 STATIC_DIRECTORIES = (
     "packets/review",
     "packets/findings",
@@ -44,6 +54,7 @@ STATIC_DIRECTORIES = (
     "checkpoints",
     "merges",
     "memory",
+    "memory/archive",
     "artifacts",
     "state",
     "logs",
@@ -188,6 +199,7 @@ def initialize_workspace(
         project_root / "memory" / "open_threads.md",
         "# Open Threads\n\n- None yet.\n",
     )
+    _write_if_missing(project_root / "memory" / "known_debt.md", KNOWN_DEBT_TEMPLATE)
 
     workspace_path = project_root / "workspace.json"
     now = dt.datetime.now(dt.timezone.utc).isoformat()

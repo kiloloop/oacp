@@ -366,5 +366,80 @@ class TestFileValidation(unittest.TestCase):
             Path(f.name).unlink()
 
 
+class TestRoutingRules(unittest.TestCase):
+    def test_valid_routing_rules(self):
+        card = _base_card(routing_rules={"primary": ["codex"], "avoid": ["gemini"]})
+        errors = validate_agent_card(card)
+        self.assertEqual(errors, [])
+
+    def test_routing_rules_not_dict(self):
+        card = _base_card(routing_rules=["codex"])
+        errors = validate_agent_card(card)
+        self.assertTrue(any("routing_rules" in e and "mapping" in e for e in errors))
+
+    def test_routing_rules_primary_not_list(self):
+        card = _base_card(routing_rules={"primary": "codex"})
+        errors = validate_agent_card(card)
+        self.assertTrue(any("primary" in e for e in errors))
+
+    def test_routing_rules_avoid_not_list(self):
+        card = _base_card(routing_rules={"avoid": "gemini"})
+        errors = validate_agent_card(card)
+        self.assertTrue(any("avoid" in e for e in errors))
+
+
+class TestTrustLevel(unittest.TestCase):
+    def test_valid_trust_levels(self):
+        for tl in ("untrusted", "standard", "elevated", "admin"):
+            errors = validate_agent_card(_base_card(trust_level=tl))
+            self.assertEqual(errors, [], f"trust_level {tl} should be valid")
+
+    def test_invalid_trust_level(self):
+        errors = validate_agent_card(_base_card(trust_level="superuser"))
+        self.assertTrue(any("trust_level" in e for e in errors))
+
+
+class TestQuota(unittest.TestCase):
+    def test_valid_quota(self):
+        card = _base_card(quota={"reset_day": 15, "warn_threshold": 0.8})
+        errors = validate_agent_card(card)
+        self.assertEqual(errors, [])
+
+    def test_quota_not_dict(self):
+        card = _base_card(quota=100)
+        errors = validate_agent_card(card)
+        self.assertTrue(any("quota" in e and "mapping" in e for e in errors))
+
+    def test_reset_day_too_low(self):
+        card = _base_card(quota={"reset_day": 0})
+        errors = validate_agent_card(card)
+        self.assertTrue(any("reset_day" in e for e in errors))
+
+    def test_reset_day_too_high(self):
+        card = _base_card(quota={"reset_day": 29})
+        errors = validate_agent_card(card)
+        self.assertTrue(any("reset_day" in e for e in errors))
+
+    def test_warn_threshold_too_low(self):
+        card = _base_card(quota={"warn_threshold": -0.1})
+        errors = validate_agent_card(card)
+        self.assertTrue(any("warn_threshold" in e for e in errors))
+
+    def test_warn_threshold_too_high(self):
+        card = _base_card(quota={"warn_threshold": 1.5})
+        errors = validate_agent_card(card)
+        self.assertTrue(any("warn_threshold" in e for e in errors))
+
+    def test_reset_day_not_int(self):
+        card = _base_card(quota={"reset_day": "first"})
+        errors = validate_agent_card(card)
+        self.assertTrue(any("reset_day" in e for e in errors))
+
+    def test_warn_threshold_not_float(self):
+        card = _base_card(quota={"warn_threshold": "high"})
+        errors = validate_agent_card(card)
+        self.assertTrue(any("warn_threshold" in e for e in errors))
+
+
 if __name__ == "__main__":
     unittest.main()

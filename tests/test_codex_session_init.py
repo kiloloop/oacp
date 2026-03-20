@@ -35,6 +35,7 @@ def _seed_memory(hub_dir: Path, project: str) -> Path:
     _write(project_dir / "memory" / "project_facts.md", "# facts\n")
     _write(project_dir / "memory" / "decision_log.md", "# decisions\n")
     _write(project_dir / "memory" / "open_threads.md", "# threads\n")
+    _write(project_dir / "memory" / "known_debt.md", "# debt\n")
     return project_dir
 
 
@@ -62,6 +63,7 @@ class TestCodexSessionInit(unittest.TestCase):
             self.assertEqual(report["project"], "demo")
             self.assertEqual(report["protocol"]["agent_safety_defaults.md"]["state"], "loaded")
             self.assertEqual(report["memory"]["project_facts.md"]["state"], "loaded")
+            self.assertEqual(report["memory"]["known_debt.md"]["state"], "loaded")
             self.assertEqual(report["status_yaml"]["state"], "created")
             self.assertIn("project=demo", report["ack"])
             self.assertIn("status_yaml=created", report["ack"])
@@ -168,8 +170,12 @@ class TestCodexSessionInit(unittest.TestCase):
             self.assertEqual(report["memory"]["project_facts.md"]["state"], "loaded")
             self.assertEqual(report["memory"]["decision_log.md"]["state"], "missing")
             self.assertEqual(report["memory"]["open_threads.md"]["state"], "missing")
+            self.assertEqual(report["memory"]["known_debt.md"]["state"], "missing")
             self.assertTrue(
                 any("memory file decision_log.md: missing" in w for w in report["warnings"])
+            )
+            self.assertTrue(
+                any("memory file known_debt.md: missing" in w for w in report["warnings"])
             )
             self.assertEqual(report["status_yaml"]["state"], "created")
 
@@ -239,6 +245,7 @@ class TestCodexSessionInit(unittest.TestCase):
 
             self.assertEqual(report["project"], "")
             self.assertEqual(report["memory"]["project_facts.md"]["state"], "skipped")
+            self.assertEqual(report["memory"]["known_debt.md"]["state"], "skipped")
             self.assertEqual(report["status_yaml"]["state"], "no-project")
             self.assertIn("project=none", report["ack"])
 
@@ -295,6 +302,29 @@ class TestCodexSessionInit(unittest.TestCase):
         parser = _build_parser()
         args = parser.parse_args(["--status", "offline"])
         self.assertEqual(args.status, "offline")
+
+    def test_archive_dir_is_not_loaded_during_session_init(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hub_dir = root / "oacp"
+            repo_dir = root / "repo"
+            project_dir = _seed_memory(hub_dir, "demo")
+            protocol_dir = _seed_protocol(repo_dir)
+            _write(project_dir / "memory" / "archive" / "20260320T000000Z_notes.md", "# archived\n")
+
+            report = run_session_init(
+                project="demo",
+                hub_dir=hub_dir,
+                cwd=repo_dir,
+                model="gpt-test",
+                status="available",
+                current_task="",
+                dry_run=False,
+                protocol_dir=protocol_dir,
+            )
+
+            self.assertNotIn("archive", report["memory"])
+            self.assertNotIn("20260320T000000Z_notes.md", report["memory"])
 
 
 if __name__ == "__main__":

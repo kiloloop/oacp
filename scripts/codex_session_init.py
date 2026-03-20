@@ -28,6 +28,7 @@ MEMORY_FILES = (
     "project_facts.md",
     "decision_log.md",
     "open_threads.md",
+    "known_debt.md",
 )
 
 DEFAULT_CAPABILITIES = [

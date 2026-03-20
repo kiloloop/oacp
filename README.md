@@ -42,7 +42,7 @@ Doctor checks your CLI tools, and with `--project` it audits workspace structure
 
 - **Inbox/outbox messaging** — async YAML-based communication with threading, broadcast, and expiry
 - **Structured review loop** — severity-graded findings, quality gates, and multi-round review
-- **Durable shared memory** — project facts, decisions, and open threads that persist across sessions
+- **Durable shared memory** — project facts, decisions, open threads, and known debt with an explicit active/archive split
 - **Dispatch state machine** — full task lifecycle tracking from assignment to merge
 - **Agent safety defaults** — baseline rules for git, credentials, staging, and scope discipline
 - **Runtime-agnostic** — works with any agent runtime that can read/write files
@@ -125,6 +125,7 @@ uv tool install .
 ## Commands
 
 - `oacp init` creates a project workspace under `$OACP_HOME/projects/`
+- `oacp memory` archives or restores project memory files
 - `oacp send` sends a protocol-compliant inbox message
 - `oacp doctor` checks environment and workspace health
 - `oacp validate` validates an inbox/outbox YAML message
@@ -138,7 +139,7 @@ If `OACP_HOME` is unset, workspace commands default to `~/oacp` (underscore).
 | **Inbox/Outbox** | Async messaging between agents via YAML files in `agents/<name>/inbox/` |
 | **Review Loop** | Structured code review: `review_request` → `review_feedback` → `review_addressed` → `review_lgtm` |
 | **Quality Gate** | Merge-readiness criteria: no unresolved P0/P1 findings, deferred nits tracked |
-| **Durable Memory** | Shared `memory/` directory with project facts, decisions, and open threads |
+| **Durable Memory** | Shared `memory/` directory with an active working set plus `memory/archive/` for historical memory |
 | **Dispatch States** | Task lifecycle: `received` → `accepted` → `working` → `pr_opened` → `in_review` → `done` |
 | **Safety Defaults** | Baseline rules all agents follow: no force push, no secrets in commits, stage hygiene |
 
@@ -149,7 +150,7 @@ oacp/
 ├── docs/
 │   ├── protocol/       # Canonical protocol specifications (13 specs)
 │   └── guides/         # Setup, adoption, versioning
-├── scripts/            # 13 kernel scripts (Python + shell)
+├── scripts/            # 18 kernel scripts (Python + shell)
 ├── templates/          # Packet, role, and guardrail templates (19)
 ├── tests/              # Test suite
 ├── Makefile            # Task runner (make help for all targets)
@@ -188,6 +189,7 @@ OACP ships kernel scripts — the key CLI commands you'll use most:
 
 - **`oacp init`** — create a new project workspace (the first command you run)
 - **`oacp add-agent`** — add an agent to an existing project workspace
+- **`oacp memory`** — archive or restore project memory files
 - **`oacp setup`** — generate runtime-specific config files (Claude, Codex, Gemini)
 - **`oacp send`** — send protocol-compliant messages between agents
 - **`oacp doctor`** — environment and workspace health check
@@ -231,7 +233,9 @@ $OACP_HOME/projects/<project>/
 ├── memory/                  # Shared durable memory
 │   ├── project_facts.md
 │   ├── decision_log.md
-│   └── open_threads.md
+│   ├── open_threads.md
+│   ├── known_debt.md
+│   └── archive/
 ├── packets/                 # Review/findings artifacts
 └── workspace.json           # Project metadata
 ```

@@ -23,10 +23,15 @@ The protocol defines three complementary sync mechanisms, ordered from most dura
 | `project_facts.md` | Agent roles, repo structure, architecture, conventions | Any agent via the project's durable-memory promotion flow |
 | `decision_log.md` | Timestamped decisions with rationale | Any agent via the project's durable-memory promotion flow |
 | `open_threads.md` | Unresolved issues, blocked epics, cross-agent coordination | Any agent via the project's durable-memory promotion flow |
+| `known_debt.md` | Verified unresolved debt that should persist across sessions | Any agent via the project's durable-memory promotion flow |
 
-These files are the **source of truth** for stable project knowledge. All runtimes read them at session start. Only verified, stable outcomes should be written here.
+The top-level files in `memory/` are the active working set. Historical memory can be moved into `memory/archive/`, which is not loaded during session init unless an agent explicitly opts in.
+
+These files are the **source of truth** for stable project knowledge. All runtimes read the active working set at session start. Only verified, stable outcomes should be written here.
 
 **Promotion flow**: Merge decisions contain a "Durable Memory Updates" section. Each implementation should provide a promotion mechanism that extracts approved entries from merge artifacts and appends them to the appropriate memory file, deduplicating against existing content.
+
+**Archive flow**: Users or coordinator agents may move non-standard memory files into `memory/archive/` for historical retention, then restore them back into `memory/` when they become active again.
 
 ### 2. Handoff Messages with Context Keys
 
@@ -57,7 +62,7 @@ Agents synchronize knowledge at well-defined points in the workflow:
 
 | Sync Point | Action | Direction |
 |------------|--------|-----------|
-| **Session start** | Read `memory/project_facts.md`, `decision_log.md`, `open_threads.md` | Memory -> Agent |
+| **Session start** | Read `memory/project_facts.md`, `decision_log.md`, `open_threads.md`, `known_debt.md` (not `memory/archive/`) | Memory -> Agent |
 | **Task completion** | Write stable outcomes to memory via merge decision + durable-memory promotion flow | Agent -> Memory |
 | **Handoff** | Include `conversation_id` + `context_keys` in handoff message | Agent -> Agent |
 | **Review cycle start** | Read relevant packet history | Packets -> Agent |
@@ -104,7 +109,7 @@ Each project should provide a durable-memory promotion mechanism that:
 
 1. Scans merge decisions or equivalent terminal artifacts
 2. Extracts entries from the "Durable Memory Updates" section
-3. Appends new entries to `decision_log.md`, `open_threads.md`, or `project_facts.md`
+3. Appends new entries to `decision_log.md`, `open_threads.md`, `project_facts.md`, or `known_debt.md`
 4. Deduplicates against existing content
 
 This ensures that knowledge flows from ephemeral review artifacts into durable memory that persists across sessions and runtimes, without requiring a specific helper script name.

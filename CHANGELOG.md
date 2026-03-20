@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9] - 2026-03-20
+
+### Added
+
+- Memory archive layer with `oacp archive` CLI command for active/archive split (#62, #11)
+- Declarative agent profiles with YAML schema and `oacp agent init|show|list` CLI commands (#52, #48)
+- `known_debt.md` as standard memory file for tracking technical debt (#53, #32)
+
 ## [0.1.2] - 2026-03-18
 
 ### Added
@@ -65,6 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Checkout step in github-release workflow job (#19)
 - Pre-release audit fixes: SHA-pinned actions, dangling doc refs (#15, #16)
 
+[0.1.9]: https://github.com/kiloloop/oacp/compare/v0.1.2...v0.1.9
 [0.1.2]: https://github.com/kiloloop/oacp/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/kiloloop/oacp/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kiloloop/oacp/releases/tag/v0.1.0

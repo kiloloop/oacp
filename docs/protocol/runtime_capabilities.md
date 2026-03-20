@@ -269,6 +269,7 @@ The card schema is inspired by Google's A2A Agent Card spec (v0.3.0). Key differ
 
 ## Cross-References
 
+- **Agent Profiles**: `docs/protocol/agent_profiles.md` — two-tier global profile + project card system
 - **Parity Matrix**: `docs/guides/runtime_capability_matrix.md` — detailed per-runtime capability comparison
 - **Inbox Protocol**: `docs/protocol/inbox_outbox.md` — agent messaging format
 - **Session Lifecycle**: `scripts/session_lifecycle_hooks.py` (reference implementation) — session boundary hooks

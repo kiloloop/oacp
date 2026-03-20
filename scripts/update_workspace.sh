@@ -101,6 +101,7 @@ EXPECTED_DIRS=(
   "checkpoints"
   "merges"
   "memory"
+  "memory/archive"
   "artifacts"
   "state"
   "logs"
@@ -217,6 +218,28 @@ EOM
   ((CREATED+=1))
 else
   log_action "~" "file memory/open_threads.md"
+  ((UNCHANGED+=1))
+fi
+
+if [[ ! -f "$PROJECT_ROOT/memory/known_debt.md" ]]; then
+  if [[ "$DRY_RUN" == true ]]; then
+    log_action "+" "file memory/known_debt.md (dry-run)"
+  else
+    cat > "$PROJECT_ROOT/memory/known_debt.md" <<'EOM'
+# Known Debt
+
+Use this file to track verified, unresolved project debt that future sessions
+should not rediscover from scratch.
+
+| Item | Severity | Date Found | Source | Status |
+| --- | --- | --- | --- | --- |
+| _None yet._ |  |  |  |  |
+EOM
+    log_action "+" "file memory/known_debt.md"
+  fi
+  ((CREATED+=1))
+else
+  log_action "~" "file memory/known_debt.md"
   ((UNCHANGED+=1))
 fi
 

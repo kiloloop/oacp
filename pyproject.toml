@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "oacp-cli"
-version = "0.1.2"
+version = "0.1.9"
 description = "Open Agent Coordination Protocol CLI for file-based multi-agent workflows"
 readme = "README.md"
 license = "Apache-2.0"
@@ -58,6 +58,11 @@ packages = ["oacp"]
 "scripts/session_lifecycle_hooks.py" = "oacp/_scripts/session_lifecycle_hooks.py"
 "scripts/validate_message.py" = "oacp/_scripts/validate_message.py"
 "scripts/add_agent.py" = "oacp/_scripts/add_agent.py"
+"scripts/agent_profile.py" = "oacp/_scripts/agent_profile.py"
+"scripts/memory_cli.py" = "oacp/_scripts/memory_cli.py"
+"scripts/memory_archive_common.py" = "oacp/_scripts/memory_archive_common.py"
+"scripts/promote_to_archive.py" = "oacp/_scripts/promote_to_archive.py"
+"scripts/restore_from_archive.py" = "oacp/_scripts/restore_from_archive.py"
 "scripts/setup_runtime.py" = "oacp/_scripts/setup_runtime.py"
 "scripts/init_org_memory.py" = "oacp/_scripts/init_org_memory.py"
 "scripts/write_event.py" = "oacp/_scripts/write_event.py"
@@ -66,6 +71,7 @@ packages = ["oacp"]
 "templates/org-memory/decisions.md" = "oacp/_templates/org-memory/decisions.md"
 "templates/org-memory/rules.md" = "oacp/_templates/org-memory/rules.md"
 "templates/agent_card.template.yaml" = "oacp/_templates/agent_card.template.yaml"
+"templates/agent_profile.template.yaml" = "oacp/_templates/agent_profile.template.yaml"
 "templates/claude/agents/role_agent.template.md" = "oacp/_templates/claude/agents/role_agent.template.md"
 
 [tool.ruff]

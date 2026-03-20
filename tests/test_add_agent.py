@@ -142,6 +142,52 @@ class TestAddAgent(unittest.TestCase):
             result = add_agent("demo", "my-agent_v1.0", oacp_root=oacp_root)
             self.assertTrue(result["agent_dir"].is_dir())
 
+    def test_populates_card_from_global_profile(self) -> None:
+        """Verify add-agent uses global profile for description/model defaults."""
+        import yaml
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            oacp_root = self._make_project(Path(tmpdir))
+            # Create a global profile
+            global_dir = oacp_root / "agents" / "alice"
+            global_dir.mkdir(parents=True)
+            (global_dir / "profile.yaml").write_text(
+                yaml.dump({
+                    "version": "0.2.0",
+                    "name": "alice",
+                    "runtime": "claude",
+                    "model": "claude-opus-4-6",
+                    "description": "Senior architect agent",
+                }),
+                encoding="utf-8",
+            )
+
+            result = add_agent(
+                "demo", "alice", oacp_root=oacp_root, runtime="claude"
+            )
+
+            agent_dir = result["agent_dir"]
+            card = (agent_dir / "agent_card.yaml").read_text(encoding="utf-8")
+            # Global profile's description should be used
+            self.assertIn("Senior architect agent", card)
+            # Global profile's model should be used
+            self.assertIn("claude-opus-4-6", card)
+
+
+    def test_card_does_not_contain_profile_tier_fields(self) -> None:
+        """Scaffolded cards should not include routing_rules, trust_level, quota."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            oacp_root = self._make_project(Path(tmpdir))
+            result = add_agent(
+                "demo", "bob", oacp_root=oacp_root, runtime="claude"
+            )
+            agent_dir = result["agent_dir"]
+            card = (agent_dir / "agent_card.yaml").read_text(encoding="utf-8")
+            # Profile-tier fields should be stripped from scaffolded cards
+            self.assertNotIn("routing_rules:", card)
+            self.assertNotIn("trust_level:", card)
+            self.assertNotIn("quota:", card)
+
 
 if __name__ == "__main__":
     unittest.main()

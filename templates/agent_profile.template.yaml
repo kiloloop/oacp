@@ -1,0 +1,40 @@
+# agent_profile.template.yaml — global agent profile
+#
+# Lives at $OACP_HOME/agents/<name>/profile.yaml
+# Provides identity defaults that are inherited by project-level agent cards.
+# Project cards override global profile fields (shallow dict merge, list replacement).
+
+version: "0.2.0"
+
+# ── Identity ─────────────────────────────────────────────────────────────
+
+name: ""                              # agent name (matches directory name)
+runtime: ""                           # claude | codex | gemini | human
+model: ""                             # model id (e.g., claude-opus-4-6)
+description: ""                       # one-line role summary
+
+# ── Routing ──────────────────────────────────────────────────────────────
+
+routing_rules:
+  primary: []                         # preferred target agents for outbound work
+  avoid: []                           # agents to avoid routing to
+
+# ── Trust & Quota ────────────────────────────────────────────────────────
+
+trust_level: standard                 # untrusted | standard | elevated | admin
+
+quota:
+  max_cost_usd_per_month: null        # optional monthly spending cap
+  reset_day: 1                        # day of month to reset quota (1-28)
+  warn_threshold: 0.8                 # fraction of quota that triggers a warning
+
+# ── Capabilities ─────────────────────────────────────────────────────────
+
+capabilities:
+  tools: []                           # e.g., ["Bash", "Read", "Edit"]
+  languages: []                       # e.g., ["python", "typescript"]
+  domains: []                         # e.g., ["backend", "infra"]
+
+# ── Skills ───────────────────────────────────────────────────────────────
+
+skills: []
