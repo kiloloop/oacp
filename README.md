@@ -8,44 +8,29 @@
 
 > **[Try the quickstart →](examples/quickstart/)** — send your first message to an AI agent in 5 minutes.
 
-**Empowering solo founders to coordinate AI agents, with human-in-the-loop for control.**
+**Coordinate agents without the chaos.**
 
-A file-based coordination protocol for multi-agent engineering workflows. OACP defines the message formats, state machines, review processes, and safety rules that enable AI agents on different runtimes to collaborate asynchronously through a shared filesystem.
+A file-based protocol for multi-agent engineering workflows. OACP defines the message formats, review processes, and safety rules that let AI agents on different runtimes collaborate through a shared filesystem. Not a framework or SDK — just conventions, YAML schemas, and scripts that any runtime can implement.
 
-**OACP is not a framework or SDK.** It is a set of conventions, YAML schemas, and shell scripts that any agent runtime can implement — Claude, Codex, Gemini, or your own.
-
-## Try it now
-
-See if your machine is ready for multi-agent workflows — no project setup required:
+## Quick Start
 
 ```bash
 pip install oacp-cli
-oacp doctor
+oacp init my-project --agents alice,bob
+oacp send my-project --from alice --to bob --type task_request \
+  --subject "Implement feature X" --body "Details here..."
 ```
 
-```
-[-] Environment
-    [+] git — git version 2.47.0
-    [+] python3 — Python 3.12.4
-    [+] gh — gh version 2.62.0 (2024-11-14)
-    [+] ruff — ruff 0.8.1
-    [-] shellcheck — not installed (optional)
-        Install: brew install shellcheck
-    [+] pyyaml — available
+When running inside a configured agent runtime, `--from` can be omitted — OACP infers the sender from `OACP_AGENT`, `AGENT_NAME`, or the agent card. See [QUICKSTART.md](QUICKSTART.md) for a full walkthrough.
 
-No issues found.
-```
+### What you get
 
-Doctor checks your CLI tools, and with `--project` it audits workspace structure, inbox health, YAML schemas, and agent status. See the [full doctor guide](docs/guides/doctor.md) for details.
-
-### Features
-
-- **Inbox/outbox messaging** — async YAML-based communication with threading, broadcast, and expiry
-- **Structured review loop** — severity-graded findings, quality gates, and multi-round review
-- **Durable shared memory** — project facts, decisions, open threads, and known debt with an explicit active/archive split
-- **Dispatch state machine** — full task lifecycle tracking from assignment to merge
-- **Agent safety defaults** — baseline rules for git, credentials, staging, and scope discipline
-- **Runtime-agnostic** — works with any agent runtime that can read/write files
+- **Inbox/outbox messaging** — async YAML messages with threading, broadcast, and expiry
+- **Structured review loop** — severity-graded findings, quality gates, multi-round review
+- **Inbox CLI** — `oacp inbox` lists pending messages across agents with table or `--json` output
+- **Durable shared memory** — project facts, decisions, and known debt with active/archive split
+- **Agent safety defaults** — baseline rules for git, credentials, and scope discipline
+- **Runtime-agnostic** — works with any runtime that reads/writes files
 
 ## Why OACP?
 
@@ -124,13 +109,16 @@ uv tool install .
 
 ## Commands
 
-- `oacp init` creates a project workspace under `$OACP_HOME/projects/`
-- `oacp memory` archives or restores project memory files
-- `oacp send` sends a protocol-compliant inbox message
-- `oacp doctor` checks environment and workspace health
-- `oacp validate` validates an inbox/outbox YAML message
+| Command | Description |
+|---------|-------------|
+| `oacp init` | Create a project workspace under `$OACP_HOME/projects/` |
+| `oacp send` | Send a protocol-compliant inbox message (`--from` auto-inferred) |
+| `oacp inbox` | List pending messages across agents (table or `--json`) |
+| `oacp memory` | Archive or restore project memory files |
+| `oacp doctor` | Check environment and workspace health |
+| `oacp validate` | Validate an inbox/outbox YAML message |
 
-If `OACP_HOME` is unset, workspace commands default to `~/oacp` (underscore).
+If `OACP_HOME` is unset, workspace commands default to `~/oacp`.
 
 ## Key Concepts
 
@@ -157,45 +145,9 @@ oacp/
 └── SPEC.md             # Full protocol specification
 ```
 
-## Quick Start
+## Related
 
-```bash
-# 1. Clone the repo
-git clone https://github.com/kiloloop/oacp.git
-cd oacp
-
-# 2. Install the CLI
-uv tool install oacp-cli
-
-# 3. Initialize a project workspace
-export OACP_HOME="$HOME/oacp"
-oacp init my-project
-
-# 4. Send your first message
-oacp send my-project \
-  --from alice --to bob --type task_request \
-  --subject "Implement feature X" \
-  --body "Details here..."
-
-# 5. Check environment health
-oacp doctor
-```
-
-See [QUICKSTART.md](QUICKSTART.md) for a complete 5-minute walkthrough.
-
-## Scripts
-
-OACP ships kernel scripts — the key CLI commands you'll use most:
-
-- **`oacp init`** — create a new project workspace (the first command you run)
-- **`oacp add-agent`** — add an agent to an existing project workspace
-- **`oacp memory`** — archive or restore project memory files
-- **`oacp setup`** — generate runtime-specific config files (Claude, Codex, Gemini)
-- **`oacp send`** — send protocol-compliant messages between agents
-- **`oacp doctor`** — environment and workspace health check
-- **`oacp validate`** — validate inbox/outbox YAML messages
-
-Run `make help` to see all available Makefile targets, or see [SPEC.md](SPEC.md) for the full script inventory.
+- **[agent-estimate](https://github.com/kiloloop/agent-estimate)** — Estimate how long agent tasks take. Pairs with OACP dispatch for task sizing.
 
 ## Prerequisites
 
