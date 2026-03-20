@@ -8,17 +8,17 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
-import re
 from pathlib import Path
 import sys
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from _oacp_constants import AGENT_RE, _write_if_missing
+
 DEFAULT_AGENTS = ("claude", "codex", "gemini")
-_AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 def _validate_agent_name(name: str) -> None:
-    if not _AGENT_NAME_RE.match(name):
+    if not AGENT_RE.fullmatch(name):
         raise ValueError(
             f"Invalid agent name '{name}': must start with alphanumeric, "
             f"contain only [A-Za-z0-9._-], and be 1-64 chars"
@@ -162,11 +162,6 @@ def _project_facts_template() -> str:
 def _validate_project_name(name: str) -> None:
     if name.startswith(".") or "/" in name or "\\" in name:
         raise ValueError("project name must not contain path separators or start with '.'")
-
-
-def _write_if_missing(path: Path, content: str) -> None:
-    if not path.exists():
-        path.write_text(content, encoding="utf-8")
 
 
 def initialize_workspace(

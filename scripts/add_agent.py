@@ -6,11 +6,7 @@
 from __future__ import annotations
 
 import argparse
-import datetime as dt
-import re
 import sys
-from contextlib import nullcontext
-from importlib import resources
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -19,18 +15,15 @@ try:
 except ImportError:  # pragma: no cover
     yaml = None  # type: ignore[assignment]
 
-AGENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-VALID_RUNTIMES = ("claude", "codex", "gemini")
+from _oacp_constants import (
+    AGENT_RE,
+    CREATABLE_RUNTIMES,
+    _template_path,
+    _write_if_missing,
+    utc_now_iso,
+)
+
 AGENT_SUBDIRS = ("inbox", "outbox", "dead_letter")
-
-
-def _template_path(relative: str):
-    """Resolve a template file — repo tree first, installed package fallback."""
-    repo_template = Path(__file__).resolve().parent.parent / "templates" / relative
-    if repo_template.is_file():
-        return nullcontext(repo_template)
-    resource = resources.files("oacp").joinpath("_templates", relative)
-    return resources.as_file(resource)
 
 
 def _load_runtime_capabilities() -> Dict[str, Any]:
@@ -49,18 +42,6 @@ def _load_template(relative: str) -> str:
         return path.read_text(encoding="utf-8")
 
 
-def _write_if_missing(path: Path, content: str) -> bool:
-    """Write content to *path* only if it does not already exist.
-
-    Returns True if the file was written, False if skipped.
-    """
-    if path.exists():
-        return False
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
-    return True
-
-
 def _render_status_yaml(
     agent_name: str, runtime: str, caps: Dict[str, Any]
 ) -> str:
@@ -74,9 +55,7 @@ def _render_status_yaml(
     ]
     for cap in caps.get("capabilities", []):
         lines.append(f"  - {cap}")
-    lines.append(
-        f'updated_at: "{dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}"'
-    )
+    lines.append(f'updated_at: "{utc_now_iso()}"')
     lines.append("")
     return "\n".join(lines)
 
@@ -159,7 +138,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("agent_name", help="Agent name (alphanumeric, dots, hyphens, underscores; max 64 chars)")
     parser.add_argument(
         "--runtime",
-        choices=VALID_RUNTIMES,
+        choices=CREATABLE_RUNTIMES,
         default=None,
         help="Agent runtime — generates status.yaml and agent_card.yaml with defaults",
     )
@@ -196,9 +175,9 @@ def add_agent(
             f"Invalid agent name '{agent_name}': must match {AGENT_RE.pattern}"
         )
 
-    if runtime is not None and runtime not in VALID_RUNTIMES:
+    if runtime is not None and runtime not in CREATABLE_RUNTIMES:
         raise ValueError(
-            f"Invalid runtime '{runtime}': must be one of {VALID_RUNTIMES}"
+            f"Invalid runtime '{runtime}': must be one of {CREATABLE_RUNTIMES}"
         )
 
     project_dir = oacp_root / "projects" / project_name

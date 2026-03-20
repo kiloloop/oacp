@@ -17,15 +17,15 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional, Tuple
 
+from _oacp_constants import AGENT_RE, ALL_RUNTIMES, utc_now_iso
 from _oacp_env import resolve_oacp_home
-from validate_message import AGENT_RE
 
 
 PROJECT_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 PACKET_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,256}$")
 SESSION_ID_SAFE_RE = re.compile(r"^[A-Za-z0-9._:-]{1,256}$")
 
-VALID_RUNTIMES = {"gemini", "claude", "codex", "human", "unknown"}
+VALID_RUNTIMES = set(ALL_RUNTIMES)
 VALID_ROLES = {"orchestrator", "qa", "reviewer", "implementer", "deploy", "human"}
 VALID_CLOSE_STATUS = {"completed", "blocked", "aborted"}
 VALID_PACKET_STATES = {
@@ -46,7 +46,7 @@ class SessionLifecycleError(Exception):
 
 
 def now_utc() -> str:
-    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return utc_now_iso()
 
 
 def now_compact() -> str:

@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 import yaml  # type: ignore[import-untyped]
 
+from _oacp_constants import utc_now_iso
 from _oacp_env import resolve_oacp_home
 
 
@@ -45,7 +46,7 @@ DEFAULT_CAPABILITIES = [
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return utc_now_iso(datetime.now(timezone.utc).replace(microsecond=0))
 
 
 def _project_name_from_json(path: Path) -> Optional[str]:

@@ -22,10 +22,7 @@ from __future__ import annotations
 
 import argparse
 import copy
-import re
 import sys
-from contextlib import nullcontext
-from importlib import resources
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
@@ -39,8 +36,10 @@ except ImportError:  # pragma: no cover
 # Helpers
 # ---------------------------------------------------------------------------
 
-VALID_RUNTIMES = ("claude", "codex", "gemini", "human")
-NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+from _oacp_constants import AGENT_RE, ALL_RUNTIMES, _template_path, _write_if_missing
+
+VALID_RUNTIMES = tuple(runtime for runtime in ALL_RUNTIMES if runtime != "unknown")
+NAME_RE = AGENT_RE
 
 
 def _validate_name(name: str) -> Optional[str]:
@@ -48,17 +47,6 @@ def _validate_name(name: str) -> Optional[str]:
     if not NAME_RE.fullmatch(name):
         return f"invalid agent name '{name}': must be 1-64 alphanumeric chars, dots, hyphens, or underscores"
     return None
-
-
-def _template_path(relative: str):
-    """Resolve a template file — repo tree first, installed package fallback."""
-    repo_template = Path(__file__).resolve().parent.parent / "templates" / relative
-    if repo_template.is_file():
-        return nullcontext(repo_template)
-    resource = resources.files("oacp").joinpath("_templates", relative)
-    return resources.as_file(resource)
-
-
 def _load_yaml(path: Path) -> Dict[str, Any]:
     """Load a YAML file using PyYAML."""
     if yaml is None:
@@ -77,17 +65,6 @@ def _dump_yaml(data: Dict[str, Any]) -> str:
     if yaml is None:
         raise RuntimeError("PyYAML is required: pip install pyyaml")
     return yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
-
-
-def _write_if_missing(path: Path, content: str) -> bool:
-    """Write content to *path* only if it does not already exist."""
-    if path.exists():
-        return False
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
-    return True
-
-
 # ---------------------------------------------------------------------------
 # Merge logic
 # ---------------------------------------------------------------------------

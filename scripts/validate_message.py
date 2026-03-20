@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from _oacp_constants import AGENT_RE
+
 from handoff_schema import (  # noqa: E402
     validate_handoff_complete_text,
     validate_handoff_packet_text,
@@ -52,7 +54,6 @@ ALLOWED_TYPES = {
     "brainstorm_followup",
 }
 ALLOWED_PRIORITIES = {"P0", "P1", "P2", "P3"}
-AGENT_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 CONVERSATION_ID_RE = re.compile(r"^conv-\d{8}-[A-Za-z0-9._-]{1,64}-\d{1,6}$")
@@ -203,6 +204,12 @@ def _as_scalar_str(data: Dict[str, Any], key: str, errors: List[str]) -> str:
 CHANNEL_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
+def _agent_pattern_error(field: str, value: Optional[str] = None) -> str:
+    if value is None:
+        return f"field '{field}' must match {AGENT_RE.pattern}"
+    return f"field '{field}' list entry '{value}' must match {AGENT_RE.pattern}"
+
+
 def validate_message_dict(data: Dict[str, Any]) -> List[str]:
     errors: List[str] = []
 
@@ -234,7 +241,7 @@ def validate_message_dict(data: Dict[str, Any]) -> List[str]:
                 if not s:
                     errors.append("field 'to' list contains empty entry")
                 elif not AGENT_RE.fullmatch(s):
-                    errors.append(f"field 'to' list entry '{s}' must match ^[A-Za-z0-9._-]{{1,64}}$")
+                    errors.append(_agent_pattern_error("to", s))
                 else:
                     recipients.append(s)
             if sender and sender in recipients:
@@ -249,7 +256,7 @@ def validate_message_dict(data: Dict[str, Any]) -> List[str]:
         if not recipient_str:
             errors.append("field 'to' must be non-empty")
         elif not AGENT_RE.fullmatch(recipient_str):
-            errors.append("field 'to' must match ^[A-Za-z0-9._-]{1,64}$")
+            errors.append(_agent_pattern_error("to"))
         else:
             recipients.append(recipient_str)
 
@@ -259,7 +266,7 @@ def validate_message_dict(data: Dict[str, Any]) -> List[str]:
             errors.append(f"field '{optional}' must be a scalar value")
 
     if sender and not AGENT_RE.fullmatch(sender):
-        errors.append("field 'from' must match ^[A-Za-z0-9._-]{1,64}$")
+        errors.append(_agent_pattern_error("from"))
     if msg_type and msg_type not in ALLOWED_TYPES:
         errors.append(f"field 'type' must be one of: {', '.join(sorted(ALLOWED_TYPES))}")
     if priority and priority not in ALLOWED_PRIORITIES:

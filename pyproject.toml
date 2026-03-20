@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "oacp-cli"
-version = "0.1.9"
+version = "0.2.0"
 description = "Open Agent Coordination Protocol CLI for file-based multi-agent workflows"
 readme = "README.md"
 license = "Apache-2.0"
@@ -50,6 +50,7 @@ packages = ["oacp"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "scripts/codex_session_init.py" = "oacp/_scripts/codex_session_init.py"
+"scripts/_oacp_constants.py" = "oacp/_scripts/_oacp_constants.py"
 "scripts/_oacp_env.py" = "oacp/_scripts/_oacp_env.py"
 "scripts/handoff_schema.py" = "oacp/_scripts/handoff_schema.py"
 "scripts/oacp_doctor.py" = "oacp/_scripts/oacp_doctor.py"
@@ -59,6 +60,7 @@ packages = ["oacp"]
 "scripts/validate_message.py" = "oacp/_scripts/validate_message.py"
 "scripts/add_agent.py" = "oacp/_scripts/add_agent.py"
 "scripts/agent_profile.py" = "oacp/_scripts/agent_profile.py"
+"scripts/oacp_inbox.py" = "oacp/_scripts/oacp_inbox.py"
 "scripts/memory_cli.py" = "oacp/_scripts/memory_cli.py"
 "scripts/memory_archive_common.py" = "oacp/_scripts/memory_archive_common.py"
 "scripts/promote_to_archive.py" = "oacp/_scripts/promote_to_archive.py"

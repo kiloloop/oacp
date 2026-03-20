@@ -38,6 +38,8 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Sequence
 
+from _oacp_constants import utc_now_iso
+
 ALLOWED_TYPES = ("decision", "event", "rule")
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$|^[a-z0-9]$")
 
@@ -97,7 +99,7 @@ def build_event(
 
     filename = now.strftime("%Y%m%d-%H%M%S") + f"-{slug}.md"
     date_str = now.strftime("%Y-%m-%d")
-    timestamp_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp_str = utc_now_iso(now)
 
     # Build frontmatter
     lines = [
