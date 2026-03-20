@@ -140,6 +140,10 @@ class TestName(unittest.TestCase):
         errors = validate_agent_card(_base_card(name="path/traversal"))
         self.assertTrue(any("name" in e for e in errors))
 
+    def test_invalid_name_leading_underscore(self):
+        errors = validate_agent_card(_base_card(name="_bot"))
+        self.assertTrue(any("name" in e for e in errors))
+
 
 class TestRuntime(unittest.TestCase):
     def test_valid_runtimes(self):

@@ -11,6 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
+from _oacp_constants import AGENT_RE  # noqa: E402
 from validate_message import validate_message_dict  # noqa: E402
 
 
@@ -55,6 +56,11 @@ class TestToListSelfSend(unittest.TestCase):
         msg = _base_msg(**{"from": "claude", "to": ["claude", "codex"]})
         errors = validate_message_dict(msg)
         self.assertTrue(any("must not include the sender" in e for e in errors))
+
+    def test_sender_with_leading_underscore_rejected(self):
+        msg = _base_msg(**{"from": "_bot"})
+        errors = validate_message_dict(msg)
+        self.assertTrue(any(AGENT_RE.pattern in e for e in errors))
 
 
 class TestHandoffBroadcastRejected(unittest.TestCase):

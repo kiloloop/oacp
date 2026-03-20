@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Optional
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -22,6 +23,8 @@ from send_inbox_message import (  # noqa: E402
     generate_filename,
     generate_message_id,
     generate_timestamp,
+    infer_current_runtime,
+    infer_sender,
     render_yaml,
     resolve_body,
     send_message,
@@ -30,6 +33,28 @@ from send_inbox_message import (  # noqa: E402
 )
 
 from validate_message import validate_message_dict  # noqa: E402
+
+
+def _write_agent_card(
+    root: Path,
+    project: str,
+    agent: str,
+    runtime: str,
+    name: Optional[str] = None,
+) -> None:
+    card_path = root / "projects" / project / "agents" / agent / "agent_card.yaml"
+    card_path.parent.mkdir(parents=True, exist_ok=True)
+    card_path.write_text(
+        "\n".join(
+            [
+                'version: "0.2.0"',
+                f'name: "{name or agent}"',
+                f'runtime: "{runtime}"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
 
 class TestGenerateMessageId(unittest.TestCase):
@@ -58,11 +83,11 @@ class TestGenerateTimestamp(unittest.TestCase):
 class TestGenerateFilename(unittest.TestCase):
     def test_basic(self):
         fn = generate_filename("claude", "task_request")
-        self.assertRegex(fn, r"^\d{14}_claude_task_request_[a-z0-9]{4}\.yaml$")
+        self.assertRegex(fn, r"^\d{14}_claude_task_request_[0-9a-f]{4}\.yaml$")
 
     def test_with_suffix(self):
         fn = generate_filename("codex", "notification", suffix="issue42")
-        self.assertRegex(fn, r"^\d{14}_codex_notification_[a-z0-9]{4}_issue42\.yaml$")
+        self.assertRegex(fn, r"^\d{14}_codex_notification_[0-9a-f]{4}_issue42\.yaml$")
 
     def test_no_suffix(self):
         fn = generate_filename("gemini", "handoff")
@@ -691,6 +716,148 @@ class TestMainCli(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         self.assertIn("Piped stdin body", stdout)
+
+    def test_sender_inferred_from_oacp_agent_env(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"OACP_AGENT": "claude"}, clear=False):
+                code, stdout, stderr = self._run_main([
+                    "test-project",
+                    "--to", "codex",
+                    "--type", "task_request",
+                    "--subject", "Env sender",
+                    "--body", "Body",
+                    "--oacp-dir", tmpdir,
+                    "--dry-run",
+                ])
+        self.assertEqual(code, 0)
+        self.assertIn("from: claude", stdout)
+
+    def test_sender_inferred_from_agent_name_env(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"AGENT_NAME": "iris"}, clear=False):
+                code, stdout, stderr = self._run_main([
+                    "test-project",
+                    "--to", "codex",
+                    "--type", "task_request",
+                    "--subject", "Agent name sender",
+                    "--body", "Body",
+                    "--oacp-dir", tmpdir,
+                    "--dry-run",
+                ])
+        self.assertEqual(code, 0)
+        self.assertIn("from: iris", stdout)
+
+    def test_explicit_sender_wins_over_oacp_agent_env(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {"OACP_AGENT": "claude"}, clear=False):
+                code, stdout, stderr = self._run_main([
+                    "test-project",
+                    "--from", "codex",
+                    "--to", "claude",
+                    "--type", "notification",
+                    "--subject", "Explicit wins",
+                    "--body", "Body",
+                    "--oacp-dir", tmpdir,
+                    "--dry-run",
+                ])
+        self.assertEqual(code, 0)
+        self.assertIn("from: codex", stdout)
+
+    def test_sender_inferred_from_single_matching_agent_card(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _write_agent_card(root, "test-project", "iris", "codex")
+            _write_agent_card(root, "test-project", "claude", "claude")
+            with mock.patch.dict(os.environ, {"OACP_RUNTIME": "codex"}, clear=False):
+                code, stdout, stderr = self._run_main([
+                    "test-project",
+                    "--to", "claude",
+                    "--type", "question",
+                    "--subject", "Card sender",
+                    "--body", "Body",
+                    "--oacp-dir", tmpdir,
+                    "--dry-run",
+                ])
+        self.assertEqual(code, 0)
+        self.assertIn("from: iris", stdout)
+
+    def test_missing_sender_inference_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {}, clear=True):
+                code, stdout, stderr = self._run_main([
+                    "test-project",
+                    "--to", "codex",
+                    "--type", "task_request",
+                    "--subject", "No sender",
+                    "--body", "Body",
+                    "--oacp-dir", tmpdir,
+                ])
+        self.assertEqual(code, 2)
+        self.assertIn("Cannot infer sender", stderr)
+
+    def test_missing_sender_inference_json_error_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(os.environ, {}, clear=True):
+                code, stdout, stderr = self._run_main([
+                    "test-project",
+                    "--to", "codex",
+                    "--type", "task_request",
+                    "--subject", "No sender",
+                    "--body", "Body",
+                    "--oacp-dir", tmpdir,
+                    "--json",
+                ])
+        self.assertEqual(code, 2)
+        self.assertEqual(stderr, "")
+        data = json.loads(stdout)
+        self.assertIn("Cannot infer sender", data["error"])
+
+
+class TestSenderInference(unittest.TestCase):
+    def test_infer_current_runtime_prefers_oacp_runtime(self):
+        env = {"OACP_RUNTIME": "claude", "CODEX_SHELL": "1"}
+        self.assertEqual(infer_current_runtime(env), "claude")
+
+    def test_infer_sender_from_single_matching_agent_card(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _write_agent_card(root, "demo", "iris", "codex")
+            _write_agent_card(root, "demo", "gemini", "gemini")
+            sender = infer_sender(
+                "demo",
+                oacp_dir=root,
+                env={"OACP_RUNTIME": "codex"},
+            )
+        self.assertEqual(sender, "iris")
+
+    def test_infer_sender_from_agent_name_env(self):
+        sender = infer_sender(
+            "demo",
+            oacp_dir=Path("/unused"),
+            env={"AGENT_NAME": "iris"},
+        )
+        self.assertEqual(sender, "iris")
+
+    def test_infer_sender_prefers_oacp_agent_over_agent_name(self):
+        sender = infer_sender(
+            "demo",
+            oacp_dir=Path("/unused"),
+            env={"OACP_AGENT": "codex", "AGENT_NAME": "iris"},
+        )
+        self.assertEqual(sender, "codex")
+
+    def test_infer_sender_rejects_ambiguous_matching_agent_cards(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _write_agent_card(root, "demo", "iris", "codex")
+            _write_agent_card(root, "demo", "codex2", "codex")
+            with self.assertRaises(ValueError) as ctx:
+                infer_sender(
+                    "demo",
+                    oacp_dir=root,
+                    env={"OACP_RUNTIME": "codex"},
+                )
+        self.assertIn("multiple agent cards match", str(ctx.exception))
 
 
 class TestBroadcast(unittest.TestCase):

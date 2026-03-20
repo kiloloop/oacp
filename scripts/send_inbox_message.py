@@ -8,11 +8,11 @@ Builds a valid OACP inbox YAML message, validates it against the schema
 outbox directories.
 
 Usage:
-    send_inbox_message.py <project> --from <sender> --to <recipient> \\
+    send_inbox_message.py <project> [--from <sender>] --to <recipient> \\
         --type <type> --subject <subject> --body <body> [options]
 
 Options:
-    --from <agent>              Sender agent name
+    --from <agent>              Sender agent name (optional if inferred)
     --to <agent>                Recipient agent name
     --type <type>               Message type (task_request|question|notification|handoff|handoff_complete)
     --subject <text>            Message subject line
@@ -44,12 +44,14 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
-import random
+import os
 import re
-import string
+import secrets
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
+
+from _oacp_constants import utc_now_iso
 
 # Import validation from sibling script
 _scripts_dir = Path(__file__).resolve().parent
@@ -89,16 +91,26 @@ def generate_message_id(sender: str) -> str:
     """Generate a unique message ID: msg-<compact_ts>-<sender>-<rand4>."""
     now = dt.datetime.now(dt.timezone.utc)
     compact_ts = now.strftime("%Y%m%d%H%M%S")
-    rand4 = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
+    rand4 = secrets.token_hex(2)
     return f"msg-{compact_ts}-{sender}-{rand4}"
 
 
 def generate_timestamp() -> str:
     """Generate a UTC RFC3339 timestamp (seconds precision)."""
-    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return utc_now_iso()
 
 
 _SAFE_SUFFIX_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_VALID_RUNTIMES = frozenset({"claude", "codex", "gemini", "human"})
+_RUNTIME_MARKERS = (
+    ("CODEX_CI", "codex"),
+    ("CODEX_SHELL", "codex"),
+    ("CODEX_THREAD_ID", "codex"),
+    ("CLAUDECODE", "claude"),
+    ("CLAUDE_CODE", "claude"),
+    ("GEMINI_CLI", "gemini"),
+    ("GEMINI_AGENT", "gemini"),
+)
 
 
 def generate_filename(
@@ -111,11 +123,96 @@ def generate_filename(
     """
     now = dt.datetime.now(dt.timezone.utc)
     ts = now.strftime("%Y%m%d%H%M%S")
-    rand4 = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
+    rand4 = secrets.token_hex(2)
     parts = [ts, sender, msg_type, rand4]
     if suffix:
         parts.append(suffix)
     return "_".join(parts) + ".yaml"
+
+
+def infer_current_runtime(env: Optional[Mapping[str, str]] = None) -> Optional[str]:
+    """Best-effort runtime detection for sender inference."""
+    env_map = os.environ if env is None else env
+    value = str(env_map.get("OACP_RUNTIME", "")).strip().lower()
+    if value in _VALID_RUNTIMES:
+        return value
+    for key, runtime in _RUNTIME_MARKERS:
+        if str(env_map.get(key, "")).strip():
+            return runtime
+    return None
+
+
+def _matching_agent_cards(project_dir: Path, runtime: str) -> List[str]:
+    """Return project agent names whose agent_card.yaml runtime matches *runtime*."""
+    from validate_message import _parse_simple_yaml
+
+    agents_dir = project_dir / "agents"
+    if not agents_dir.is_dir():
+        return []
+
+    matches: List[str] = []
+    for agent_dir in sorted(agents_dir.iterdir()):
+        if not agent_dir.is_dir():
+            continue
+        card_path = agent_dir / "agent_card.yaml"
+        if not card_path.is_file():
+            continue
+        try:
+            card = _parse_simple_yaml(card_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        card_runtime = str(card.get("runtime", "")).strip().lower()
+        if card_runtime == runtime:
+            agent_name = str(card.get("name", "")).strip() or agent_dir.name
+            matches.append(agent_name)
+    return matches
+
+
+def infer_sender(
+    project: str,
+    explicit_sender: Optional[str] = None,
+    *,
+    oacp_dir: Optional[Path] = None,
+    env: Optional[Mapping[str, str]] = None,
+) -> str:
+    """Infer the sender using CLI/env/project-card precedence."""
+    if explicit_sender:
+        return explicit_sender
+
+    env_map = os.environ if env is None else env
+    env_sender = str(env_map.get("OACP_AGENT", "")).strip()
+    if env_sender:
+        return env_sender
+    agent_name = str(env_map.get("AGENT_NAME", "")).strip()
+    if agent_name:
+        return agent_name
+
+    if oacp_dir is None:
+        from _oacp_env import resolve_oacp_home
+
+        oacp_dir = resolve_oacp_home()
+
+    current_runtime = infer_current_runtime(env_map)
+    if current_runtime:
+        matches = _matching_agent_cards(oacp_dir / "projects" / project, current_runtime)
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            match_list = ", ".join(matches)
+            raise ValueError(
+                "Cannot infer sender — multiple agent cards match current runtime "
+                f"{current_runtime!r}: {match_list}. Use --from, OACP_AGENT, or AGENT_NAME."
+            )
+
+    raise ValueError("Cannot infer sender — use --from, OACP_AGENT, or AGENT_NAME.")
+
+
+def _emit_error(message: str, *, json_output: bool) -> None:
+    """Emit a CLI error in human-readable or JSON form."""
+    if json_output:
+        print(json.dumps({"error": message}))
+    else:
+        print(f"ERROR: {message}", file=sys.stderr)
 
 
 def resolve_body(
@@ -536,13 +633,20 @@ def main() -> int:
         description="Compose and send a protocol-compliant agent inbox message.",
         epilog=(
             "Reference: docs/protocol/inbox_outbox.md (Issue #68/#80)\n\n"
+            "Sender resolution order: --from, OACP_AGENT, AGENT_NAME, project agent card runtime match.\n"
+            "Card runtime fallback checks OACP_RUNTIME and runtime-specific environment markers.\n"
             "Suggested channels: brainstorm, review, deploy, incident\n"
             "(Channels are free-text — these are hints, not enforced.)"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("project", help="Agent hub project name")
-    parser.add_argument("--from", dest="sender", required=True, help="Sender agent name")
+    parser.add_argument(
+        "--from",
+        dest="sender",
+        default=None,
+        help="Sender agent name (optional if inferred from OACP_AGENT, AGENT_NAME, or agent cards)",
+    )
     parser.add_argument(
         "--to",
         dest="recipient",
@@ -605,12 +709,19 @@ def main() -> int:
     parser.add_argument("--quiet", action="store_true", help="Suppress success output")
 
     args = parser.parse_args()
+    oacp_dir = Path(args.oacp_dir) if args.oacp_dir else None
+
+    try:
+        sender = infer_sender(args.project, args.sender, oacp_dir=oacp_dir)
+    except ValueError as exc:
+        _emit_error(str(exc), json_output=args.json_output)
+        return 2
 
     # Resolve body
     try:
         body = resolve_body(args.body, args.body_file)
     except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        _emit_error(str(exc), json_output=args.json_output)
         return 2
 
     # Resolve context keys from file if provided
@@ -618,7 +729,10 @@ def main() -> int:
     if args.context_keys_file:
         ck_path = Path(args.context_keys_file)
         if not ck_path.is_file():
-            print(f"ERROR: context-keys file not found: {args.context_keys_file}", file=sys.stderr)
+            _emit_error(
+                f"context-keys file not found: {args.context_keys_file}",
+                json_output=args.json_output,
+            )
             return 2
         context_keys = ck_path.read_text(encoding="utf-8").rstrip("\n")
 
@@ -628,14 +742,14 @@ def main() -> int:
         try:
             expires_at = parse_duration_to_expires(args.expires)
         except ValueError as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
+            _emit_error(str(exc), json_output=args.json_output)
             return 2
 
     # Send
     try:
         report = send_message(
             project=args.project,
-            sender=args.sender,
+            sender=sender,
             recipient=args.recipient,
             msg_type=args.msg_type,
             subject=args.subject,
@@ -647,17 +761,14 @@ def main() -> int:
             parent_message_id=args.parent_message_id,
             context_keys=context_keys,
             suffix=args.suffix,
-            oacp_dir=Path(args.oacp_dir) if args.oacp_dir else None,
+            oacp_dir=oacp_dir,
             dry_run=args.dry_run,
             expires_at=expires_at,
             channel=args.channel,
             in_reply_to=args.in_reply_to,
         )
     except ValueError as exc:
-        if args.json_output:
-            print(json.dumps({"error": str(exc)}))
-        else:
-            print(f"ERROR: {exc}", file=sys.stderr)
+        _emit_error(str(exc), json_output=args.json_output)
         return 1
 
     # Print warnings

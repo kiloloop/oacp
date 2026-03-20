@@ -24,6 +24,8 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
+from _oacp_constants import AGENT_RE, ALL_RUNTIMES
+
 # ---------------------------------------------------------------------------
 # Schema definitions
 # ---------------------------------------------------------------------------
@@ -49,7 +51,7 @@ OPTIONAL_FIELDS = (
 
 ALLOWED_FIELDS = set(REQUIRED_FIELDS + OPTIONAL_FIELDS)
 
-ALLOWED_RUNTIMES = {"claude", "codex", "gemini", "human", "unknown"}
+ALLOWED_RUNTIMES = set(ALL_RUNTIMES)
 
 ALLOWED_MESSAGE_TYPES = {
     "task_request",
@@ -66,28 +68,11 @@ ALLOWED_MESSAGE_TYPES = {
     "brainstorm_followup",
 }
 
-# Canonical 13 capability keys from runtime_capabilities.md
-CANONICAL_CAPABILITIES = {
-    "headless",
-    "mcp_tools",
-    "shell_access",
-    "git_ops",
-    "github_cli",
-    "subagents",
-    "parallel_teams",
-    "web_search",
-    "browser",
-    "session_memory",
-    "notifications",
-    "async_tasks",
-    "image_generation",
-}
-
 SKILL_REQUIRED_FIELDS = {"id", "name", "description"}
 SKILL_OPTIONAL_FIELDS = {"tags", "examples"}
 SKILL_ALLOWED_FIELDS = SKILL_REQUIRED_FIELDS | SKILL_OPTIONAL_FIELDS
 
-NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+NAME_RE = AGENT_RE
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 ALLOWED_TRUST_LEVELS = {"untrusted", "standard", "elevated", "admin"}
@@ -294,7 +279,8 @@ def validate_agent_card(data: Dict[str, Any]) -> List[str]:
     name = str(data.get("name", "")).strip()
     if name and not NAME_RE.fullmatch(name):
         errors.append(
-            "field 'name' must be 1-64 chars of alphanumeric, dots, hyphens, or underscores"
+            "field 'name' must start with an alphanumeric character, then use up to 63 "
+            "additional alphanumeric, dot, hyphen, or underscore characters"
         )
 
     # runtime

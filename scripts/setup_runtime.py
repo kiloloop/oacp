@@ -8,12 +8,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from contextlib import nullcontext
-from importlib import resources
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-VALID_RUNTIMES = ("claude", "codex", "gemini")
+from _oacp_constants import CREATABLE_RUNTIMES, _template_path, _write_if_missing
 
 # ── Inline defaults (used when no template file exists) ──────────────────────
 
@@ -64,17 +62,6 @@ oacp send <project> --from gemini ...    # send a message
 oacp validate <message.yaml>             # validate a message
 ```
 """
-
-
-def _template_path(relative: str):
-    """Resolve a template file — repo tree first, installed package fallback."""
-    repo_template = Path(__file__).resolve().parent.parent / "templates" / relative
-    if repo_template.is_file():
-        return nullcontext(repo_template)
-    resource = resources.files("oacp").joinpath("_templates", relative)
-    return resources.as_file(resource)
-
-
 def _load_template(relative: str) -> Optional[str]:
     """Load a template file, returning None if not found."""
     try:
@@ -82,20 +69,6 @@ def _load_template(relative: str) -> Optional[str]:
             return path.read_text(encoding="utf-8")
     except (FileNotFoundError, TypeError):
         return None
-
-
-def _write_if_missing(path: Path, content: str) -> bool:
-    """Write content to *path* only if it does not already exist.
-
-    Returns True if the file was written, False if skipped.
-    """
-    if path.exists():
-        return False
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
-    return True
-
-
 def _detect_repo_root(start: Path) -> Optional[Path]:
     """Walk up from *start* looking for a .git directory."""
     for d in (start, *start.parents):
@@ -125,7 +98,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "runtime",
-        choices=VALID_RUNTIMES,
+        choices=CREATABLE_RUNTIMES,
         help="Target runtime to configure",
     )
     parser.add_argument(
@@ -156,9 +129,9 @@ def setup_runtime(
 
     Returns a dict with ``created_files`` and ``skipped_files``.
     """
-    if runtime not in VALID_RUNTIMES:
+    if runtime not in CREATABLE_RUNTIMES:
         raise ValueError(
-            f"Invalid runtime '{runtime}': must be one of {VALID_RUNTIMES}"
+            f"Invalid runtime '{runtime}': must be one of {CREATABLE_RUNTIMES}"
         )
 
     created_files: List[str] = []

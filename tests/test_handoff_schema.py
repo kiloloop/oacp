@@ -12,6 +12,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
+from _oacp_constants import AGENT_RE  # noqa: E402
 from handoff_schema import (  # noqa: E402
     validate_handoff_complete_text,
     validate_handoff_packet_text,
@@ -60,6 +61,11 @@ class TestHandoffPacketSchema(unittest.TestCase):
         errors = validate_handoff_packet_text(broken)
         self.assertTrue(any("must differ" in err for err in errors))
 
+    def test_rejects_leading_punctuation_agent_names(self) -> None:
+        broken = VALID_HANDOFF_BODY.replace('source_agent: "codex"', 'source_agent: "_bot"')
+        errors = validate_handoff_packet_text(broken)
+        self.assertTrue(any(AGENT_RE.pattern in err for err in errors))
+
 
 class TestHandoffCompleteSchema(unittest.TestCase):
     def test_valid_handoff_complete(self) -> None:
@@ -92,6 +98,17 @@ tests_run: "make test"
 """
         errors = validate_handoff_complete_text(body)
         self.assertTrue(any("next_owner" in err for err in errors))
+
+    def test_rejects_invalid_next_owner_pattern(self) -> None:
+        body = """\
+issue: "#77"
+pr: "84"
+branch: "codex/issue-77-handoff-protocol"
+tests_run: "make test"
+next_owner: "_bot"
+"""
+        errors = validate_handoff_complete_text(body)
+        self.assertTrue(any(AGENT_RE.pattern in err for err in errors))
 
 
 if __name__ == "__main__":

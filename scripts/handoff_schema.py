@@ -8,7 +8,11 @@ from __future__ import annotations
 import re
 from typing import List, Optional, Tuple
 
-AGENT_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+from _oacp_constants import AGENT_RE
+
+
+def _agent_pattern_error(field: str) -> str:
+    return f"field '{field}' must match {AGENT_RE.pattern}"
 
 
 def _line_indent(line: str) -> int:
@@ -101,9 +105,9 @@ def validate_handoff_packet_text(text: str) -> List[str]:
     source = scalars.get("source_agent")
     target = scalars.get("target_agent")
     if source and not AGENT_RE.fullmatch(source):
-        errors.append("field 'source_agent' must match ^[A-Za-z0-9._-]{1,64}$")
+        errors.append(_agent_pattern_error("source_agent"))
     if target and not AGENT_RE.fullmatch(target):
-        errors.append("field 'target_agent' must match ^[A-Za-z0-9._-]{1,64}$")
+        errors.append(_agent_pattern_error("target_agent"))
     if source and target and source == target:
         errors.append("field 'target_agent' must differ from 'source_agent'")
 
@@ -160,6 +164,6 @@ def validate_handoff_complete_text(text: str) -> List[str]:
 
     owner = values.get("next_owner", "")
     if owner and not AGENT_RE.fullmatch(owner):
-        errors.append("field 'next_owner' must match ^[A-Za-z0-9._-]{1,64}$")
+        errors.append(_agent_pattern_error("next_owner"))
 
     return errors

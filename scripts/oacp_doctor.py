@@ -33,26 +33,13 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from _oacp_constants import ALL_RUNTIMES, CANONICAL_CAPABILITIES, utc_now_iso
+
 Runner = Callable[[Sequence[str]], Tuple[int, str]]
 WhichFn = Callable[[str], Optional[str]]
 
-VALID_RUNTIMES = {"claude", "codex", "gemini", "human", "unknown"}
+VALID_RUNTIMES = set(ALL_RUNTIMES)
 VALID_STATUSES = {"available", "busy", "offline"}
-CANONICAL_CAPABILITIES = {
-    "headless",
-    "mcp_tools",
-    "shell_access",
-    "git_ops",
-    "github_cli",
-    "subagents",
-    "parallel_teams",
-    "web_search",
-    "browser",
-    "session_memory",
-    "notifications",
-    "async_tasks",
-    "image_generation",
-}
 STALE_STATUS_HOURS = 1
 STALE_INBOX_HOURS = 24
 YAML_EXTENSIONS = {".yaml", ".yml"}
@@ -716,9 +703,7 @@ def apply_fixes(
                 tmpl = template_path if template_path.is_file() else repo_template
                 if tmpl.is_file():
                     content = tmpl.read_text(encoding="utf-8")
-                    now_str = dt.datetime.now(dt.timezone.utc).strftime(
-                        "%Y-%m-%dT%H:%M:%SZ"
-                    )
+                    now_str = utc_now_iso()
                     # Set runtime to agent name (if recognized) or "unknown"
                     runtime = agent_name if agent_name in VALID_RUNTIMES else "unknown"
                     content = re.sub(
@@ -741,9 +726,7 @@ def apply_fixes(
             elif result.fixable == "update_status":
                 status_file = agent_dir / "status.yaml"
                 if status_file.is_file():
-                    now_str = dt.datetime.now(dt.timezone.utc).strftime(
-                        "%Y-%m-%dT%H:%M:%SZ"
-                    )
+                    now_str = utc_now_iso()
                     text = status_file.read_text(encoding="utf-8")
                     text = re.sub(
                         r'^updated_at:.*$',

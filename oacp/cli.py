@@ -22,6 +22,7 @@ Commands:
   init           Create a project workspace under $OACP_HOME/projects/
   add-agent      Add an agent to an existing project workspace
   agent          Manage global agent profiles (init, show, list)
+  inbox          List pending inbox messages
   memory         Archive or restore project memory files
   setup          Generate runtime-specific config files in a repo
   send           Send a protocol-compliant inbox message
@@ -34,9 +35,10 @@ Examples:
   oacp init my-project --repo /path/to/repo
   oacp init my-project --agents claude,codex
   oacp add-agent my-project alice --runtime claude
+  oacp inbox my-project --agent claude
   oacp memory archive my-project research_notes.md
   oacp setup claude --project my-project
-  oacp send my-project --from codex --to iris --type notification --subject "Done" --body "Completed"
+  oacp send my-project --to iris --type notification --subject "Done" --body "Completed"
   oacp org-memory init
   oacp write-event --agent claude --project my-project --type decision --slug api-convention --body "Use REST for public APIs"
   oacp doctor
@@ -47,6 +49,7 @@ SCRIPT_NAMES = {
     "init": "init_project_workspace.py",
     "add-agent": "add_agent.py",
     "agent": "agent_profile.py",
+    "inbox": "oacp_inbox.py",
     "memory": "memory_cli.py",
     "setup": "setup_runtime.py",
     "send": "send_inbox_message.py",
