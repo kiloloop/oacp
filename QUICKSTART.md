@@ -5,7 +5,6 @@ Get from zero to your first agent-to-agent message in 5 minutes.
 ## Prerequisites
 
 - Python 3.9+ and Bash 3.2+
-- `pip install pyyaml`
 
 ## 1. Set Up OACP Home
 
@@ -33,6 +32,12 @@ pipx install oacp-cli
 ## 3. Initialize a Project
 
 Every project gets its own workspace with agent inboxes, shared memory, and packet directories.
+
+```bash
+oacp init my-first-project --agents claude,codex,gemini --repo /path/to/repo
+```
+
+Or with defaults (agents: claude, codex, gemini):
 
 ```bash
 oacp init my-first-project

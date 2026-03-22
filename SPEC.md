@@ -1,6 +1,6 @@
 # OACP — Protocol Specification
 
-**Version**: 0.1.0
+**Version**: 0.2.0
 **License**: Apache-2.0
 
 This document is the protocol specification for OACP (Open Agent Coordination Protocol) — a file-based coordination layer for multi-agent engineering workflows. It defines the message formats, state machines, review processes, and safety rules that enable agents on different runtimes (Claude, Codex, Gemini, or any future runtime) to collaborate asynchronously through a shared filesystem.
@@ -16,7 +16,8 @@ OACP is not a framework or SDK. It is a set of conventions, YAML schemas, and sh
 3. [Review Loop Protocol](#3-review-loop-protocol)
 4. [Cross-Runtime Sync](#4-cross-runtime-sync)
 5. [Agent Safety Defaults](#5-agent-safety-defaults)
-6. [Kernel Script Inventory](#6-kernel-script-inventory)
+6. [Org-Level Memory](#6-org-level-memory)
+7. [Kernel Script Inventory](#7-kernel-script-inventory)
 
 ---
 
@@ -450,36 +451,105 @@ Agents operate under least-privilege credentials:
 
 ---
 
-## 6. Kernel Script Inventory
+## 6. Org-Level Memory
+
+Full specification: [`docs/protocol/org_memory.md`](docs/protocol/org_memory.md)
+
+### Purpose
+
+Shared, cross-project memory for multi-agent organizations. Agents across projects read org-wide decisions, conventions, and events from a single location. Complements per-project memory — does not replace it.
+
+### Directory Structure
+
+```
+$OACP_HOME/org-memory/
+├── recent.md           # Always-loaded rolling summary (~150 lines)
+├── decisions.md        # Org-wide decisions (illustrative default)
+├── rules.md            # Standing conventions (illustrative default)
+└── events/             # Timestamped event entries
+    └── YYYYMMDD-HHMMSS-short-slug.md
+```
+
+### Key Concepts
+
+- **`recent.md`** is the always-loaded cross-project context. Agents read it at session start via session-init hooks. Kept concise (~150 lines) as a rolling summary of current state, not full history.
+- **Topical files** (`decisions.md`, `rules.md`) are the structured knowledge layer. Adopters choose which topical files to create — these are illustrative defaults, not protocol requirements.
+- **Events** (`events/`) are timestamped entries that agents append during debriefs. Low-friction write path — only frontmatter required.
+
+### Event Schema
+
+```yaml
+---
+created_at_utc: "2026-03-17T17:01:20Z"   # required — full timestamp
+date: "2026-03-17"                         # required — human-readable
+agent: claude                              # required — creator
+project: my-project                        # required — originating project
+type: decision                             # required — decision | event | rule
+source_ref: debrief-20260317-s76           # optional — provenance
+related: ["PR #43"]                        # optional — cross-references
+supersedes: event/20260310-old-decision    # optional — overrides prior entry
+---
+
+Short description of what happened and why it matters.
+```
+
+### Permission Model
+
+| Role | recent.md | Topical files | events/ |
+|------|:---------:|:-------------:|:-------:|
+| Agent | read | read | read + write |
+| Coordinator | read + write | read + write | read + write |
+
+Agents write events only (append-only). The coordinator curates topical files and `recent.md` from events.
+
+### CLI
+
+- **`oacp org-memory init`** — scaffold `$OACP_HOME/org-memory/` with default files
+- **`oacp write-event`** — create an event file with proper frontmatter
+
+### Integration with Session Init
+
+Agents can read `org-memory/recent.md` at session start for cross-project context. This integration is runtime-specific — for example, Claude Code loads it via a session-init hook, while other runtimes may read it explicitly. Topical files and `events/` are available for on-demand reading when agents need deeper org context.
+
+---
+
+## 7. Kernel Script Inventory
 
 The kernel boundary was established through a classification audit of all project files.
 
 OACP ships a **kernel** — the minimal set of scripts, templates, and docs needed to adopt the protocol. Everything else is internal tooling for advanced orchestration workflows.
 
-### Kernel Scripts (18)
+### Kernel Scripts
 
 These scripts ship with the OSS release. Most are stdlib-only Python or POSIX shell with no external dependencies beyond `python3`, `git`, and `gh`. Exception: `preflight.py` also requires `ruff`, `shellcheck`, and optionally `pyyaml` for YAML validation.
 
-| Script | Purpose |
-|--------|---------|
-| `check_quality_gate.py` | Validates findings packets against merge-readiness criteria |
-| `create_handoff_packet.py` | CLI for creating structured handoff packets |
-| `handoff_schema.py` | Shared validation library for handoff and message schemas |
-| `oacp_doctor.py` | Environment and workspace health check (flutter-doctor-style) — CLI: `oacp doctor` |
-| `init_packet.sh` | Bootstraps review/findings/merge packet directories |
-| `init_project_workspace.py` | Creates a new project workspace — CLI: `oacp init` |
-| `add_agent.py` | Add an agent to an existing project workspace — CLI: `oacp add-agent` |
-| `agent_profile.py` | Two-tier agent profile management — CLI: `oacp agent` |
-| `memory_cli.py` | Archive or restore project memory files — CLI: `oacp memory` |
-| `setup_runtime.py` | Generate runtime-specific config files — CLI: `oacp setup` |
-| `normalize_findings.py` | Converts raw reviewer output to canonical findings YAML |
-| `preflight.py` | Unified quality checks — CI runs this on every PR |
-| `promote_to_archive.py` | Move a non-standard memory file into `memory/archive/` |
-| `restore_from_archive.py` | Restore an archived memory file into the active `memory/` working set |
-| `send_inbox_message.py` | CLI for all inbox messaging — CLI: `oacp send` |
-| `update_workspace.sh` | Idempotent workspace sync across protocol versions |
-| `validate_agent_card.py` | Validates agent card YAML against the schema |
-| `validate_message.py` | Validates inbox/outbox message YAML — CLI: `oacp validate` |
+Scripts marked **CLI** are exposed as `oacp` subcommands. Scripts marked **script-only** are invoked directly and have no CLI wrapper.
+
+| Script | Purpose | Exposure |
+|--------|---------|----------|
+| `init_project_workspace.py` | Creates a new project workspace | CLI: `oacp init` |
+| `add_agent.py` | Add an agent to an existing project workspace | CLI: `oacp add-agent` |
+| `agent_profile.py` | Two-tier agent profile management | CLI: `oacp agent` |
+| `send_inbox_message.py` | Compose and send inbox messages | CLI: `oacp send` |
+| `oacp_inbox.py` | List pending inbox messages | CLI: `oacp inbox` |
+| `memory_cli.py` | Archive or restore project memory files | CLI: `oacp memory` |
+| `setup_runtime.py` | Generate runtime-specific config files | CLI: `oacp setup` |
+| `init_org_memory.py` | Scaffold org-level memory directory | CLI: `oacp org-memory` |
+| `write_event.py` | Write timestamped events to org-memory | CLI: `oacp write-event` |
+| `oacp_doctor.py` | Environment and workspace health check (flutter-doctor-style) | CLI: `oacp doctor` |
+| `validate_message.py` | Validates inbox/outbox message YAML | CLI: `oacp validate` |
+| `session_lifecycle_hooks.py` | Session init and close hooks (`init_session`, `close_session`) | CLI-wrapped |
+| `codex_session_init.py` | Codex startup protocol loader | CLI-wrapped |
+| `check_quality_gate.py` | Validates findings packets against merge-readiness criteria | script-only |
+| `normalize_findings.py` | Converts raw reviewer output to canonical findings YAML | script-only |
+| `validate_agent_card.py` | Validates agent card YAML against the schema | script-only |
+| `create_handoff_packet.py` | CLI for creating structured handoff packets | script-only |
+| `handoff_schema.py` | Shared validation library for handoff and message schemas | script-only |
+| `init_packet.sh` | Bootstraps review/findings/merge packet directories | script-only |
+| `preflight.py` | Unified quality checks — CI runs this on every PR | script-only |
+| `promote_to_archive.py` | Move a non-standard memory file into `memory/archive/` | script-only |
+| `restore_from_archive.py` | Restore an archived memory file into the active `memory/` working set | script-only |
+| `update_workspace.sh` | Idempotent workspace sync across protocol versions | script-only |
 
 ### Kernel Templates (19)
 
@@ -487,7 +557,7 @@ Core packet, role, and guardrail templates. Includes:
 
 - Packet templates: `review_packet`, `findings_packet`, `merge_decision`, `test_packet`, `checkpoint`, `handoff_packet`, `manual_validation`
 - Messaging: `inbox_message`
-- Agent identity: `agent_card`, `agent_status`, `skills_manifest`
+- Agent identity: `agent_card`, `agent_status`, `skills_manifest` (spec: `docs/protocol/skills_manifest.yaml`, template: `templates/`)
 - CI: `github_actions_quality_gate.yaml`
 - Roles: `role_baseline`, `role_definition`
 - Guardrails: `coding_standards`, `safe_commands`, `secrets_rules`

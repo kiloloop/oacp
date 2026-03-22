@@ -51,7 +51,26 @@ class TestHandoffPacketSchema(unittest.TestCase):
     def test_valid_packet(self) -> None:
         self.assertEqual(validate_handoff_packet_text(VALID_HANDOFF_BODY), [])
 
-    def test_missing_required_context_field(self) -> None:
+    def test_plain_text_body_rejected(self) -> None:
+        """A plain-text body with no structured fields must fail validation."""
+        errors = validate_handoff_packet_text("Handing off issue #42 for review")
+        self.assertTrue(len(errors) > 0)
+        self.assertTrue(any("missing required field" in err for err in errors))
+
+    def test_partial_structured_fields_rejected(self) -> None:
+        """A body with only some structured fields must report missing ones."""
+        body = (
+            'source_agent: "codex"\n'
+            'target_agent: "claude"\n'
+            'intent: "Continue review"\n'
+        )
+        errors = validate_handoff_packet_text(body)
+        self.assertTrue(any("artifacts_to_review" in err for err in errors))
+        self.assertTrue(any("definition_of_done" in err for err in errors))
+        self.assertTrue(any("context_bundle" in err for err in errors))
+
+    def test_missing_context_bundle_subfield_rejected(self) -> None:
+        """Missing context_bundle sub-fields must produce validation errors."""
         broken = VALID_HANDOFF_BODY.replace("  blockers_hit:\n", "")
         errors = validate_handoff_packet_text(broken)
         self.assertTrue(any("blockers_hit" in err for err in errors))

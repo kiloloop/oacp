@@ -636,7 +636,20 @@ def main() -> int:
             "Sender resolution order: --from, OACP_AGENT, AGENT_NAME, project agent card runtime match.\n"
             "Card runtime fallback checks OACP_RUNTIME and runtime-specific environment markers.\n"
             "Suggested channels: brainstorm, review, deploy, incident\n"
-            "(Channels are free-text — these are hints, not enforced.)"
+            "(Channels are free-text — these are hints, not enforced.)\n\n"
+            "Handoff body schema (--type handoff):\n"
+            "  The --body must be a structured YAML packet with these required fields:\n"
+            "    source_agent          Originating agent name\n"
+            "    target_agent          Receiving agent name (must differ from source)\n"
+            "    intent                Description of what is being handed off\n"
+            "    artifacts_to_review   Non-empty list of artifacts (PRs, files, etc.)\n"
+            "    definition_of_done    Non-empty list of completion criteria\n"
+            "    context_bundle        Map with required sub-fields:\n"
+            "      files_touched         Non-empty list of files modified\n"
+            "      decisions_made        Non-empty list of decisions\n"
+            "      blockers_hit          Non-empty list of blockers encountered\n"
+            "      suggested_next_steps  Non-empty list of next steps\n"
+            "  Use --body-file to pass a YAML file. See templates/handoff_packet.template.yaml."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

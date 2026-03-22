@@ -139,7 +139,7 @@ def check_environment(
     cat = DoctorCategory(name="Environment")
 
     # Required tools
-    for tool in ("git", "python3", "gh"):
+    for tool in ("git", "python3"):
         path = which_fn(tool)
         if path is None:
             cat.results.append(DoctorResult(
@@ -158,6 +158,7 @@ def check_environment(
 
     # Optional tools
     for tool, install_hint in [
+        ("gh", "https://cli.github.com"),
         ("ruff", "pip install ruff"),
         ("shellcheck", "brew install shellcheck"),
     ]:

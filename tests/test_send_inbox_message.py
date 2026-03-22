@@ -460,11 +460,34 @@ next_owner: "claude"
             )
             self.assertEqual(report["type"], "handoff_complete")
 
+    def test_handoff_partial_body_rejected(self):
+        """Partial structured handoff body (missing required fields) must fail."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hub_dir = Path(tmpdir)
+            partial_body = """\
+source_agent: "codex"
+target_agent: "claude"
+intent: "handoff"
+"""
+            with self.assertRaises(ValueError) as ctx:
+                send_message(
+                    project="test-project",
+                    sender="codex",
+                    recipient="claude",
+                    msg_type="handoff",
+                    subject="Handoff packet",
+                    body=partial_body,
+                    oacp_dir=hub_dir,
+                    dry_run=True,
+                )
+            self.assertIn("artifacts_to_review", str(ctx.exception))
+
     def test_handoff_body_validation_error(self):
+        """Handoff body with invalid agent name pattern should still fail."""
         with tempfile.TemporaryDirectory() as tmpdir:
             hub_dir = Path(tmpdir)
             invalid_body = """\
-source_agent: "codex"
+source_agent: "_invalid"
 target_agent: "claude"
 intent: "handoff"
 """
