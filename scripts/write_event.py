@@ -18,7 +18,7 @@ Options:
     --body <text>               Event body (inline)
     --body-file <path|->        Read body from file or stdin
     --source-ref <id>           Provenance ID for dual-write reconciliation
-    --related <items>           Comma-separated cross-references
+    --related <items>           Cross-references (comma-separated or JSON array)
     --supersedes <event-path>   Event path this entry overrides
     --oacp-dir <path>           Override OACP home directory
     --dry-run                   Print event to stdout, don't write file
@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import re
 import sys
 from pathlib import Path
@@ -42,6 +43,23 @@ from _oacp_constants import utc_now_iso
 
 ALLOWED_TYPES = ("decision", "event", "rule")
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$|^[a-z0-9]$")
+
+
+def _normalize_related(raw: str) -> List[str]:
+    """Parse a --related value into a list of strings.
+
+    Accepts both comma-separated strings ("PR #1, PR #2") and pre-encoded
+    JSON arrays ('["PR #1", "PR #2"]').  Returns a list of stripped,
+    non-empty strings.
+    """
+    raw = raw.strip()
+    if raw.startswith("["):
+        try:
+            parsed = json.loads(raw)
+            return [str(item).strip() for item in parsed if str(item).strip()]
+        except (json.JSONDecodeError, TypeError):
+            pass  # fall through to comma split
+    return [r.strip() for r in raw.split(",") if r.strip()]
 
 
 def _validate_slug(slug: str) -> None:
@@ -184,7 +202,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--related",
         default=None,
-        help="Comma-separated cross-references (e.g. 'PR #43,event/20260316-foo')",
+        help="Cross-references: comma-separated or JSON array (e.g. 'PR #43,event/foo' or '[\"PR #43\"]')",
     )
     parser.add_argument(
         "--supersedes",
@@ -220,7 +238,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # Parse related items
     related = None
     if args.related:
-        related = [r.strip() for r in args.related.split(",") if r.strip()]
+        related = _normalize_related(args.related)
 
     # Build event
     try:

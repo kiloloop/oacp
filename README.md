@@ -32,6 +32,14 @@ When running inside a configured agent runtime, `--from` can be omitted — OACP
 - **Agent safety defaults** — baseline rules for git, credentials, and scope discipline
 - **Runtime-agnostic** — works with any runtime that reads/writes files
 
+## Try It Now
+
+After installing, run `oacp doctor` to verify your environment is wired up:
+
+```bash
+oacp doctor
+```
+
 ## Why OACP?
 
 When multiple AI agents work on the same codebase, they need a way to:
@@ -112,11 +120,28 @@ uv tool install .
 | Command | Description |
 |---------|-------------|
 | `oacp init` | Create a project workspace under `$OACP_HOME/projects/` |
+| `oacp add-agent` | Add an agent to an existing project workspace |
+| `oacp setup` | Generate runtime-specific config files (Claude, Codex, etc.) |
 | `oacp send` | Send a protocol-compliant inbox message (`--from` auto-inferred) |
 | `oacp inbox` | List pending messages across agents (table or `--json`) |
 | `oacp memory` | Archive or restore project memory files |
+| `oacp agent` | Manage global agent profiles (`init`, `show`, `list`) |
+| `oacp org-memory` | Initialize org-level memory at `$OACP_HOME/org-memory/` |
+| `oacp write-event` | Write an event to `org-memory/events/` |
 | `oacp doctor` | Check environment and workspace health |
 | `oacp validate` | Validate an inbox/outbox YAML message |
+| `oacp --version` | Print the installed version |
+
+<details>
+<summary>Key flags</summary>
+
+**`oacp send`**: `--in-reply-to`, `--expires`, `--body-file`, `--channel`, `--dry-run`, `--json`, `--quiet`
+
+**`oacp doctor`**: `--fix` (auto-fix safe issues), `--json`, `-o/--output`
+
+**`oacp memory`**: `oacp memory archive <project> <file>`, `oacp memory restore <project> <file>`
+
+</details>
 
 If `OACP_HOME` is unset, workspace commands default to `~/oacp`.
 
@@ -136,10 +161,10 @@ If `OACP_HOME` is unset, workspace commands default to `~/oacp`.
 ```
 oacp/
 ├── docs/
-│   ├── protocol/       # Canonical protocol specifications (13 specs)
+│   ├── protocol/       # Canonical protocol specifications
 │   └── guides/         # Setup, adoption, versioning
-├── scripts/            # 18 kernel scripts (Python + shell)
-├── templates/          # Packet, role, and guardrail templates (19)
+├── scripts/            # Kernel scripts (Python + shell)
+├── templates/          # Packet, role, and guardrail templates
 ├── tests/              # Test suite
 ├── Makefile            # Task runner (make help for all targets)
 └── SPEC.md             # Full protocol specification
@@ -153,8 +178,7 @@ oacp/
 
 - Python 3.9+
 - Bash 3.2+ (macOS default is fine)
-- `gh` CLI (for GitHub operations)
-- `pyyaml` (`pip install pyyaml`)
+- `gh` CLI (optional, for GitHub operations)
 
 ## Protocol Specification
 
@@ -170,16 +194,15 @@ Individual protocol specs live in [`docs/protocol/`](docs/protocol/).
 
 ## Workspace Layout
 
-When you initialize a project, OACP creates this structure:
+`oacp init` creates a project workspace with this structure:
 
 ```
 $OACP_HOME/projects/<project>/
 ├── agents/
 │   ├── <agent-a>/
-│   │   ├── inbox/          # Other agents write here
-│   │   ├── outbox/         # Sent messages (copies)
-│   │   ├── status.yaml     # Dynamic agent state
-│   │   └── agent_card.yaml # Static agent identity
+│   │   ├── inbox/           # Other agents write here
+│   │   ├── outbox/          # Sent messages (copies)
+│   │   └── dead_letter/     # Undeliverable messages
 │   └── <agent-b>/
 │       └── ...
 ├── memory/                  # Shared durable memory
@@ -188,8 +211,22 @@ $OACP_HOME/projects/<project>/
 │   ├── open_threads.md
 │   ├── known_debt.md
 │   └── archive/
+├── artifacts/               # Build/research artifacts
+├── checkpoints/             # Progress checkpoints
+├── logs/                    # Agent session logs
+├── merges/                  # Merge decision records
 ├── packets/                 # Review/findings artifacts
 └── workspace.json           # Project metadata
+```
+
+Optionally, `oacp org-memory init` creates org-level shared memory:
+
+```
+$OACP_HOME/org-memory/
+├── recent.md                # Always-loaded rolling summary
+├── decisions.md             # Org-wide decisions
+├── rules.md                 # Standing conventions
+└── events/                  # Timestamped event entries
 ```
 
 ## Development

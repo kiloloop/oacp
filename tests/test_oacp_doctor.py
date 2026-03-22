@@ -66,25 +66,28 @@ class TestCheckEnvironment(unittest.TestCase):
         which = _fake_which({"git", "python3", "gh", "ruff", "shellcheck"})
         cat = check_environment(runner=runner, which_fn=which)
         self.assertEqual(cat.name, "Environment")
-        # 5 tools + pyyaml = 6 results
+        # 2 required + 3 optional + pyyaml = 6 results
         self.assertEqual(len(cat.results), 6)
         for r in cat.results:
             if r.name in ("git", "python3", "gh"):
                 self.assertEqual(r.severity, Severity.ok, f"{r.name} should be ok")
 
-    def test_missing_required_tool(self) -> None:
+    def test_missing_required_and_optional_tools(self) -> None:
         runner = _fake_runner()
-        which = _fake_which({"python3", "ruff", "shellcheck"})  # missing git, gh
+        which = _fake_which({"python3", "ruff", "shellcheck"})  # missing git (required), gh (optional)
         cat = check_environment(runner=runner, which_fn=which)
         git_result = next(r for r in cat.results if r.name == "git")
         self.assertEqual(git_result.severity, Severity.error)
+        # gh is optional — should be skip, not error
         gh_result = next(r for r in cat.results if r.name == "gh")
-        self.assertEqual(gh_result.severity, Severity.error)
+        self.assertEqual(gh_result.severity, Severity.skip)
 
     def test_missing_optional_tool(self) -> None:
         runner = _fake_runner()
-        which = _fake_which({"git", "python3", "gh"})  # missing ruff, shellcheck
+        which = _fake_which({"git", "python3"})  # missing gh, ruff, shellcheck
         cat = check_environment(runner=runner, which_fn=which)
+        gh_result = next(r for r in cat.results if r.name == "gh")
+        self.assertEqual(gh_result.severity, Severity.skip)
         ruff_result = next(r for r in cat.results if r.name == "ruff")
         self.assertEqual(ruff_result.severity, Severity.skip)
         sc_result = next(r for r in cat.results if r.name == "shellcheck")

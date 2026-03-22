@@ -3,19 +3,34 @@
 ## Prerequisites
 
 - `bash` 3.2+ (macOS default) or 4+ (recommended)
-- `python3` 3.8+ (for JSON state management, quality gate scripts, and inbox messaging)
-- `gh` CLI authenticated (`gh auth login`)
+- `python3` 3.9+ (for JSON state management, quality gate scripts, and inbox messaging)
+- `gh` CLI (optional, for GitHub operations — `gh auth login`)
 - Agent runtime CLI: `claude`, `codex`, or `gemini` (depending on your agents)
-- `pyyaml` — required for preflight checks and YAML-based scripts (`pip3 install pyyaml`)
 
-## 1) Clone OACP
+## 1) Install OACP
 
 ```bash
-export OACP_HOME="${OACP_HOME:-$HOME/oacp}"
-mkdir -p "$OACP_HOME"
-cd "$OACP_HOME"
-git clone https://github.com/kiloloop/oacp.git
+pip install oacp-cli
 ```
+
+Or with uv/pipx:
+
+```bash
+uv tool install oacp-cli
+# or
+pipx install oacp-cli
+```
+
+<details>
+<summary>From source (for contributors)</summary>
+
+```bash
+git clone https://github.com/kiloloop/oacp.git
+cd oacp
+pip install -e .
+```
+
+</details>
 
 ## 2) Initialize project workspace
 
@@ -29,9 +44,9 @@ With artifact symlinks from a repo checkout:
 oacp init <project> --repo /path/to/repo
 ```
 
-## 3) Set up templates
+## 3) Set up templates (source checkout only)
 
-Copy and customize the templates you need:
+If you installed from source, copy and customize the templates you need:
 
 ```bash
 # From the oacp repo root:
@@ -49,7 +64,9 @@ cp templates/skills_manifest.template.yaml $OACP_HOME/projects/<project>/skills_
 
 Edit each file and fill in the `# CUSTOMIZE:` points.
 
-## 4) Claude-specific setup (optional)
+> **Packaged install?** Templates are bundled inside the package. You can find them by running `python3 -c "import oacp; print(oacp.__path__)"` and looking in the `_templates/` directory, or browse them on [GitHub](https://github.com/kiloloop/oacp/tree/main/templates).
+
+## 4) Claude-specific setup (source checkout only)
 
 For Claude Code projects, copy templates into the repo's `.claude/` directory:
 
@@ -60,13 +77,18 @@ cp templates/claude/rules/guardrail.template.md /path/to/repo/.claude/rules/guar
 cp templates/claude/skills/session_lifecycle.template.md /path/to/repo/.claude/skills/lifecycle/SKILL.md
 ```
 
-## 5) Initialize packet files per change/review cycle
+## 5) Initialize packet files (source checkout only)
+
+For the review/findings/merge packet workflow:
 
 ```bash
+# From the oacp repo root:
 scripts/init_packet.sh <project> <packet_id> --agent <agent_name>
 ```
 
-## 6) Update existing workspaces
+> **Note:** `init_packet.sh` is not yet exposed as an `oacp` CLI subcommand. It requires a source checkout. See [docs/protocol/review_loop.md](../protocol/review_loop.md) for the review workflow documentation.
+
+## 6) Update existing workspaces (source checkout only)
 
 After pulling new standards, sync your workspace structure:
 

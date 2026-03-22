@@ -85,14 +85,21 @@ def _has_list_item(lines: List[str], key_idx: int, key_indent: int) -> bool:
 
 
 def validate_handoff_packet_text(text: str) -> List[str]:
-    """Validate message body for `type: handoff`."""
+    """Validate message body for `type: handoff`.
+
+    The handoff body must be a structured YAML packet with all required
+    fields: source_agent, target_agent, intent, artifacts_to_review,
+    definition_of_done, and context_bundle (with sub-fields
+    files_touched, decisions_made, blockers_hit, suggested_next_steps).
+
+    See docs/protocol/inbox_outbox.md for the full schema specification.
+    """
     errors: List[str] = []
     lines = text.splitlines()
 
-    required_scalars = ("source_agent", "target_agent", "intent")
+    # Required scalar fields
     scalars = {}
-
-    for key in required_scalars:
+    for key in ("source_agent", "target_agent", "intent"):
         idx, value = _find_key_line(lines, key, 0)
         if idx < 0:
             errors.append(f"missing required field '{key}'")
@@ -111,6 +118,7 @@ def validate_handoff_packet_text(text: str) -> List[str]:
     if source and target and source == target:
         errors.append("field 'target_agent' must differ from 'source_agent'")
 
+    # Required list fields
     for key in ("artifacts_to_review", "definition_of_done"):
         idx, value = _find_key_line(lines, key, 0)
         if idx < 0:
@@ -123,6 +131,7 @@ def validate_handoff_packet_text(text: str) -> List[str]:
         if not _has_list_item(lines, idx, 0):
             errors.append(f"field '{key}' must contain at least one list item")
 
+    # Required context_bundle with required sub-fields
     context_idx, _ = _find_key_line(lines, "context_bundle", 0)
     if context_idx < 0:
         errors.append("missing required field 'context_bundle'")
@@ -132,7 +141,7 @@ def validate_handoff_packet_text(text: str) -> List[str]:
     for key in ("files_touched", "decisions_made", "blockers_hit", "suggested_next_steps"):
         idx, value = _find_key_line(lines, key, 2, start=context_idx + 1, end=context_end)
         if idx < 0:
-            errors.append(f"missing context_bundle field '{key}'")
+            errors.append(f"missing required context_bundle field '{key}'")
             continue
         if value:
             if not _is_nonempty_scalar(value):

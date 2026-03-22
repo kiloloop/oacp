@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-03-22
+
+### Fixed
+
+- `oacp doctor` no longer fails when `gh` CLI is not installed — `gh` is now optional (#78)
+- `oacp send` relaxed handoff body schema validation to accept freeform content (#78)
+- `oacp write-event --related` now handles JSON arrays correctly (#76)
+
+### Changed
+
+- README: refreshed command table with all v0.2.0 CLI commands, updated workspace layout diagram (#75, #77, #84)
+- SPEC.md: synced with v0.2.0 — version header, org-memory section, kernel inventory with exposure column (#85)
+- Onboarding docs: setup.md uses `pip install` as primary install, QUICKSTART.md adds `--agents`/`--repo` flags, CHANGELOG.md fixes `oacp memory archive` command name (#86)
+
 ## [0.2.0] - 2026-03-20
 
 ### Added
@@ -22,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Memory archive layer with `oacp archive` CLI command for active/archive split (#62, #11)
+- Memory archive layer with `oacp memory archive` CLI command for active/archive split (#62, #11)
 - Declarative agent profiles with YAML schema and `oacp agent init|show|list` CLI commands (#52, #48)
 - `known_debt.md` as standard memory file for tracking technical debt (#53, #32)
 
@@ -86,6 +100,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Checkout step in github-release workflow job (#19)
 - Pre-release audit fixes: SHA-pinned actions, dangling doc refs (#15, #16)
 
+[0.2.1]: https://github.com/kiloloop/oacp/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/kiloloop/oacp/compare/v0.1.9...v0.2.0
 [0.1.9]: https://github.com/kiloloop/oacp/compare/v0.1.2...v0.1.9
 [0.1.2]: https://github.com/kiloloop/oacp/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/kiloloop/oacp/compare/v0.1.0...v0.1.1
