@@ -28,6 +28,7 @@ When running inside a configured agent runtime, `--from` can be omitted — OACP
 - **Inbox/outbox messaging** — async YAML messages with threading, broadcast, and expiry
 - **Structured review loop** — severity-graded findings, quality gates, multi-round review
 - **Inbox CLI** — `oacp inbox` lists pending messages across agents with table or `--json` output
+- **Watch CLI** — `oacp watch` emits inbox delta events for Claude Monitor or shell loops
 - **Durable shared memory** — project facts, decisions, and known debt with active/archive split
 - **Agent safety defaults** — baseline rules for git, credentials, and scope discipline
 - **Runtime-agnostic** — works with any runtime that reads/writes files
@@ -124,6 +125,7 @@ uv tool install .
 | `oacp setup` | Generate runtime-specific config files (Claude, Codex, etc.) |
 | `oacp send` | Send a protocol-compliant inbox message (`--from` auto-inferred) |
 | `oacp inbox` | List pending messages across agents (table or `--json`) |
+| `oacp watch` | Emit inbox delta events for one agent across selected projects |
 | `oacp memory` | Archive or restore project memory files |
 | `oacp agent` | Manage global agent profiles (`init`, `show`, `list`) |
 | `oacp org-memory` | Initialize org-level memory at `$OACP_HOME/org-memory/` |
@@ -136,6 +138,8 @@ uv tool install .
 <summary>Key flags</summary>
 
 **`oacp send`**: `--in-reply-to`, `--expires`, `--body-file`, `--channel`, `--dry-run`, `--json`, `--quiet`
+
+**`oacp watch`**: `--agent`, repeatable `--project`, `--all-projects`, `--json`
 
 **`oacp doctor`**: `--fix` (auto-fix safe issues), `--json`, `-o/--output`
 

@@ -69,6 +69,18 @@ class TestOacpCli(unittest.TestCase):
         )
 
     @mock.patch("oacp.cli._run_script", return_value=0)
+    def test_dispatches_watch(self, run_script) -> None:
+        code, stdout, stderr = self._run(
+            ["watch", "--agent", "codex", "--project", "demo", "--json"]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "")
+        run_script.assert_called_once_with(
+            "oacp_watch.py", ["--agent", "codex", "--project", "demo", "--json"]
+        )
+
+    @mock.patch("oacp.cli._run_script", return_value=0)
     def test_dispatches_setup(self, run_script) -> None:
         code, stdout, stderr = self._run(["setup", "claude", "--project", "demo"])
         self.assertEqual(code, 0)
@@ -95,6 +107,7 @@ class TestOacpCli(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("add-agent", stdout)
         self.assertIn("inbox", stdout)
+        self.assertIn("watch", stdout)
         self.assertIn("memory", stdout)
         self.assertIn("setup", stdout)
 

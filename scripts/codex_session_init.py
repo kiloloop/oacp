@@ -91,9 +91,9 @@ def _project_name_from_workspace_marker(cwd: Path, name: str) -> Optional[str]:
 
 def _detect_project_name(cwd: Path) -> Optional[str]:
     for resolver in (
-        lambda: _project_name_from_agent_hub(cwd),
         lambda: _project_name_from_workspace_marker(cwd, "workspace.json"),
         lambda: _project_name_from_workspace_marker(cwd, ".oacp"),
+        lambda: _project_name_from_agent_hub(cwd),
     ):
         project = resolver()
         if project:
@@ -285,7 +285,7 @@ def run_session_init(
         for name in MEMORY_FILES:
             memory_results[name] = {"path": "", "state": "skipped", "bytes": 0}
         status_result = {"path": "", "state": "no-project"}
-        warnings.append("no project detected from .agent-hub, workspace.json, .oacp, and --project not provided")
+        warnings.append("no project detected from workspace.json, .oacp, .agent-hub, and --project not provided")
 
     for name in PROTOCOL_FILES:
         state = protocol_results[name]["state"]

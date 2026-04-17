@@ -206,7 +206,7 @@ agent_transitions:
 dispatcher_states:
   sent:
     description: "Dispatch message written to agent inbox"
-    trigger: "send_inbox_message.py completes"
+    trigger: "`oacp send` completes"
 
   ackd:
     description: "Agent acknowledged receipt"
