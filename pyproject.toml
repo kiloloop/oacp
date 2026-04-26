@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "oacp-cli"
-version = "0.2.2"
+version = "0.2.3"
 description = "Open Agent Coordination Protocol CLI for file-based multi-agent workflows"
 readme = "README.md"
 license = "Apache-2.0"

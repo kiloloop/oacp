@@ -18,7 +18,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
@@ -29,6 +31,37 @@ except ImportError:  # pragma: no cover
 
 
 STATE_VERSION = 1
+
+_DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def _parse_since(spec: str, *, now: float) -> float:
+    """Parse a --since spec to an epoch timestamp.
+
+    Accepts: 'now', 'epoch', duration like '30s' / '5m' / '2h' / '7d',
+    or an ISO 8601 timestamp (trailing 'Z' allowed; naive timestamps treated as UTC).
+    """
+    if spec == "now":
+        return now
+    if spec == "epoch":
+        return 0.0
+    if (
+        len(spec) >= 2
+        and spec[-1] in _DURATION_UNITS
+        and spec[:-1].isdigit()
+    ):
+        return now - int(spec[:-1]) * _DURATION_UNITS[spec[-1]]
+    try:
+        normalized = spec[:-1] + "+00:00" if spec.endswith("Z") else spec
+        dt = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"--since: cannot parse {spec!r} "
+            "(use 'now', 'epoch', a duration like '30s'/'5m'/'2h'/'7d', or an ISO 8601 timestamp)"
+        ) from exc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
 
 
 @dataclass(frozen=True)
@@ -222,9 +255,10 @@ def _resolve_targets(
     return targets, errors
 
 
-def _load_state(state_file: Path) -> Dict[str, Any]:
+def _load_state(state_file: Path) -> tuple[Dict[str, Any], bool]:
+    """Return (state, existed). `existed` is False for first-run targets."""
     if not state_file.is_file():
-        return {"version": STATE_VERSION, "messages": {}}
+        return {"version": STATE_VERSION, "messages": {}}, False
     data = json.loads(state_file.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("state file root must be a JSON object")
@@ -237,7 +271,10 @@ def _load_state(state_file: Path) -> Dict[str, Any]:
             normalized[str(file_name)] = {
                 key: str(value) for key, value in metadata.items()
             }
-    return {"version": int(data.get("version", STATE_VERSION)), "messages": normalized}
+    return (
+        {"version": int(data.get("version", STATE_VERSION)), "messages": normalized},
+        True,
+    )
 
 
 def _write_state(state_file: Path, payload: Dict[str, Any]) -> None:
@@ -252,9 +289,10 @@ def _write_state(state_file: Path, payload: Dict[str, Any]) -> None:
 
 def _scan_target(
     target: WatchTarget,
-) -> tuple[Dict[str, Dict[str, str]], List[Dict[str, Any]]]:
+) -> tuple[Dict[str, Dict[str, str]], Dict[str, float], List[Dict[str, Any]]]:
     errors: List[Dict[str, Any]] = []
     current_messages: Dict[str, Dict[str, str]] = {}
+    mtimes: Dict[str, float] = {}
     for path in sorted(
         candidate
         for candidate in target.inbox_dir.iterdir()
@@ -262,6 +300,7 @@ def _scan_target(
     ):
         try:
             metadata = _message_metadata(target.project, target.agent, path)
+            mtime = path.stat().st_mtime
         except Exception as exc:
             errors.append(
                 _error_event(
@@ -280,13 +319,16 @@ def _scan_target(
             "subject": metadata["subject"],
             "priority": metadata["priority"],
         }
-    return current_messages, errors
+        mtimes[path.name] = mtime
+    return current_messages, mtimes, errors
 
 
 def _build_delta_events(
     target: WatchTarget,
     previous_messages: Dict[str, Dict[str, str]],
     current_messages: Dict[str, Dict[str, str]],
+    *,
+    show_archived: bool,
 ) -> List[Dict[str, Any]]:
     events: List[Dict[str, Any]] = []
     for file_name in sorted(current_messages.keys() - previous_messages.keys()):
@@ -297,14 +339,15 @@ def _build_delta_events(
         }
         event.update(current_messages[file_name])
         events.append(event)
-    for file_name in sorted(previous_messages.keys() - current_messages.keys()):
-        event = {
-            "event": "message_archived",
-            "project": target.project,
-            "agent": target.agent,
-        }
-        event.update(previous_messages[file_name])
-        events.append(event)
+    if show_archived:
+        for file_name in sorted(previous_messages.keys() - current_messages.keys()):
+            event = {
+                "event": "message_archived",
+                "project": target.project,
+                "agent": target.agent,
+            }
+            event.update(previous_messages[file_name])
+            events.append(event)
     return events
 
 
@@ -330,8 +373,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--agent", required=True, help="Agent inbox name to watch")
     parser.add_argument("--oacp-dir", default=None, help="Override OACP home directory")
     parser.add_argument("--json", action="store_true", dest="json_output", help="Emit JSON Lines")
+    parser.add_argument(
+        "--since",
+        default="now",
+        help=(
+            "Cutoff for first-run baseline: 'now' (default) suppresses replay of "
+            "existing inbox messages; 'epoch' replays everything; '30s'/'5m'/'2h'/'7d' "
+            "for relative windows; ISO 8601 ('2026-04-26T00:00:00Z') for absolute. "
+            "Only applies on first run for a target (no state file yet)."
+        ),
+    )
+    parser.add_argument(
+        "--show-archived",
+        action="store_true",
+        help=(
+            "Emit 'message_archived' events when messages disappear from the inbox. "
+            "Off by default — when the watching agent is also the inbox owner, "
+            "these events are self-loops (the agent already knows it deleted them)."
+        ),
+    )
 
     args = parser.parse_args(list(argv) if argv is not None else None)
+    try:
+        since_epoch = _parse_since(args.since, now=time.time())
+    except argparse.ArgumentTypeError as exc:
+        parser.error(str(exc))
     oacp_root = _resolve_oacp_home(args.oacp_dir)
 
     targets, target_errors = _resolve_targets(
@@ -352,7 +418,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     for target in targets:
         try:
-            previous_state = _load_state(target.state_file)
+            previous_state, state_existed = _load_state(target.state_file)
         except Exception as exc:
             had_errors = True
             _emit_error(
@@ -365,13 +431,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 json_output=args.json_output,
             )
             continue
-        current_messages, scan_errors = _scan_target(target)
+        current_messages, mtimes, scan_errors = _scan_target(target)
         if scan_errors:
             had_errors = True
             for event in scan_errors:
                 _emit_error(event, json_output=args.json_output)
         previous_messages = previous_state["messages"]
-        target_events = _build_delta_events(target, previous_messages, current_messages)
+        if not state_existed:
+            # First run for this target: seed baseline with messages whose mtime <= since.
+            # NEW_MESSAGE events fire only for files newer than the cutoff.
+            previous_messages = {
+                file_name: current_messages[file_name]
+                for file_name in current_messages
+                if mtimes.get(file_name, 0.0) <= since_epoch
+            }
+        target_events = _build_delta_events(
+            target,
+            previous_messages,
+            current_messages,
+            show_archived=args.show_archived,
+        )
         payload = {
             "version": STATE_VERSION,
             "project": target.project,

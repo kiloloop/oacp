@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-04-26
+
+### Changed
+
+- `oacp watch` defaults are now notification-friendly: existing inbox messages are no longer replayed on the first scan for a target, and `message_archived` events are suppressed by default. Pass `--since=epoch` to restore replay and `--show-archived` to re-enable archive events. Reduces noise for `Monitor` and `oacp watch` consumers.
+
+### Added
+
+- `oacp watch --since=<spec>` — controls the first-run baseline cutoff. Accepts `now` (default), `epoch`, relative durations (`30s`, `5m`, `2h`, `7d`), or ISO 8601 timestamps. Only applies on first run for a target (no state file yet).
+- `oacp watch --show-archived` — opt-in flag to emit `message_archived` events. Useful for observer agents tracking another agent's inbox; disabled by default because the watching agent's own deletes are self-loops.
+
 ## [0.2.2] - 2026-04-17
 
 ### Added
@@ -110,6 +121,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Checkout step in github-release workflow job (#19)
 - Pre-release audit fixes: SHA-pinned actions, dangling doc refs (#15, #16)
 
+[0.2.3]: https://github.com/kiloloop/oacp/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/kiloloop/oacp/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/kiloloop/oacp/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/kiloloop/oacp/compare/v0.1.9...v0.2.0

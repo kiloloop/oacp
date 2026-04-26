@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -64,7 +66,7 @@ class TestOacpWatch(unittest.TestCase):
             sys.stderr = old_stderr
         return code, stdout, stderr
 
-    def test_first_run_emits_existing_messages(self) -> None:
+    def test_default_first_run_suppresses_existing_messages(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             _write_message(
@@ -79,6 +81,36 @@ class TestOacpWatch(unittest.TestCase):
             )
             code, stdout, stderr = self._run(
                 ["--agent", "codex", "--project", "demo", "--oacp-dir", tmpdir, "--json"]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(stdout, "")
+
+    def test_first_run_with_since_epoch_emits_existing_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _write_message(
+                root,
+                "demo",
+                "codex",
+                "20260411050000_iris_task_request_abcd.yaml",
+                sender="iris",
+                msg_type="task_request",
+                priority="P2",
+                subject="First",
+            )
+            code, stdout, stderr = self._run(
+                [
+                    "--agent",
+                    "codex",
+                    "--project",
+                    "demo",
+                    "--oacp-dir",
+                    tmpdir,
+                    "--since",
+                    "epoch",
+                    "--json",
+                ]
             )
         self.assertEqual(code, 0)
         self.assertEqual(stderr, "")
@@ -147,7 +179,7 @@ class TestOacpWatch(unittest.TestCase):
         self.assertEqual(events[0]["subject"], "Second")
         self.assertEqual(events[0]["priority"], "P1")
 
-    def test_removed_message_emits_message_archived(self) -> None:
+    def test_removed_message_emits_message_archived_when_show_archived(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             msg_path = _write_message(
@@ -160,10 +192,32 @@ class TestOacpWatch(unittest.TestCase):
                 priority="P2",
                 subject="First",
             )
-            self._run(["--agent", "codex", "--project", "demo", "--oacp-dir", tmpdir, "--json"])
+            self._run(
+                [
+                    "--agent",
+                    "codex",
+                    "--project",
+                    "demo",
+                    "--oacp-dir",
+                    tmpdir,
+                    "--since",
+                    "epoch",
+                    "--show-archived",
+                    "--json",
+                ]
+            )
             msg_path.unlink()
             code, stdout, stderr = self._run(
-                ["--agent", "codex", "--project", "demo", "--oacp-dir", tmpdir, "--json"]
+                [
+                    "--agent",
+                    "codex",
+                    "--project",
+                    "demo",
+                    "--oacp-dir",
+                    tmpdir,
+                    "--show-archived",
+                    "--json",
+                ]
             )
         self.assertEqual(code, 0)
         self.assertEqual(stderr, "")
@@ -171,6 +225,41 @@ class TestOacpWatch(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["event"], "message_archived")
         self.assertEqual(events[0]["subject"], "First")
+
+    def test_removed_message_suppressed_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            msg_path = _write_message(
+                root,
+                "demo",
+                "codex",
+                "20260411050000_iris_task_request_abcd.yaml",
+                sender="iris",
+                msg_type="task_request",
+                priority="P2",
+                subject="First",
+            )
+            # Seed baseline so the message is tracked in state.
+            self._run(
+                [
+                    "--agent",
+                    "codex",
+                    "--project",
+                    "demo",
+                    "--oacp-dir",
+                    tmpdir,
+                    "--since",
+                    "epoch",
+                    "--json",
+                ]
+            )
+            msg_path.unlink()
+            code, stdout, stderr = self._run(
+                ["--agent", "codex", "--project", "demo", "--oacp-dir", tmpdir, "--json"]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(stdout, "")
 
     def test_repeatable_project_keeps_argument_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -205,6 +294,8 @@ class TestOacpWatch(unittest.TestCase):
                     "alpha",
                     "--oacp-dir",
                     tmpdir,
+                    "--since",
+                    "epoch",
                     "--json",
                 ]
             )
@@ -237,7 +328,16 @@ class TestOacpWatch(unittest.TestCase):
                 subject="Alpha",
             )
             code, stdout, stderr = self._run(
-                ["--agent", "codex", "--all-projects", "--oacp-dir", tmpdir, "--json"]
+                [
+                    "--agent",
+                    "codex",
+                    "--all-projects",
+                    "--oacp-dir",
+                    tmpdir,
+                    "--since",
+                    "epoch",
+                    "--json",
+                ]
             )
         self.assertEqual(code, 0)
         self.assertEqual(stderr, "")
@@ -277,7 +377,17 @@ class TestOacpWatch(unittest.TestCase):
             (inbox_dir / "broken.yaml").write_text("subject: [unterminated\n", encoding="utf-8")
 
             first_code, first_stdout, first_stderr = self._run(
-                ["--agent", "codex", "--project", "demo", "--oacp-dir", tmpdir, "--json"]
+                [
+                    "--agent",
+                    "codex",
+                    "--project",
+                    "demo",
+                    "--oacp-dir",
+                    tmpdir,
+                    "--since",
+                    "epoch",
+                    "--json",
+                ]
             )
             second_code, second_stdout, second_stderr = self._run(
                 ["--agent", "codex", "--project", "demo", "--oacp-dir", tmpdir, "--json"]
@@ -330,6 +440,8 @@ class TestOacpWatch(unittest.TestCase):
                     "missing",
                     "--oacp-dir",
                     tmpdir,
+                    "--since",
+                    "epoch",
                     "--json",
                 ]
             )
@@ -339,6 +451,105 @@ class TestOacpWatch(unittest.TestCase):
         self.assertEqual([event["event"] for event in events], ["error", "new_message"])
         self.assertEqual(events[0]["project"], "missing")
         self.assertEqual(events[1]["project"], "valid")
+
+
+    def test_since_relative_duration_only_emits_new_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            old_path = _write_message(
+                root,
+                "demo",
+                "codex",
+                "20260411050000_iris_task_request_old.yaml",
+                sender="iris",
+                msg_type="task_request",
+                priority="P2",
+                subject="Old",
+            )
+            # Backdate the old message to 1 hour ago.
+            old_time = time.time() - 3600
+            os.utime(old_path, (old_time, old_time))
+
+            _write_message(
+                root,
+                "demo",
+                "codex",
+                "20260411060000_iris_task_request_new.yaml",
+                sender="iris",
+                msg_type="task_request",
+                priority="P1",
+                subject="New",
+            )
+
+            code, stdout, stderr = self._run(
+                [
+                    "--agent",
+                    "codex",
+                    "--project",
+                    "demo",
+                    "--oacp-dir",
+                    tmpdir,
+                    "--since",
+                    "5m",
+                    "--json",
+                ]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        events = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event"], "new_message")
+        self.assertEqual(events[0]["subject"], "New")
+
+    def test_since_iso_timestamp_with_z_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _write_message(
+                root,
+                "demo",
+                "codex",
+                "20260411050000_iris_task_request_abcd.yaml",
+                sender="iris",
+                msg_type="task_request",
+                priority="P2",
+                subject="First",
+            )
+            code, stdout, stderr = self._run(
+                [
+                    "--agent",
+                    "codex",
+                    "--project",
+                    "demo",
+                    "--oacp-dir",
+                    tmpdir,
+                    "--since",
+                    "1970-01-01T00:00:00Z",
+                    "--json",
+                ]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        events = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["subject"], "First")
+
+    def test_since_invalid_spec_exits_with_usage_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaises(SystemExit) as ctx:
+                self._run(
+                    [
+                        "--agent",
+                        "codex",
+                        "--project",
+                        "demo",
+                        "--oacp-dir",
+                        tmpdir,
+                        "--since",
+                        "not-a-valid-spec",
+                        "--json",
+                    ]
+                )
+        self.assertEqual(ctx.exception.code, 2)
 
 
 if __name__ == "__main__":

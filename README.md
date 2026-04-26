@@ -139,7 +139,7 @@ uv tool install .
 
 **`oacp send`**: `--in-reply-to`, `--expires`, `--body-file`, `--channel`, `--dry-run`, `--json`, `--quiet`
 
-**`oacp watch`**: `--agent`, repeatable `--project`, `--all-projects`, `--json`
+**`oacp watch`**: `--agent`, repeatable `--project`, `--all-projects`, `--json`, `--since` (default `now`), `--show-archived`
 
 **`oacp doctor`**: `--fix` (auto-fix safe issues), `--json`, `-o/--output`
 
