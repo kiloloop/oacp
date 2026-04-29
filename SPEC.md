@@ -16,7 +16,7 @@ OACP is not a framework or SDK. It is a set of conventions, YAML schemas, and sh
 3. [Review Loop Protocol](#3-review-loop-protocol)
 4. [Cross-Runtime Sync](#4-cross-runtime-sync)
 5. [Agent Safety Defaults](#5-agent-safety-defaults)
-6. [Org-Level Memory](#6-org-level-memory)
+6. [Org-Level Memory and Sync](#6-org-level-memory-and-sync)
 7. [Kernel Script Inventory](#7-kernel-script-inventory)
 
 ---
@@ -451,13 +451,23 @@ Agents operate under least-privilege credentials:
 
 ---
 
-## 6. Org-Level Memory
+## 6. Org-Level Memory and Sync
 
 Full specification: [`docs/protocol/org_memory.md`](docs/protocol/org_memory.md)
 
 ### Purpose
 
 Shared, cross-project memory for multi-agent organizations. Agents across projects read org-wide decisions, conventions, and events from a single location. Complements per-project memory — does not replace it.
+
+OACP can optionally sync curated memory across machines using one plain git
+repository rooted at `$OACP_HOME`. This feature is opt-in and tracks only:
+
+- `$OACP_HOME/org-memory/**`
+- `$OACP_HOME/projects/<project>/memory/**`
+
+Cross-machine inbox delivery, `agents/` runtime state, `status.yaml`, concurrent
+writer protocols, encrypted transport, and runtime-specific memory outside
+`$OACP_HOME` are out of scope.
 
 ### Directory Structure
 
@@ -468,6 +478,28 @@ $OACP_HOME/org-memory/
 ├── rules.md            # Standing conventions (illustrative default)
 └── events/             # Timestamped event entries
     └── YYYYMMDD-HHMMSS-short-slug.md
+```
+
+When memory sync is enabled, `$OACP_HOME` also contains:
+
+```text
+$OACP_HOME/
+├── .gitignore            # positive allowlist
+├── .oacp-memory-repo     # tracked marker; activates hooks
+├── org-memory/           # tracked
+└── projects/*/memory/    # tracked
+```
+
+Canonical root `.gitignore`:
+
+```gitignore
+*
+!*/
+!.gitignore
+!.oacp-memory-repo
+!org-memory/**
+!projects/*/memory/**
+projects/*/memory/.cache/
 ```
 
 ### Key Concepts
@@ -506,10 +538,36 @@ Agents write events only (append-only). The coordinator curates topical files an
 
 - **`oacp org-memory init`** — scaffold `$OACP_HOME/org-memory/` with default files
 - **`oacp write-event`** — create an event file with proper frontmatter
+- **`oacp memory init [--remote URL]`** — initialize the `$OACP_HOME` memory git repo, marker, canonical allowlist, optional remote, and initial commit
+- **`oacp memory clone <URL> [--force]`** — clone a memory repo into `$OACP_HOME`; refuses non-empty targets unless `--force` moves the existing directory aside
+- **`oacp memory pull`** — advisory fetch plus fast-forward-only pull; warns loudly on dirty, ahead, behind, diverged, or fetch-failed states and never auto-merges
+- **`oacp memory push`** — stages only the memory allowlist, commits as `memory: <agent>@<host> <date> (N files)`, then pushes when a remote is configured
+- **`oacp memory disable`** — removes `.oacp-memory-repo` locally while leaving `.git/` intact
+- **`oacp doctor --memory`** — runs advisory memory sync checks for marker state, allowlist drift, tracked/untracked leakage, clean/ahead/behind/diverged state, remote reachability, commit staleness, `agents/` leakage, and per-project memory overlay safety
 
 ### Integration with Session Init
 
 Agents can read `org-memory/recent.md` at session start for cross-project context. This integration is runtime-specific — for example, Claude Code loads it via a session-init hook, while other runtimes may read it explicitly. Topical files and `events/` are available for on-demand reading when agents need deeper org context.
+
+Memory sync has three activation states:
+
+| State | Trigger | Behavior |
+|-------|---------|----------|
+| Disabled | No `.oacp-memory-repo` marker | Hooks no-op silently; `oacp doctor --memory` reports not configured |
+| Local-only | `oacp memory init` | Wrap-up commits memory locally for audit history; no push |
+| Synced | `oacp memory init --remote URL` or `oacp memory clone <URL>` | Session start pulls fast-forward updates; wrap-up commits and pushes |
+
+Lifecycle hooks must check for `$OACP_HOME/.oacp-memory-repo` first and exit
+without output when it is absent. Claude runtime setup installs hook scripts for
+`SessionStart` pull and wrap-up/session-end push:
+
+1. Session start runs `oacp memory pull`. It exits advisory-successfully, pulls
+   only clean behind states with `--ff-only`, and warns loudly when memory is
+   dirty, ahead, diverged, behind, or remote fetch fails.
+2. Wrap-up runs `oacp memory push`. It stages only `.gitignore`,
+   `.oacp-memory-repo`, `org-memory/**`, and `projects/*/memory/**`; commits
+   with the fixed terse message format; pushes when a remote exists; and warns
+   loudly when memory is dirty, behind, diverged, or push fails.
 
 ---
 
@@ -532,7 +590,8 @@ Scripts marked **CLI** are exposed as `oacp` subcommands. Scripts marked **scrip
 | `agent_profile.py` | Two-tier agent profile management | CLI: `oacp agent` |
 | `send_inbox_message.py` | Compose and send inbox messages | CLI: `oacp send` |
 | `oacp_inbox.py` | List pending inbox messages | CLI: `oacp inbox` |
-| `memory_cli.py` | Archive or restore project memory files | CLI: `oacp memory` |
+| `memory_cli.py` | Archive, restore, or git-sync project/org memory files | CLI: `oacp memory` |
+| `memory_sync.py` | Shared git allowlist and memory sync helpers | imported by CLI/doctor |
 | `setup_runtime.py` | Generate runtime-specific config files | CLI: `oacp setup` |
 | `init_org_memory.py` | Scaffold org-level memory directory | CLI: `oacp org-memory` |
 | `write_event.py` | Write timestamped events to org-memory | CLI: `oacp write-event` |

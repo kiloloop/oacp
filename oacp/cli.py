@@ -24,7 +24,7 @@ Commands:
   agent          Manage global agent profiles (init, show, list)
   inbox          List pending inbox messages
   watch          Emit inbox delta events for Monitor-friendly polling
-  memory         Archive or restore project memory files
+  memory         Archive, restore, or sync memory files
   setup          Generate runtime-specific config files in a repo
   send           Send a protocol-compliant inbox message
   org-memory     Initialize org-level memory at $OACP_HOME/org-memory/
@@ -38,6 +38,7 @@ Examples:
   oacp add-agent my-project alice --runtime claude
   oacp inbox my-project --agent claude
   oacp watch --agent claude --project my-project --json
+  oacp memory init --remote git@github.com:<YOUR_ORG>/oacp-memory.git
   oacp memory archive my-project research_notes.md
   oacp setup claude --project my-project
   oacp send my-project --to iris --type notification --subject "Done" --body "Completed"

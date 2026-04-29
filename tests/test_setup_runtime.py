@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import sys
 import tempfile
 import unittest
@@ -23,10 +26,29 @@ class TestSetupRuntime(unittest.TestCase):
             )
 
             agent_file = repo_dir / ".claude" / "agents" / "myproj.md"
+            pull_hook = repo_dir / ".claude" / "hooks" / "oacp-memory-pull.sh"
+            push_hook = repo_dir / ".claude" / "hooks" / "oacp-memory-push.sh"
+            settings_file = repo_dir / ".claude" / "settings.json"
             self.assertTrue(agent_file.is_file())
             self.assertTrue((repo_dir / ".claude" / "skills").is_dir())
+            self.assertTrue(pull_hook.is_file())
+            self.assertTrue(push_hook.is_file())
+            self.assertTrue(settings_file.is_file())
+            pull_content = pull_hook.read_text(encoding="utf-8")
+            push_content = push_hook.read_text(encoding="utf-8")
+            self.assertIn("Claude hook event: SessionStart", pull_content)
+            self.assertIn("oacp memory pull", pull_content)
+            self.assertIn("Claude hook event: SessionEnd", push_content)
+            self.assertIn("oacp memory push", push_content)
+            self.assertIn("|| true", push_content)
+            settings = json.loads(settings_file.read_text(encoding="utf-8"))
+            self.assertIn("SessionStart", settings["hooks"])
+            self.assertIn("SessionEnd", settings["hooks"])
             self.assertIn(".claude/agents/myproj.md", result["created_files"])
             self.assertIn(".claude/skills/", result["created_files"])
+            self.assertIn(".claude/hooks/oacp-memory-pull.sh", result["created_files"])
+            self.assertIn(".claude/hooks/oacp-memory-push.sh", result["created_files"])
+            self.assertIn(".claude/settings.json", result["created_files"])
 
     def test_codex_creates_agents_md(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -94,6 +116,41 @@ class TestSetupRuntime(unittest.TestCase):
 
             agent_file = repo_dir / ".claude" / "agents" / "<project>.md"
             self.assertTrue(agent_file.is_file())
+
+    def test_claude_settings_merge_preserves_existing_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            settings = repo_dir / ".claude" / "settings.json"
+            settings.parent.mkdir(parents=True)
+            settings.write_text(
+                json.dumps({"env": {"EXISTING": "1"}, "hooks": {"Stop": []}}),
+                encoding="utf-8",
+            )
+
+            result = setup_runtime("claude", repo_dir=repo_dir, project_name="demo")
+            data = json.loads(settings.read_text(encoding="utf-8"))
+
+            self.assertEqual(data["env"]["EXISTING"], "1")
+            self.assertIn("Stop", data["hooks"])
+            self.assertIn("SessionStart", data["hooks"])
+            self.assertIn("SessionEnd", data["hooks"])
+            self.assertIn(".claude/settings.json", result["created_files"])
+
+    def test_claude_settings_warns_when_existing_settings_is_not_object(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            settings = repo_dir / ".claude" / "settings.json"
+            settings.parent.mkdir(parents=True)
+            settings.write_text("[]", encoding="utf-8")
+
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                result = setup_runtime("claude", repo_dir=repo_dir, project_name="demo")
+
+            self.assertIn(".claude/settings.json", result["warning_files"])
+            self.assertNotIn(".claude/settings.json", result["skipped_files"])
+            self.assertIn("expected a JSON object", stderr.getvalue())
+            self.assertEqual(settings.read_text(encoding="utf-8"), "[]")
 
 
 if __name__ == "__main__":

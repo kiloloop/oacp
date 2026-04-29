@@ -62,6 +62,61 @@ oacp send <project> --from gemini ...    # send a message
 oacp validate <message.yaml>             # validate a message
 ```
 """
+
+CLAUDE_MEMORY_PULL_HOOK = """\
+#!/usr/bin/env bash
+# Claude hook event: SessionStart (startup)
+set -u
+
+OACP_ROOT="${OACP_HOME:-$HOME/oacp}"
+if [[ ! -f "$OACP_ROOT/.oacp-memory-repo" ]]; then
+  exit 0
+fi
+
+oacp memory pull --oacp-dir "$OACP_ROOT" || true
+"""
+
+CLAUDE_MEMORY_PUSH_HOOK = """\
+#!/usr/bin/env bash
+# Claude hook event: SessionEnd / wrap-up
+set -u
+
+OACP_ROOT="${OACP_HOME:-$HOME/oacp}"
+if [[ ! -f "$OACP_ROOT/.oacp-memory-repo" ]]; then
+  exit 0
+fi
+
+oacp memory push --oacp-dir "$OACP_ROOT" || true
+"""
+
+CLAUDE_SETTINGS_SCHEMA = "https://json.schemastore.org/claude-code-settings.json"
+CLAUDE_MEMORY_HOOK_COMMANDS = {
+    "SessionStart": {
+        "matcher": "startup",
+        "hooks": [
+            {
+                "type": "command",
+                "command": ".claude/hooks/oacp-memory-pull.sh",
+                "timeout": 30,
+            }
+        ],
+    },
+    "SessionEnd": {
+        "hooks": [
+            {
+                "type": "command",
+                "command": ".claude/hooks/oacp-memory-push.sh",
+                "timeout": 30,
+            }
+        ],
+    },
+}
+
+
+def _make_executable(path: Path) -> None:
+    path.chmod(path.stat().st_mode | 0o755)
+
+
 def _load_template(relative: str) -> Optional[str]:
     """Load a template file, returning None if not found."""
     try:
@@ -69,6 +124,77 @@ def _load_template(relative: str) -> Optional[str]:
             return path.read_text(encoding="utf-8")
     except (FileNotFoundError, TypeError):
         return None
+
+
+def _hook_command_exists(entries: List[Any], command: str) -> bool:
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        hooks = entry.get("hooks")
+        if not isinstance(hooks, list):
+            continue
+        for hook in hooks:
+            if isinstance(hook, dict) and hook.get("command") == command:
+                return True
+    return False
+
+
+def _warn_claude_settings(settings_file: Path, message: str) -> None:
+    print(f"Warning: {settings_file}: {message}", file=sys.stderr)
+
+
+def _write_claude_memory_settings(repo_dir: Path) -> Optional[bool]:
+    """Create or update .claude/settings.json with memory hook registrations."""
+    settings_file = repo_dir / ".claude" / "settings.json"
+    if settings_file.is_file():
+        try:
+            data = json.loads(settings_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            _warn_claude_settings(
+                settings_file,
+                f"invalid JSON ({exc.msg}); skipping hook registration.",
+            )
+            return None
+        if not isinstance(data, dict):
+            _warn_claude_settings(
+                settings_file,
+                "expected a JSON object; skipping hook registration.",
+            )
+            return None
+    else:
+        data = {"$schema": CLAUDE_SETTINGS_SCHEMA}
+
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        _warn_claude_settings(
+            settings_file,
+            "expected hooks to be a JSON object; skipping hook registration.",
+        )
+        return None
+
+    changed = False
+    for event_name, entry in CLAUDE_MEMORY_HOOK_COMMANDS.items():
+        entries = hooks.setdefault(event_name, [])
+        if not isinstance(entries, list):
+            _warn_claude_settings(
+                settings_file,
+                f"expected hooks.{event_name} to be a list; skipping hook registration.",
+            )
+            return None
+        command = str(entry["hooks"][0]["command"])
+        if not _hook_command_exists(entries, command):
+            entries.append(entry)
+            changed = True
+
+    if changed:
+        settings_file.parent.mkdir(parents=True, exist_ok=True)
+        settings_file.write_text(
+            json.dumps(data, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    return changed
+
+
 def _detect_repo_root(start: Path) -> Optional[Path]:
     """Walk up from *start* looking for a .git directory."""
     for d in (start, *start.parents):
@@ -127,7 +253,7 @@ def setup_runtime(
 ) -> Dict[str, Any]:
     """Generate runtime-specific configuration files.
 
-    Returns a dict with ``created_files`` and ``skipped_files``.
+    Returns a dict with ``created_files``, ``skipped_files``, and ``warning_files``.
     """
     if runtime not in CREATABLE_RUNTIMES:
         raise ValueError(
@@ -136,6 +262,7 @@ def setup_runtime(
 
     created_files: List[str] = []
     skipped_files: List[str] = []
+    warning_files: List[str] = []
 
     project_label = project_name or "<project>"
 
@@ -167,6 +294,29 @@ def setup_runtime(
         else:
             skipped_files.append(".claude/skills/")
 
+        pull_hook = repo_dir / ".claude" / "hooks" / "oacp-memory-pull.sh"
+        if _write_if_missing(pull_hook, CLAUDE_MEMORY_PULL_HOOK):
+            _make_executable(pull_hook)
+            created_files.append(str(pull_hook.relative_to(repo_dir)))
+        else:
+            skipped_files.append(str(pull_hook.relative_to(repo_dir)))
+
+        push_hook = repo_dir / ".claude" / "hooks" / "oacp-memory-push.sh"
+        if _write_if_missing(push_hook, CLAUDE_MEMORY_PUSH_HOOK):
+            _make_executable(push_hook)
+            created_files.append(str(push_hook.relative_to(repo_dir)))
+        else:
+            skipped_files.append(str(push_hook.relative_to(repo_dir)))
+
+        settings_file = repo_dir / ".claude" / "settings.json"
+        settings_result = _write_claude_memory_settings(repo_dir)
+        if settings_result is True:
+            created_files.append(str(settings_file.relative_to(repo_dir)))
+        elif settings_result is False:
+            skipped_files.append(str(settings_file.relative_to(repo_dir)))
+        else:
+            warning_files.append(str(settings_file.relative_to(repo_dir)))
+
     elif runtime == "codex":
         agents_md = repo_dir / "AGENTS.md"
         if _write_if_missing(agents_md, CODEX_AGENTS_MD):
@@ -184,6 +334,7 @@ def setup_runtime(
     return {
         "created_files": created_files,
         "skipped_files": skipped_files,
+        "warning_files": warning_files,
     }
 
 
@@ -218,7 +369,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"  + {f}")
     for f in result["skipped_files"]:
         print(f"  ~ {f} (already exists, skipped)")
-    if not result["created_files"] and not result["skipped_files"]:
+    for f in result["warning_files"]:
+        print(f"  ! {f} (warning, skipped)")
+    if (
+        not result["created_files"]
+        and not result["skipped_files"]
+        and not result["warning_files"]
+    ):
         print("  (no files to create)")
     return 0
 

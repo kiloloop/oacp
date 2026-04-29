@@ -126,7 +126,7 @@ uv tool install .
 | `oacp send` | Send a protocol-compliant inbox message (`--from` auto-inferred) |
 | `oacp inbox` | List pending messages across agents (table or `--json`) |
 | `oacp watch` | Emit inbox delta events for one agent across selected projects |
-| `oacp memory` | Archive or restore project memory files |
+| `oacp memory` | Archive, restore, or git-sync project/org memory files |
 | `oacp agent` | Manage global agent profiles (`init`, `show`, `list`) |
 | `oacp org-memory` | Initialize org-level memory at `$OACP_HOME/org-memory/` |
 | `oacp write-event` | Write an event to `org-memory/events/` |
@@ -141,9 +141,9 @@ uv tool install .
 
 **`oacp watch`**: `--agent`, repeatable `--project`, `--all-projects`, `--json`, `--since` (default `now`), `--show-archived`
 
-**`oacp doctor`**: `--fix` (auto-fix safe issues), `--json`, `-o/--output`
+**`oacp doctor`**: `--fix` (auto-fix safe issues), `--memory`, `--json`, `-o/--output`
 
-**`oacp memory`**: `oacp memory archive <project> <file>`, `oacp memory restore <project> <file>`
+**`oacp memory`**: `init [--remote URL]`, `clone <URL> [--force]`, `pull`, `push`, `disable`, `archive <project> <file>`, `restore <project> <file>`
 
 </details>
 
@@ -156,7 +156,7 @@ If `OACP_HOME` is unset, workspace commands default to `~/oacp`.
 | **Inbox/Outbox** | Async messaging between agents via YAML files in `agents/<name>/inbox/` |
 | **Review Loop** | Structured code review: `review_request` → `review_feedback` → `review_addressed` → `review_lgtm` |
 | **Quality Gate** | Merge-readiness criteria: no unresolved P0/P1 findings, deferred nits tracked |
-| **Durable Memory** | Shared `memory/` directory with an active working set plus `memory/archive/` for historical memory |
+| **Durable Memory** | Shared `memory/` directory with an active working set plus `memory/archive/` for historical memory; optional `$OACP_HOME` git sync tracks only `org-memory/**` and `projects/*/memory/**` |
 | **Dispatch States** | Task lifecycle: `received` → `accepted` → `working` → `pr_opened` → `in_review` → `done` |
 | **Safety Defaults** | Baseline rules all agents follow: no force push, no secrets in commits, stage hygiene |
 

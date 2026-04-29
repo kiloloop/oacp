@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "oacp-cli"
-version = "0.2.3"
+version = "0.3.0"
 description = "Open Agent Coordination Protocol CLI for file-based multi-agent workflows"
 readme = "README.md"
 license = "Apache-2.0"
@@ -63,6 +63,7 @@ packages = ["oacp"]
 "scripts/oacp_inbox.py" = "oacp/_scripts/oacp_inbox.py"
 "scripts/oacp_watch.py" = "oacp/_scripts/oacp_watch.py"
 "scripts/memory_cli.py" = "oacp/_scripts/memory_cli.py"
+"scripts/memory_sync.py" = "oacp/_scripts/memory_sync.py"
 "scripts/memory_archive_common.py" = "oacp/_scripts/memory_archive_common.py"
 "scripts/promote_to_archive.py" = "oacp/_scripts/promote_to_archive.py"
 "scripts/restore_from_archive.py" = "oacp/_scripts/restore_from_archive.py"
