@@ -1,10 +1,10 @@
 # Cross-Runtime Parity Matrix
 
-**Date**: 2026-04-24
+**Date**: 2026-04-29
 
 This is a capability comparison across 3 agent runtimes (Claude Code, Codex, Gemini), compiled from each runtime's self-report and current runtime changelogs. Use this as a reference when deciding which agent to assign for a given task.
 
-Claude was last checked against Claude Code `v2.1.118`.
+Claude was last checked against Claude Code `v2.1.123`.
 
 Codex was last checked against app update `26.415`, CLI `0.123.0`, and OpenAI's GPT-5.5 launch note from 2026-04-23.
 

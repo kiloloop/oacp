@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.3.0] - 2026-04-29
+
+### Added
+
+- `oacp memory init|clone|pull|push|disable` subcommands for opt-in cross-machine sync of `$OACP_HOME/org-memory/**` and `$OACP_HOME/projects/*/memory/**` via a plain git repo rooted at `$OACP_HOME`. Three-state activation model: Disabled (no marker), Local-only (`init` without `--remote`), and Synced (`init --remote <url>` or `clone <url>`).
+- `oacp doctor --memory` advisory checks (10 checks covering marker presence, allowlist coverage, remote configuration, fetch/divergence state, and signing setup).
+- `oacp setup claude` now installs memory pull/push hook scripts and registers them in `.claude/settings.json` for Claude SessionStart and SessionEnd lifecycle events. Hooks are marker-gated and no-op silently unless `$OACP_HOME/.oacp-memory-repo` is present, so existing workflows are unaffected on machines that have not opted in.
+
 ## [0.2.3] - 2026-04-26
 
 ### Changed
@@ -121,6 +131,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Checkout step in github-release workflow job (#19)
 - Pre-release audit fixes: SHA-pinned actions, dangling doc refs (#15, #16)
 
+[0.3.0]: https://github.com/kiloloop/oacp/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/kiloloop/oacp/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/kiloloop/oacp/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/kiloloop/oacp/compare/v0.2.0...v0.2.1

@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -26,6 +27,7 @@ from oacp_doctor import (  # noqa: E402
     check_agent_status,
     check_environment,
     check_inbox_health,
+    check_memory_sync,
     check_schemas,
     check_workspace,
     has_errors,
@@ -33,6 +35,7 @@ from oacp_doctor import (  # noqa: E402
     print_report,
     run_doctor,
 )
+from memory_sync import CANONICAL_MEMORY_GITIGNORE  # noqa: E402
 
 
 def _write(path: Path, content: str) -> None:
@@ -421,6 +424,109 @@ class TestRunDoctor(unittest.TestCase):
             self.assertIn("Inbox Health", cat_names)
             self.assertIn("Schemas", cat_names)
             self.assertIn("Agent Status", cat_names)
+
+    def test_include_memory_adds_memory_sync_category(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            hub_dir = Path(td)
+            runner = _fake_runner()
+            which = _fake_which({"git", "python3", "gh"})
+
+            cats = run_doctor(
+                oacp_dir=hub_dir,
+                project=None,
+                include_memory=True,
+                runner=runner,
+                which_fn=which,
+            )
+
+            self.assertEqual(cats[-1].name, "Memory Sync")
+            self.assertEqual(cats[-1].results[0].severity, Severity.skip)
+
+
+class TestCheckMemorySync(unittest.TestCase):
+    def _git(self, cwd: Path, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_memory_sync_not_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cat = check_memory_sync(Path(td))
+
+            self.assertEqual(cat.name, "Memory Sync")
+            self.assertEqual(len(cat.results), 1)
+            self.assertEqual(cat.results[0].severity, Severity.skip)
+            self.assertIn("not configured", cat.results[0].message)
+
+    def test_memory_sync_warns_for_tracked_agent_state(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.assertEqual(self._git(root, "init").returncode, 0)
+            _write(root / ".oacp-memory-repo", "marker\n")
+            _write(root / ".gitignore", CANONICAL_MEMORY_GITIGNORE)
+            _write(root / "projects" / "demo" / "agents" / "codex" / "status.yaml", "busy\n")
+            self.assertEqual(
+                self._git(
+                    root,
+                    "add",
+                    "-f",
+                    ".oacp-memory-repo",
+                    ".gitignore",
+                    "projects/demo/agents/codex/status.yaml",
+                ).returncode,
+                0,
+            )
+
+            cat = check_memory_sync(root)
+            messages = "\n".join(result.message for result in cat.results)
+
+            self.assertIn("tracked file(s) outside memory allowlist", messages)
+            self.assertIn("agents/ file(s) tracked", messages)
+
+    def test_memory_sync_warns_for_escaping_overlay(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.assertEqual(self._git(root, "init").returncode, 0)
+            _write(root / ".oacp-memory-repo", "marker\n")
+            _write(root / ".gitignore", CANONICAL_MEMORY_GITIGNORE)
+            _write(root / "projects" / "demo" / "memory" / ".gitignore", "!../agents/**\n")
+
+            cat = check_memory_sync(root)
+            overlay = next(result for result in cat.results if result.name == "memory-overlays")
+
+            self.assertEqual(overlay.severity, Severity.warn)
+            self.assertIn("escape memory", overlay.message)
+
+    def test_memory_sync_does_not_report_agents_clean_when_ls_files_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write(root / ".oacp-memory-repo", "marker\n")
+            _write(root / ".gitignore", CANONICAL_MEMORY_GITIGNORE)
+
+            def runner(command: Sequence[str]) -> Tuple[int, str]:
+                if command[:2] == ["git", "rev-parse"]:
+                    if "--verify" in command:
+                        return 1, ""
+                    return 0, "true"
+                if command[:2] == ["git", "status"]:
+                    return 0, ""
+                if command[:2] == ["git", "remote"]:
+                    return 0, ""
+                if command[:2] == ["git", "ls-files"] and "--others" not in command:
+                    return 1, "boom"
+                if command[:2] == ["git", "ls-files"] and "--others" in command:
+                    return 0, ""
+                return 0, ""
+
+            cat = check_memory_sync(root, runner=runner)
+            results = {result.name: result for result in cat.results}
+
+            self.assertEqual(results["tracked-allowlist"].severity, Severity.warn)
+            self.assertNotIn("agents-tracked", results)
 
 
 class TestApplyFixes(unittest.TestCase):
