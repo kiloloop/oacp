@@ -1,0 +1,10 @@
+id: msg-20260512120100-iris-missing-profile
+from: iris
+to: codex
+type: task_request
+priority: P2
+created_at_utc: "2026-05-12T12:01:00Z"
+subject: "Small docs cleanup without profile"
+body: |
+  ## Task
+  Update one documentation paragraph for clarity.

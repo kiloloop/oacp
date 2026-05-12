@@ -1,0 +1,14 @@
+case: brainstorm_without_profile_auto_accepts
+config: configs/auto_review_standard.yaml
+message: messages/brainstorm_without_profile.yaml
+expected:
+  decision: auto_accepted
+  mode: auto_review
+  reason_codes:
+    - message_valid
+    - message_not_expired
+    - message_hash_recorded
+    - task_profile_not_required
+    - task_type_allowed
+    - hard_stops_clear
+    - workspace_check_required

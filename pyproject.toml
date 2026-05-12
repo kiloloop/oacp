@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "oacp-cli"
-version = "0.3.0"
+version = "0.3.1"
 description = "Open Agent Coordination Protocol CLI for file-based multi-agent workflows"
 readme = "README.md"
 license = "Apache-2.0"
@@ -76,6 +76,7 @@ packages = ["oacp"]
 "templates/org-memory/rules.md" = "oacp/_templates/org-memory/rules.md"
 "templates/agent_card.template.yaml" = "oacp/_templates/agent_card.template.yaml"
 "templates/agent_profile.template.yaml" = "oacp/_templates/agent_profile.template.yaml"
+"templates/receiver_config.template.yaml" = "oacp/_templates/receiver_config.template.yaml"
 "templates/claude/agents/role_agent.template.md" = "oacp/_templates/claude/agents/role_agent.template.md"
 
 [tool.ruff]

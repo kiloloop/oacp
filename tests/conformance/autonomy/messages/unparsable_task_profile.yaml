@@ -1,0 +1,12 @@
+id: msg-20260512120200-iris-bad-profile
+from: iris
+to: codex
+type: task_request
+priority: P2
+created_at_utc: "2026-05-12T12:02:00Z"
+subject: "Task with malformed profile"
+body: |
+  ## Task
+  Update one documentation paragraph for clarity.
+
+  task_profile: [

@@ -1,0 +1,9 @@
+case: ambiguous_scope_pauses
+config: configs/auto_review_standard.yaml
+message: messages/ambiguous_scope.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - file_scope_ambiguous
+  matched_pattern: "all files"

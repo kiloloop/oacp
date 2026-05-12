@@ -1,0 +1,8 @@
+case: malformed_config_pauses
+config: configs/malformed_config.yaml
+message: messages/clean_task.yaml
+expected:
+  decision: paused
+  mode: always_pause
+  reason_codes:
+    - config_malformed

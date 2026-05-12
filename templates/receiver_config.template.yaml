@@ -1,0 +1,15 @@
+# Receiver autonomy policy for agents/<receiver>/config.yaml.
+# Default is conservative: no silent autonomy.
+autonomy:
+  default_mode: always_pause  # always_pause | auto_review
+  auto_review_thresholds:
+    max_estimated_minutes: 30
+    max_expected_files_touched: 5
+    destructive_ops: pause
+    external_side_effects: pause
+    auth_config_or_secrets: pause
+    dependency_changes: pause
+    public_visibility: pause
+    git_push_or_deploy: pause
+  allow_without_task_profile:
+    - brainstorm_request

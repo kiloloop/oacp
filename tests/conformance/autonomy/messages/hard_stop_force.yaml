@@ -1,0 +1,20 @@
+id: msg-20260512120400-iris-force
+from: iris
+to: codex
+type: task_request
+priority: P2
+created_at_utc: "2026-05-12T12:04:00Z"
+subject: "Force update"
+body: |
+  ## Task
+  Run the formatter with `--force`.
+
+  task_profile:
+    estimated_minutes: 5
+    risk_tier: P3
+    expected_files_touched: 1
+    destructive_ops: false
+    external_side_effects: false
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: false

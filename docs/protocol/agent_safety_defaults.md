@@ -30,6 +30,21 @@ Follow `credential_scoping.md` in this directory for:
 - Per-agent credential boundaries
 - Rotation and revocation procedures
 
+## Autonomy Hard Stops
+
+Receiver autonomy controls only whether a message can move from `received` to
+`accepted` without interactive human confirmation. It does not relax this safety
+floor.
+
+Regardless of autonomy mode, receivers must pause on any of:
+
+- Destructive command tokens: `rm -rf`, `--force`, `--no-verify`, `--dangerously-skip-permissions`
+- External side effects: push, deploy, merge, publish, credential rotation, dependency install
+- Sensitive scope: auth, config, secrets, dependencies, public repos, pricing/commercial content, memory SSOT
+
+The only exception is an explicit, separate safety-default exception. The
+Phase 1 autonomy RFC does not introduce any such exception.
+
 ## Scope Discipline
 
 - **Do not edit files outside the requested scope** — if a task says "fix X in file Y", do not refactor file Z.

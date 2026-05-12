@@ -109,6 +109,26 @@ agent_transitions:
     to: "accepted"
     trigger: "Agent reads and accepts the task_request"
     role: "agent"
+    metadata_fields:
+      transition: "received_to_accepted"
+      accepted_by:
+        description: "Acceptance actor: human | autonomy_policy | --autonomous-flag"
+        required: true
+      human_confirmed:
+        description: "Whether a human explicitly confirmed acceptance"
+        required: true
+      autonomy_mode:
+        description: "Receiver autonomy mode, e.g. always_pause or auto_review"
+        required: false
+      policy_ref:
+        description: "Receiver policy path, e.g. agents/codex/config.yaml"
+        required: false
+      policy_hash:
+        description: "sha256 of receiver policy when available"
+        required: false
+      reason_codes:
+        description: "List of acceptance or pause reason codes"
+        required: false
 
   - from: "received"
     to: "rejected"

@@ -24,6 +24,7 @@ from oacp_doctor import (  # noqa: E402
     DoctorResult,
     Severity,
     apply_fixes,
+    check_autonomy,
     check_agent_status,
     check_environment,
     check_inbox_health,
@@ -34,6 +35,7 @@ from oacp_doctor import (  # noqa: E402
     print_json,
     print_report,
     run_doctor,
+    validate_autonomy_config_data,
 )
 from memory_sync import CANONICAL_MEMORY_GITIGNORE  # noqa: E402
 
@@ -227,6 +229,89 @@ class TestCheckSchemas(unittest.TestCase):
             self.assertTrue(any(r.severity == Severity.skip for r in cat.results))
 
 
+class TestAutonomyConfig(unittest.TestCase):
+    def test_valid_autonomy_config(self) -> None:
+        data = {
+            "autonomy": {
+                "default_mode": "auto_review",
+                "auto_review_thresholds": {
+                    "max_estimated_minutes": 30,
+                    "max_expected_files_touched": 5,
+                    "destructive_ops": "pause",
+                    "external_side_effects": "pause",
+                    "auth_config_or_secrets": "pause",
+                    "dependency_changes": "pause",
+                    "public_visibility": "pause",
+                    "git_push_or_deploy": "pause",
+                },
+                "allow_without_task_profile": ["brainstorm_request"],
+            }
+        }
+        self.assertEqual(validate_autonomy_config_data(data), [])
+
+    def test_rejects_trusted_senders(self) -> None:
+        data = {
+            "autonomy": {
+                "default_mode": "always_pause",
+                "trusted_senders": ["iris"],
+            }
+        }
+        errors = validate_autonomy_config_data(data)
+        self.assertTrue(any("trusted_senders" in error for error in errors))
+
+    def test_check_autonomy_reports_missing_audit_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_dir = Path(td)
+            (project_dir / "agents" / "codex").mkdir(parents=True)
+            cat = check_autonomy(project_dir)
+            audit = next(r for r in cat.results if "audit" in r.name)
+            self.assertEqual(audit.severity, Severity.warn)
+
+    def test_check_autonomy_reports_valid_config(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_dir = Path(td)
+            agent_dir = project_dir / "agents" / "codex"
+            (agent_dir / "audit" / "autonomy_decisions").mkdir(parents=True)
+            _write(
+                agent_dir / "config.yaml",
+                (
+                    "autonomy:\n"
+                    "  default_mode: always_pause\n"
+                    "  auto_review_thresholds:\n"
+                    "    max_estimated_minutes: 30\n"
+                    "    max_expected_files_touched: 5\n"
+                    "    destructive_ops: pause\n"
+                    "    external_side_effects: pause\n"
+                    "    auth_config_or_secrets: pause\n"
+                    "    dependency_changes: pause\n"
+                    "    public_visibility: pause\n"
+                    "    git_push_or_deploy: pause\n"
+                    "  allow_without_task_profile:\n"
+                    "    - brainstorm_request\n"
+                ),
+            )
+            import yaml
+
+            cat = check_autonomy(project_dir, yaml_loader=yaml.safe_load)
+            config = next(r for r in cat.results if r.name == "codex/config.yaml")
+            self.assertEqual(config.severity, Severity.ok)
+
+    def test_check_autonomy_reports_orphaned_policy_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_dir = Path(td)
+            audit_dir = project_dir / "agents" / "codex" / "audit" / "autonomy_decisions"
+            audit_dir.mkdir(parents=True)
+            _write(
+                audit_dir / "20260512T132325Z_msg-demo.yaml",
+                "policy_path: agents/codex/missing-config.yaml\n",
+            )
+            import yaml
+
+            cat = check_autonomy(project_dir, yaml_loader=yaml.safe_load)
+            policy_refs = next(r for r in cat.results if "policy-refs" in r.name)
+            self.assertEqual(policy_refs.severity, Severity.warn)
+
+
 class TestCheckAgentStatus(unittest.TestCase):
     def test_present_fresh_status(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -416,13 +501,14 @@ class TestRunDoctor(unittest.TestCase):
                 runner=runner,
                 which_fn=which,
             )
-            # Environment + Workspace + Inbox Health + Schemas + Agent Status = 5
-            self.assertEqual(len(cats), 5)
+            # Environment + Workspace + Inbox Health + Schemas + Autonomy + Agent Status = 6
+            self.assertEqual(len(cats), 6)
             cat_names = [c.name for c in cats]
             self.assertIn("Environment", cat_names)
             self.assertIn("Workspace", cat_names)
             self.assertIn("Inbox Health", cat_names)
             self.assertIn("Schemas", cat_names)
+            self.assertIn("Autonomy", cat_names)
             self.assertIn("Agent Status", cat_names)
 
     def test_include_memory_adds_memory_sync_category(self) -> None:

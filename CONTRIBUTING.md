@@ -73,6 +73,7 @@ make preflight ARGS="--full"
 - Packet naming follows `<YYYYMMDD>_<topic>_<owner>_r<round>`.
 - Scripts use `python3` and avoid external dependencies beyond the standard library (exception: `pyyaml`).
 - Shell scripts use POSIX-compatible constructs where possible; bash-specific features require bash 3.2+.
+- README images should stay under ~500KB each. Use `docs/img/` for all README assets.
 
 ## Commit Messages
 

@@ -25,6 +25,7 @@ Options:
     --parent-message-id <id>    Parent message for threading
     --context-keys <text>       Context keys (inline)
     --context-keys-file <path>  Read context keys from file
+    --autonomy-hint <value>     Advisory receiver autonomy hint (valid: auto_proceed)
     --suffix <text>             Filename disambiguator suffix
     --oacp-dir <path>           Override OACP home directory (default: $OACP_HOME or ~/oacp)
     --dry-run                   Print YAML to stdout, don't write files
@@ -58,6 +59,7 @@ _scripts_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(_scripts_dir))
 
 from validate_message import (  # noqa: E402
+    ALLOWED_AUTONOMY_HINTS,
     ALLOWED_PRIORITIES,
     ALLOWED_TYPES,
     parse_duration_to_expires,
@@ -74,6 +76,7 @@ FIELD_ORDER = [
     "created_at_utc",
     "expires_at",
     "channel",
+    "autonomy_hint",
     "related_packet",
     "related_pr",
     "conversation_id",
@@ -287,6 +290,7 @@ def build_message_dict(
     context_keys: Optional[str] = None,
     expires_at: Optional[str] = None,
     channel: Optional[str] = None,
+    autonomy_hint: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build a complete message dict with auto-generated ID and timestamp."""
     msg: Dict[str, Any] = {
@@ -305,6 +309,8 @@ def build_message_dict(
         msg["expires_at"] = expires_at
     if channel:
         msg["channel"] = channel
+    if autonomy_hint:
+        msg["autonomy_hint"] = autonomy_hint
     if related_packet:
         msg["related_packet"] = related_packet
     if related_pr:
@@ -505,6 +511,7 @@ def send_message(
     expires_at: Optional[str] = None,
     channel: Optional[str] = None,
     in_reply_to: Optional[str] = None,
+    autonomy_hint: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Orchestrate message building, validation, rendering, and writing.
 
@@ -568,6 +575,7 @@ def send_message(
         context_keys=context_keys,
         expires_at=expires_at,
         channel=channel,
+        autonomy_hint=autonomy_hint,
     )
 
     # Validate
@@ -711,6 +719,14 @@ def main() -> int:
         default=None,
         help="Channel tag (free-text, e.g. 'review', 'deploy', 'brainstorm', 'incident')",
     )
+    parser.add_argument(
+        "--autonomy-hint",
+        default=None,
+        help=(
+            "Advisory receiver autonomy hint "
+            f"(valid: {', '.join(sorted(ALLOWED_AUTONOMY_HINTS))})"
+        ),
+    )
     parser.add_argument("--suffix", default=None, help="Filename disambiguator suffix")
     parser.add_argument(
         "--oacp-dir",
@@ -779,6 +795,7 @@ def main() -> int:
             expires_at=expires_at,
             channel=args.channel,
             in_reply_to=args.in_reply_to,
+            autonomy_hint=args.autonomy_hint,
         )
     except ValueError as exc:
         _emit_error(str(exc), json_output=args.json_output)

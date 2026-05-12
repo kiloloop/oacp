@@ -123,8 +123,11 @@ class TestDirectoryCreation(unittest.TestCase):
             run_update(root)
             expected = [
                 "agents/codex/inbox", "agents/codex/outbox", "agents/codex/dead_letter",
+                "agents/codex/audit/autonomy_decisions",
                 "agents/claude/inbox", "agents/claude/outbox", "agents/claude/dead_letter",
+                "agents/claude/audit/autonomy_decisions",
                 "agents/gemini/inbox", "agents/gemini/outbox", "agents/gemini/dead_letter",
+                "agents/gemini/audit/autonomy_decisions",
                 "packets/review", "packets/findings", "packets/test", "packets/deploy",
                 "checkpoints", "merges", "memory", "memory/archive", "artifacts", "state", "logs",
             ]
@@ -158,6 +161,23 @@ class TestGitkeep(unittest.TestCase):
             root = make_workspace(tmp)
             run_update(root)
             self.assertTrue(os.path.isfile(os.path.join(root, "agents", "claude", "dead_letter", ".gitkeep")))
+
+    def test_gitkeep_in_autonomy_audit_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_workspace(tmp)
+            run_update(root)
+            self.assertTrue(
+                os.path.isfile(
+                    os.path.join(
+                        root,
+                        "agents",
+                        "codex",
+                        "audit",
+                        "autonomy_decisions",
+                        ".gitkeep",
+                    )
+                )
+            )
 
     def test_no_gitkeep_in_memory(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -211,6 +231,31 @@ class TestMemoryFiles(unittest.TestCase):
                 content = f.read()
             self.assertIn("# Known Debt", content)
             self.assertIn("| Item | Severity | Date Found | Source | Status |", content)
+
+
+class TestAutonomyConfig(unittest.TestCase):
+    """Backfills receiver autonomy config and audit dirs."""
+
+    def test_creates_receiver_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_workspace(tmp)
+            run_update(root)
+            config_path = os.path.join(root, "agents", "codex", "config.yaml")
+            self.assertTrue(os.path.isfile(config_path))
+            with open(config_path) as f:
+                content = f.read()
+            self.assertIn("default_mode: always_pause", content)
+
+    def test_never_overwrites_receiver_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_workspace(tmp)
+            config_path = os.path.join(root, "agents", "codex", "config.yaml")
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            with open(config_path, "w") as f:
+                f.write("custom: true\n")
+            run_update(root)
+            with open(config_path) as f:
+                self.assertEqual(f.read(), "custom: true\n")
 
 
 class TestNeverRemovesFiles(unittest.TestCase):

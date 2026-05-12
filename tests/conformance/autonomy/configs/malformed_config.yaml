@@ -1,0 +1,7 @@
+autonomy:
+  default_mode: auto_review
+  auto_review_thresholds:
+    max_estimated_minutes: soon
+    max_expected_files_touched: many
+    destructive_ops: allow
+  allow_without_task_profile: brainstorm_request

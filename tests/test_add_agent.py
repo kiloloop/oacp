@@ -33,7 +33,11 @@ class TestAddAgent(unittest.TestCase):
             self.assertTrue((agent_dir / "inbox" / ".gitkeep").exists())
             self.assertTrue((agent_dir / "outbox" / ".gitkeep").exists())
             self.assertTrue((agent_dir / "dead_letter" / ".gitkeep").exists())
-            self.assertEqual(len(result["created_files"]), 3)
+            self.assertTrue(
+                (agent_dir / "audit" / "autonomy_decisions" / ".gitkeep").exists()
+            )
+            self.assertTrue((agent_dir / "config.yaml").exists())
+            self.assertEqual(len(result["created_files"]), 5)
             self.assertEqual(len(result["skipped_files"]), 0)
 
     def test_creates_status_and_card_with_runtime(self) -> None:
@@ -57,8 +61,8 @@ class TestAddAgent(unittest.TestCase):
             self.assertIn("agents/bob/inbox/", card)
             self.assertIn('description: "bob agent (claude runtime)"', card)
 
-            # 3 gitkeeps + status.yaml + agent_card.yaml = 5
-            self.assertEqual(len(result["created_files"]), 5)
+            # 4 gitkeeps + config.yaml + status.yaml + agent_card.yaml = 7
+            self.assertEqual(len(result["created_files"]), 7)
 
     def test_no_optional_files_without_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -68,7 +72,8 @@ class TestAddAgent(unittest.TestCase):
             agent_dir = result["agent_dir"]
             self.assertFalse((agent_dir / "status.yaml").exists())
             self.assertFalse((agent_dir / "agent_card.yaml").exists())
-            self.assertEqual(len(result["created_files"]), 3)
+            self.assertTrue((agent_dir / "config.yaml").exists())
+            self.assertEqual(len(result["created_files"]), 5)
 
     def test_rejects_invalid_agent_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -110,7 +115,7 @@ class TestAddAgent(unittest.TestCase):
             result1 = add_agent(
                 "demo", "alice", oacp_root=oacp_root, runtime="codex"
             )
-            self.assertEqual(len(result1["created_files"]), 5)
+            self.assertEqual(len(result1["created_files"]), 7)
             self.assertEqual(len(result1["skipped_files"]), 0)
 
             # Second run — everything should be skipped
@@ -118,7 +123,7 @@ class TestAddAgent(unittest.TestCase):
                 "demo", "alice", oacp_root=oacp_root, runtime="codex"
             )
             self.assertEqual(len(result2["created_files"]), 0)
-            self.assertEqual(len(result2["skipped_files"]), 5)
+            self.assertEqual(len(result2["skipped_files"]), 7)
 
     def test_agent_name_max_length(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

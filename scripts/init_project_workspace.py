@@ -12,7 +12,7 @@ from pathlib import Path
 import sys
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from _oacp_constants import AGENT_RE, _write_if_missing
+from _oacp_constants import AGENT_RE, _template_path, _write_if_missing
 
 DEFAULT_AGENTS = ("claude", "codex", "gemini")
 
@@ -70,7 +70,7 @@ STATIC_GITKEEP_PATHS = (
     "artifacts/.gitkeep",
 )
 
-AGENT_SUBDIRS = ("inbox", "outbox", "dead_letter")
+AGENT_SUBDIRS = ("inbox", "outbox", "dead_letter", "audit/autonomy_decisions")
 
 
 def _agent_dirs(agents: Sequence[str]) -> List[str]:
@@ -159,6 +159,11 @@ def _project_facts_template() -> str:
     return DEFAULT_PROJECT_FACTS
 
 
+def _receiver_config_template() -> str:
+    with _template_path("receiver_config.template.yaml") as path:
+        return path.read_text(encoding="utf-8")
+
+
 def _validate_project_name(name: str) -> None:
     if name.startswith(".") or "/" in name or "\\" in name:
         raise ValueError("project name must not contain path separators or start with '.'")
@@ -195,6 +200,9 @@ def initialize_workspace(
         "# Open Threads\n\n- None yet.\n",
     )
     _write_if_missing(project_root / "memory" / "known_debt.md", KNOWN_DEBT_TEMPLATE)
+    receiver_config = _receiver_config_template()
+    for agent in agents:
+        _write_if_missing(project_root / "agents" / agent / "config.yaml", receiver_config)
 
     workspace_path = project_root / "workspace.json"
     now = dt.datetime.now(dt.timezone.utc).isoformat()
