@@ -1,0 +1,9 @@
+case: hard_stop_sensitive_scope_pauses
+config: configs/auto_review_standard.yaml
+message: messages/hard_stop_sensitive_scope.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - hard_stop_sensitive_scope
+  matched_pattern: "auth"

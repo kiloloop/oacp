@@ -173,12 +173,14 @@ class TestBuildMessageDict(unittest.TestCase):
             conversation_id="conv-20260212-claude-001",
             parent_message_id="msg-20260212-codex-abcd",
             context_keys="key context here",
+            autonomy_hint="auto_proceed",
         )
         self.assertEqual(msg["related_pr"], "42")
         self.assertEqual(msg["related_packet"], "20260212_test_claude_r1")
         self.assertEqual(msg["conversation_id"], "conv-20260212-claude-001")
         self.assertEqual(msg["parent_message_id"], "msg-20260212-codex-abcd")
         self.assertEqual(msg["context_keys"], "key context here")
+        self.assertEqual(msg["autonomy_hint"], "auto_proceed")
 
     def test_optional_fields_omitted_when_empty(self):
         msg = build_message_dict(
@@ -216,6 +218,17 @@ class TestBuildMessageDict(unittest.TestCase):
             priority="P0",
         )
         self.assertEqual(msg["priority"], "P0")
+
+    def test_autonomy_hint_optional(self):
+        msg = build_message_dict(
+            sender="claude",
+            recipient="codex",
+            msg_type="task_request",
+            subject="S",
+            body="B",
+            autonomy_hint="auto_proceed",
+        )
+        self.assertEqual(msg["autonomy_hint"], "auto_proceed")
 
 
 class TestRenderYaml(unittest.TestCase):
@@ -543,6 +556,42 @@ intent: "handoff"
             errors = validate_message_dict(parsed)
             self.assertEqual(errors, [], f"Validation errors: {errors}")
 
+    def test_autonomy_hint_written_and_validates(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hub_dir = Path(tmpdir)
+            report = send_message(
+                project="test-project",
+                sender="claude",
+                recipient="codex",
+                msg_type="task_request",
+                subject="Autonomy hint",
+                body="Body",
+                autonomy_hint="auto_proceed",
+                oacp_dir=hub_dir,
+            )
+            from validate_message import _parse_simple_yaml
+            content = Path(report["inbox_path"]).read_text()
+            self.assertIn("autonomy_hint: auto_proceed", content)
+            parsed = _parse_simple_yaml(content)
+            errors = validate_message_dict(parsed)
+            self.assertEqual(errors, [], f"Validation errors: {errors}")
+
+    def test_invalid_autonomy_hint_rejected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hub_dir = Path(tmpdir)
+            with self.assertRaises(ValueError) as ctx:
+                send_message(
+                    project="test-project",
+                    sender="claude",
+                    recipient="codex",
+                    msg_type="task_request",
+                    subject="Autonomy hint",
+                    body="Body",
+                    autonomy_hint="totally_invalid_value",
+                    oacp_dir=hub_dir,
+                )
+            self.assertIn("autonomy_hint", str(ctx.exception))
+
     def test_suffix_path_traversal_rejected(self):
         """P1 fix: suffix with path separators must be rejected."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -689,6 +738,19 @@ class TestMainCli(unittest.TestCase):
                 self.assertIn("Body from file", stdout)
             finally:
                 os.unlink(f.name)
+
+    def test_autonomy_hint_cli_dry_run(self):
+        code, stdout, stderr = self._run_main([
+            "test-project",
+            "--from", "claude", "--to", "codex",
+            "--type", "task_request",
+            "--subject", "Autonomy hint",
+            "--body", "Body",
+            "--autonomy-hint", "auto_proceed",
+            "--dry-run",
+        ])
+        self.assertEqual(code, 0)
+        self.assertIn("autonomy_hint: auto_proceed", stdout)
 
     def test_json_error_output(self):
         """Validation errors in --json mode should produce JSON error."""

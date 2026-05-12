@@ -1,0 +1,8 @@
+case: always_pause_task
+config: configs/always_pause.yaml
+message: messages/clean_task.yaml
+expected:
+  decision: paused
+  mode: always_pause
+  reason_codes:
+    - mode_always_pause

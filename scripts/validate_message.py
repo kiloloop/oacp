@@ -37,6 +37,7 @@ OPTIONAL_FIELDS = (
     "context_keys",
     "expires_at",
     "channel",
+    "autonomy_hint",
 )
 ALLOWED_FIELDS = set(REQUIRED_FIELDS + OPTIONAL_FIELDS)
 ALLOWED_TYPES = {
@@ -54,6 +55,7 @@ ALLOWED_TYPES = {
     "brainstorm_followup",
 }
 ALLOWED_PRIORITIES = {"P0", "P1", "P2", "P3"}
+ALLOWED_AUTONOMY_HINTS = frozenset({"auto_proceed"})
 UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 CONVERSATION_ID_RE = re.compile(r"^conv-\d{8}-[A-Za-z0-9._-]{1,64}-\d{1,6}$")
@@ -271,6 +273,16 @@ def validate_message_dict(data: Dict[str, Any]) -> List[str]:
         errors.append(f"field 'type' must be one of: {', '.join(sorted(ALLOWED_TYPES))}")
     if priority and priority not in ALLOWED_PRIORITIES:
         errors.append(f"field 'priority' must be one of: {', '.join(sorted(ALLOWED_PRIORITIES))}")
+
+    autonomy_hint_value = data.get("autonomy_hint", "")
+    if not isinstance(autonomy_hint_value, (dict, list)):
+        autonomy_hint = str(autonomy_hint_value or "").strip()
+        if autonomy_hint and autonomy_hint not in ALLOWED_AUTONOMY_HINTS:
+            errors.append(
+                "field 'autonomy_hint' must be one of: "
+                f"{', '.join(sorted(ALLOWED_AUTONOMY_HINTS))}"
+            )
+
     if created_at:
         if not UTC_RE.fullmatch(created_at):
             errors.append("field 'created_at_utc' must be UTC RFC3339 seconds format: YYYY-MM-DDTHH:MM:SSZ")

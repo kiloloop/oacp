@@ -1,4 +1,4 @@
-# OACP — Open Agent Coordination Protocol
+# OACP
 
 [![PyPI](https://img.shields.io/pypi/v/oacp-cli)](https://pypi.org/project/oacp-cli/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
@@ -6,11 +6,92 @@
 [![Codex](https://img.shields.io/badge/Runtime-Codex-74AA9C.svg)](https://openai.com/index/codex/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen)](https://github.com/kiloloop/oacp/pulls)
 
-> **[Try the quickstart →](examples/quickstart/)** — send your first message to an AI agent in 5 minutes.
+> Coordinate agents *without* the chaos.
 
-**Coordinate agents without the chaos.**
+A file-based protocol for multi-agent AI workflows. Two pillars — cross-agent communication and persistent shared memory. Across runtimes, projects, and machines. No daemons. No central server. Just files.
 
-A file-based protocol for multi-agent engineering workflows. OACP defines the message formats, review processes, and safety rules that let AI agents on different runtimes collaborate through a shared filesystem. Not a framework or SDK — just conventions, YAML schemas, and scripts that any runtime can implement.
+[Read the spec →](SPEC.md)
+
+```bash
+$ pip install oacp-cli
+```
+
+## See it in action
+
+<p align="center">
+  <img src="docs/img/oacp-cli-demo.png" alt="oacp send + watch terminal demo" width="584" />
+</p>
+
+The CLI ships structured tasks between agents and lets you watch the conversation in real time.
+
+## Live agent fleet
+
+<p align="center">
+  <img src="docs/img/oacp-fleet-thread.png" alt="claude / codex / gemini fleet with PR #42 review thread" width="650" />
+</p>
+
+Every multi-agent thread is a sequence of typed messages — `review_request`, `review_feedback`, `review_addressed`, `review_lgtm` — with explicit quality gates.
+
+<details>
+<summary>Text version (terminal browsing / grep / a11y)</summary>
+
+```
+PROJECT · my-app                                   ● live
+
+  C  claude   code           drafting PR #42
+  X  codex    cli            reviewing
+  G  gemini   api            idle
+
+  claude  →  review_request    "auth refactor"      [codex]
+  codex   →  review_feedback   2 minor, 0 blocking  [claude]
+  claude  →  review_addressed                       [codex]
+  codex   →  review_lgtm                            [merge]
+
+  thread #42 · 4 msgs · 8m                  quality gate ✓
+```
+
+</details>
+
+## Filesystem as protocol
+
+<p align="center">
+  <img src="docs/img/oacp-filesystem-tree.png" alt="$OACP_HOME directory tree with inbox/outbox/memory/artifacts" width="526" />
+</p>
+
+Everything is plain files in `$OACP_HOME`. Agents have `inbox/`, `outbox/`, `dead_letter/`. Projects have shared `memory/` (durable) and per-thread `artifacts/`, `checkpoints/`, `packets/`. Org-wide knowledge lives in `$OACP_HOME/org-memory/`.
+
+<details>
+<summary>Text version (terminal browsing / grep / a11y)</summary>
+
+```
+$OACP_HOME/projects/my-app/                  ● writing
+
+  agents/
+    claude/
+      inbox/         3 msgs           [in]
+      outbox/        12 sent          [out]
+      dead_letter/   empty            [dl]
+    codex/
+      inbox/         +1 new           [in]
+
+  memory/                             shared durable
+    project_facts.md     2.4 kb       [md]
+    decision_log.md      edited 3s ago [md]
+    open_threads.md      1.1 kb       [md]
+    known_debt.md        812 b        [md]
+
+  artifacts/                          build · research
+  checkpoints/                        progress
+  packets/                            review findings
+  workspace.json                      metadata        [json]
+
+$OACP_HOME/org-memory/                org-wide
+  recent.md            auto-loaded    [⌘]
+  rules.md             12 rules       [⌘]
+  decisions.md         org decisions  [⌘]
+```
+
+</details>
 
 ## Quick Start
 
@@ -21,7 +102,7 @@ oacp send my-project --from alice --to bob --type task_request \
   --subject "Implement feature X" --body "Details here..."
 ```
 
-When running inside a configured agent runtime, `--from` can be omitted — OACP infers the sender from `OACP_AGENT`, `AGENT_NAME`, or the agent card. See [QUICKSTART.md](QUICKSTART.md) for a full walkthrough.
+When running inside a configured agent runtime, `--from` can be omitted — OACP infers the sender from `OACP_AGENT`, `AGENT_NAME`, or the agent card. See [QUICKSTART.md](QUICKSTART.md) for a full walkthrough. Or try the [5-minute quickstart →](examples/quickstart/) to send your first message to a real AI agent.
 
 ### What you get
 
@@ -40,6 +121,18 @@ After installing, run `oacp doctor` to verify your environment is wired up:
 ```bash
 oacp doctor
 ```
+
+## Agent Skills
+
+OACP has companion agent skills that teach Claude, Codex, and other
+runtimes how to use the CLI and protocol in real workflows.
+
+Install or browse them here:
+
+- https://github.com/kiloloop/oacp-skills
+
+The core `oacp-cli` package remains the protocol/tooling kernel,
+while `oacp-skills` contains runtime guidance and workflows.
 
 ## Why OACP?
 

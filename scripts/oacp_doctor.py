@@ -58,6 +58,20 @@ WhichFn = Callable[[str], Optional[str]]
 
 VALID_RUNTIMES = set(ALL_RUNTIMES)
 VALID_STATUSES = {"available", "busy", "offline"}
+VALID_AUTONOMY_MODES = {"always_pause", "auto_review"}
+AUTONOMY_THRESHOLD_NUMERIC_KEYS = {
+    "max_estimated_minutes",
+    "max_expected_files_touched",
+}
+AUTONOMY_THRESHOLD_POLICY_KEYS = {
+    "destructive_ops",
+    "external_side_effects",
+    "auth_config_or_secrets",
+    "dependency_changes",
+    "public_visibility",
+    "git_push_or_deploy",
+}
+AUTONOMY_POLICY_ACTIONS = {"pause"}
 STALE_STATUS_HOURS = 1
 STALE_INBOX_HOURS = 24
 YAML_EXTENSIONS = {".yaml", ".yml"}
@@ -468,6 +482,183 @@ def _validate_status_data(data: Any, agent_name: str) -> List[str]:
             errors.append(f"updated_at '{updated_at}' is not valid ISO 8601 UTC")
 
     return errors
+
+
+# ── Category 4b: Autonomy Config ─────────────────────────────────────────
+
+
+def validate_autonomy_config_data(data: Any) -> List[str]:
+    """Validate agents/<receiver>/config.yaml autonomy settings."""
+    errors: List[str] = []
+    if not isinstance(data, dict):
+        return ["root must be a YAML mapping"]
+
+    autonomy = data.get("autonomy")
+    if autonomy is None:
+        return ["missing required field 'autonomy'"]
+    if not isinstance(autonomy, dict):
+        return ["field 'autonomy' must be a mapping"]
+
+    mode = autonomy.get("default_mode")
+    if mode is None:
+        errors.append("autonomy.default_mode is required")
+    elif str(mode) not in VALID_AUTONOMY_MODES:
+        errors.append(
+            "autonomy.default_mode must be one of: "
+            f"{', '.join(sorted(VALID_AUTONOMY_MODES))}"
+        )
+
+    thresholds = autonomy.get("auto_review_thresholds")
+    if thresholds is None:
+        if mode == "auto_review":
+            errors.append(
+                "autonomy.auto_review_thresholds is required when default_mode is auto_review"
+            )
+    elif not isinstance(thresholds, dict):
+        errors.append("autonomy.auto_review_thresholds must be a mapping")
+    else:
+        for key in sorted(AUTONOMY_THRESHOLD_NUMERIC_KEYS):
+            value = thresholds.get(key)
+            if value is None:
+                errors.append(f"autonomy.auto_review_thresholds.{key} is required")
+                continue
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                errors.append(
+                    f"autonomy.auto_review_thresholds.{key} must be a non-negative integer"
+                )
+        for key in sorted(AUTONOMY_THRESHOLD_POLICY_KEYS):
+            value = thresholds.get(key)
+            if value is None:
+                errors.append(f"autonomy.auto_review_thresholds.{key} is required")
+                continue
+            if str(value) not in AUTONOMY_POLICY_ACTIONS:
+                errors.append(
+                    f"autonomy.auto_review_thresholds.{key} must be 'pause' in Phase 1"
+                )
+
+    allow_without_profile = autonomy.get("allow_without_task_profile", [])
+    if allow_without_profile is None:
+        allow_without_profile = []
+    if not isinstance(allow_without_profile, list):
+        errors.append("autonomy.allow_without_task_profile must be a list")
+    else:
+        try:
+            from validate_message import ALLOWED_TYPES
+        except Exception:  # pragma: no cover - defensive for unusual installs
+            ALLOWED_TYPES = set()  # type: ignore[assignment]
+        for item in allow_without_profile:
+            msg_type = str(item)
+            if ALLOWED_TYPES and msg_type not in ALLOWED_TYPES:
+                errors.append(
+                    "autonomy.allow_without_task_profile contains unknown "
+                    f"message type '{msg_type}'"
+                )
+
+    if "trusted_senders" in autonomy:
+        errors.append(
+            "autonomy.trusted_senders is not supported; sender trust is messenger-bound"
+        )
+
+    return errors
+
+
+def check_autonomy(
+    project_dir: Path,
+    yaml_loader: Optional[Any] = None,
+) -> DoctorCategory:
+    """Validate receiver autonomy config and audit paths."""
+    cat = DoctorCategory(name="Autonomy")
+    agents_dir = project_dir / "agents"
+    if not agents_dir.is_dir():
+        return cat
+
+    loader = yaml_loader
+    if loader is None:
+        yaml_mod = _try_yaml_import()
+        if yaml_mod is not None:
+            loader = yaml_mod.safe_load
+
+    for agent_dir in sorted(agents_dir.iterdir()):
+        if not agent_dir.is_dir():
+            continue
+        agent_name = agent_dir.name
+        audit_dir = agent_dir / "audit" / "autonomy_decisions"
+        if audit_dir.is_dir():
+            cat.results.append(DoctorResult(
+                name=f"{agent_name}/audit/autonomy_decisions",
+                severity=Severity.ok,
+                message=f"{agent_name}/audit/autonomy_decisions — present",
+            ))
+        else:
+            cat.results.append(DoctorResult(
+                name=f"{agent_name}/audit/autonomy_decisions",
+                severity=Severity.warn,
+                message=f"{agent_name}/audit/autonomy_decisions — missing",
+                fix_hint=f"mkdir -p {audit_dir}",
+            ))
+
+        config_file = agent_dir / "config.yaml"
+        if not config_file.is_file():
+            cat.results.append(DoctorResult(
+                name=f"{agent_name}/config.yaml",
+                severity=Severity.ok,
+                message=f"{agent_name}/config.yaml — absent; defaults to always_pause",
+            ))
+        elif loader is None:
+            cat.results.append(DoctorResult(
+                name=f"{agent_name}/config.yaml",
+                severity=Severity.skip,
+                message=f"{agent_name}/config.yaml — validation skipped; pyyaml not available",
+                fix_hint="Install: pip install pyyaml",
+            ))
+        else:
+            try:
+                data = loader(config_file.read_text(encoding="utf-8"))
+                errs = validate_autonomy_config_data(data)
+            except Exception as exc:
+                errs = [f"parse error: {exc}"]
+            if errs:
+                cat.results.append(DoctorResult(
+                    name=f"{agent_name}/config.yaml",
+                    severity=Severity.error,
+                    message=f"{agent_name}/config.yaml — {'; '.join(errs)}",
+                ))
+            else:
+                cat.results.append(DoctorResult(
+                    name=f"{agent_name}/config.yaml",
+                    severity=Severity.ok,
+                    message=f"{agent_name}/config.yaml — valid",
+                ))
+
+        orphaned: List[str] = []
+        if audit_dir.is_dir() and loader is not None:
+            for event_file in sorted(audit_dir.glob("*.yaml")):
+                try:
+                    event = loader(event_file.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                policy_path = str(event.get("policy_path") or "").strip()
+                if policy_path and not (project_dir / policy_path).is_file():
+                    orphaned.append(str(event_file.relative_to(project_dir)))
+        if orphaned:
+            cat.results.append(DoctorResult(
+                name=f"{agent_name}/autonomy-policy-refs",
+                severity=Severity.warn,
+                message=(
+                    f"{agent_name}/autonomy audit — {len(orphaned)} orphaned "
+                    f"policy_ref(s): {_summarize_paths(orphaned)}"
+                ),
+            ))
+        elif audit_dir.is_dir():
+            cat.results.append(DoctorResult(
+                name=f"{agent_name}/autonomy-policy-refs",
+                severity=Severity.ok,
+                message=f"{agent_name}/autonomy audit — no orphaned policy refs",
+            ))
+
+    return cat
 
 
 # ── Category 5: Agent Status ─────────────────────────────────────────────
@@ -977,6 +1168,7 @@ def run_doctor(
             categories.append(check_workspace(project_dir))
             categories.append(check_inbox_health(project_dir, now_fn=now_fn))
             categories.append(check_schemas(project_dir, yaml_loader=yaml_loader))
+            categories.append(check_autonomy(project_dir, yaml_loader=yaml_loader))
             categories.append(check_agent_status(project_dir, yaml_loader=yaml_loader, now_fn=now_fn))
 
     if include_memory:

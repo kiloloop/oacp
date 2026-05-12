@@ -79,7 +79,12 @@ Messages are YAML files. Filename convention: `<timestamp>_<from>_<type>.yaml`
 | `subject` | string | Subject line |
 | `body` | string | Message content (multi-line markdown) |
 
-**Optional fields:** `expires_at`, `channel`, `related_packet`, `related_pr`, `conversation_id`, `parent_message_id`, `context_keys`
+**Optional fields:** `expires_at`, `channel`, `autonomy_hint`, `related_packet`, `related_pr`, `conversation_id`, `parent_message_id`, `context_keys`
+
+`autonomy_hint` is an advisory sender hint, such as `auto_proceed`. Receivers
+remain authoritative: local autonomy config, message content, safety defaults,
+and runtime/tool permissions determine whether a message can be accepted without
+interactive human confirmation.
 
 ### Message Types
 
@@ -164,7 +169,7 @@ received → accepted → working → pr_opened → in_review → done
 
 ### Key Transitions
 
-- **`received` → `accepted`**: Agent reads and accepts the task. Ack recommended for P0/P1.
+- **`received` → `accepted`**: Agent reads and accepts the task. Ack recommended for P0/P1. When accepted by autonomy policy, this transition is preserved and records `accepted_by`, `human_confirmed`, `autonomy_mode`, `policy_ref`, `policy_hash`, and `reason_codes`.
 - **`working` → `pr_opened`**: Agent opens a PR. **Notification required** with `WIP:` subject prefix.
 - **`pr_opened` → `in_review`**: Agent requests cross-agent review via `review_request`.
 - **`in_review` → `done`**: PR merged after review approval. Guard: `pr_merged AND review_approved`.
@@ -201,6 +206,23 @@ The dispatcher (e.g., an orchestrator agent) tracks dispatches from its perspect
 - **PR-based tasks**: done = PR merged, not opened
 - **Non-PR tasks**: done = deliverable provided or question answered
 - Final notification must include `merge_sha` (PR tasks) or `results_summary` (non-PR tasks)
+
+### Acceptance Metadata
+
+Receivers must not collapse `received → accepted`, even when a task is
+auto-accepted. Transition metadata records who or what accepted the task:
+
+```yaml
+transition: received_to_accepted
+accepted_by: autonomy_policy   # human | autonomy_policy | --autonomous-flag
+human_confirmed: false
+autonomy_mode: auto_review
+policy_ref: agents/codex/config.yaml
+policy_hash: sha256:...
+reason_codes:
+  - task_profile_present
+  - risk_threshold_passed
+```
 
 ### Brainstorm Lifecycle
 
@@ -401,6 +423,27 @@ Credential scoping: [`docs/protocol/credential_scoping.md`](docs/protocol/creden
 ### Baseline Rules
 
 These defaults apply to all agents (Claude, Codex, Gemini) unless a project-level config explicitly overrides a specific rule. Safety defaults can only be made **stricter** by project rules, never relaxed.
+
+Autonomy introduces a separate receiver acceptance policy layer; it does not
+relax the safety floor. OACP distinguishes three layers:
+
+1. **Safety defaults** — non-negotiable baseline constraints, such as no
+   unapproved push/deploy/merge/publish, no destructive commands, no secrets,
+   and disciplined staging. Projects may make these stricter, never looser.
+2. **Receiver acceptance policy** — configurable rules for whether a receiver
+   may move a message from `received` to `accepted` without interactive human
+   confirmation. This is governed by `agents/<receiver>/config.yaml` and
+   [`docs/protocol/autonomy.md`](docs/protocol/autonomy.md).
+3. **Runtime/tool safety** — runtime-specific permission gates that still apply
+   after acceptance, such as editor edit approval, shell sandboxing, or Codex
+   approval modes. OACP acceptance never grants runtime tool permissions.
+
+Regardless of autonomy mode, receivers must pause on any of: destructive command
+tokens (`rm -rf`, `--force`, `--no-verify`,
+`--dangerously-skip-permissions`), external side effects
+(push/deploy/merge/publish/rotate/install), or modifications to auth, config,
+secrets, dependencies, public repos, pricing/commercial content, or memory SSOT,
+unless explicitly authorized by a separate safety-default exception.
 
 #### Git Safety
 
@@ -677,6 +720,7 @@ scripts/init_packet.sh <project> <packet_id>  # (no CLI wrapper yet)
 | Shared workspace | [`docs/protocol/multi_agent_shared_workspace.md`](docs/protocol/multi_agent_shared_workspace.md) |
 | Cross-runtime sync | [`docs/protocol/cross_runtime_sync.md`](docs/protocol/cross_runtime_sync.md) |
 | Session init | [`docs/protocol/session_init.md`](docs/protocol/session_init.md) |
+| Receiver autonomy | [`docs/protocol/autonomy.md`](docs/protocol/autonomy.md) |
 | Safety defaults | [`docs/protocol/agent_safety_defaults.md`](docs/protocol/agent_safety_defaults.md) |
 | Credential scoping | [`docs/protocol/credential_scoping.md`](docs/protocol/credential_scoping.md) |
 | Runtime capabilities | [`docs/protocol/runtime_capabilities.md`](docs/protocol/runtime_capabilities.md) |

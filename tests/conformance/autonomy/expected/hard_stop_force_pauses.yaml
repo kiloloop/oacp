@@ -1,0 +1,9 @@
+case: hard_stop_force_pauses
+config: configs/auto_review_standard.yaml
+message: messages/hard_stop_force.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - hard_stop_destructive_command
+  matched_pattern: "--force"

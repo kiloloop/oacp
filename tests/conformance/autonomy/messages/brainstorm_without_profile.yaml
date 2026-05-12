@@ -1,0 +1,9 @@
+id: msg-20260512121100-iris-brainstorm
+from: iris
+to: codex
+type: brainstorm_request
+priority: P3
+created_at_utc: "2026-05-12T12:11:00Z"
+subject: "Brainstorm adoption copy"
+body: |
+  Explore options for explaining OACP autonomy to new users.

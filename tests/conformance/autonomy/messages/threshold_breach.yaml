@@ -1,0 +1,20 @@
+id: msg-20260512120900-iris-threshold
+from: iris
+to: codex
+type: task_request
+priority: P2
+created_at_utc: "2026-05-12T12:09:00Z"
+subject: "Large refactor declared too large"
+body: |
+  ## Task
+  Update several modules.
+
+  task_profile:
+    estimated_minutes: 60
+    risk_tier: P2
+    expected_files_touched: 12
+    destructive_ops: false
+    external_side_effects: false
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: false

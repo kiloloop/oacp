@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-05-12
+
+### Added
+
+- `auto_review` autonomy mode — an opt-in receiver-side autonomy profile that classifies inbound messages into auto-accept, pause, or hard-stop bands using clean / ambiguous / hard-stop trigger predicates. Configured via `receiver_config.autonomy_mode: auto_review` with `auto_review_profile` selecting `standard` or `tight`. Off by default; existing receivers continue to behave as `always_pause` unless they opt in. Ships with a conformance fixture suite under `tests/conformance/autonomy/` covering clean tasks, ambiguous scope, hard-stop triggers, and malformed config handling.
+
+### Changed
+
+- README: refreshed with a hero image and three screenshots illustrating inbox flow, doctor output, and the multi-agent workspace layout. Hub README copy, install path, and command table aligned with the current CLI surface.
+- Docs: link to companion oacp-skills repo from the README and onboarding pages so readers can find the skill library that pairs with the protocol.
+
 ## [0.3.0] - 2026-04-29
 
 ### Added
@@ -131,6 +142,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Checkout step in github-release workflow job (#19)
 - Pre-release audit fixes: SHA-pinned actions, dangling doc refs (#15, #16)
 
+[0.3.1]: https://github.com/kiloloop/oacp/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/kiloloop/oacp/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/kiloloop/oacp/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/kiloloop/oacp/compare/v0.2.1...v0.2.2

@@ -1,0 +1,8 @@
+case: missing_task_profile_pauses
+config: configs/auto_review_standard.yaml
+message: messages/missing_task_profile.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - task_profile_missing

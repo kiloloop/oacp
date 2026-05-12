@@ -23,7 +23,7 @@ from _oacp_constants import (
     utc_now_iso,
 )
 
-AGENT_SUBDIRS = ("inbox", "outbox", "dead_letter")
+AGENT_SUBDIRS = ("inbox", "outbox", "dead_letter", "audit/autonomy_decisions")
 
 
 def _load_runtime_capabilities() -> Dict[str, Any]:
@@ -40,6 +40,11 @@ def _load_template(relative: str) -> str:
     """Load a template file and return its text content."""
     with _template_path(relative) as path:
         return path.read_text(encoding="utf-8")
+
+
+def _receiver_config_template() -> str:
+    """Load the default receiver config template."""
+    return _load_template("receiver_config.template.yaml")
 
 
 def _render_status_yaml(
@@ -199,6 +204,12 @@ def add_agent(
             created_files.append(str(gitkeep.relative_to(project_dir)))
         else:
             skipped_files.append(str(gitkeep.relative_to(project_dir)))
+
+    config_path = agent_dir / "config.yaml"
+    if _write_if_missing(config_path, _receiver_config_template()):
+        created_files.append(str(config_path.relative_to(project_dir)))
+    else:
+        skipped_files.append(str(config_path.relative_to(project_dir)))
 
     # Check for global profile defaults
     global_profile = None

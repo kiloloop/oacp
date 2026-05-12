@@ -4,6 +4,7 @@ to: ""
 type: "task_request"  # task_request | question | notification | follow_up | handoff | handoff_complete | review_request | review_feedback | review_addressed | review_lgtm
 priority: "P2"
 created_at_utc: ""
+# autonomy_hint: auto_proceed  # optional advisory hint; receiver policy decides
 related_packet: ""
 related_pr: ""
 # Conversation threading (optional) — see docs/protocol/inbox_outbox.md#conversation-threading
@@ -14,3 +15,13 @@ context_keys: |             # key items from prior conversation for continuity
 subject: ""
 body: |
   Message content here.
+
+  task_profile:
+    estimated_minutes: 20
+    risk_tier: P3
+    expected_files_touched: 3
+    destructive_ops: false
+    external_side_effects: false
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: false

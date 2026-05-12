@@ -119,6 +119,23 @@ class TestChannelTooLong(unittest.TestCase):
         self.assertTrue(any("channel" in e for e in errors))
 
 
+class TestAutonomyHintAccepted(unittest.TestCase):
+    def test_autonomy_hint_accepted(self):
+        msg = _base_msg(autonomy_hint="auto_proceed")
+        errors = validate_message_dict(msg)
+        self.assertEqual(errors, [])
+
+    def test_autonomy_hint_invalid_rejected(self):
+        msg = _base_msg(autonomy_hint="totally_invalid_value")
+        errors = validate_message_dict(msg)
+        self.assertTrue(any("autonomy_hint" in e and "auto_proceed" in e for e in errors))
+
+    def test_autonomy_hint_must_be_scalar(self):
+        msg = _base_msg(autonomy_hint={"mode": "auto_proceed"})
+        errors = validate_message_dict(msg)
+        self.assertTrue(any("autonomy_hint" in e for e in errors))
+
+
 class TestBackwardCompatStringTo(unittest.TestCase):
     def test_backward_compat_string_to(self):
         """v1 messages with string 'to' field must still validate."""

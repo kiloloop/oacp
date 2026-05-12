@@ -24,6 +24,7 @@ to: "claude"
 type: "task_request"       # task_request | question | notification | follow_up | handoff | handoff_complete | review_request | review_feedback | review_addressed | review_lgtm
 priority: "P2"             # P0 | P1 | P2 | P3
 created_at_utc: "2026-02-11T14:30:00Z"
+autonomy_hint: "auto_proceed"  # optional advisory hint; receiver policy decides
 related_packet: ""         # optional packet_id
 related_pr: ""             # optional PR number
 conversation_id: ""        # optional — conversation thread ID (see Conversation Threading)
@@ -34,6 +35,16 @@ subject: "Review EdgeX spread calculation change"
 body: |
   Free-form message content.
   Can be multi-line markdown.
+
+  task_profile:            # optional body block for auto_review decisions
+    estimated_minutes: 20
+    risk_tier: P3
+    expected_files_touched: 3
+    destructive_ops: false
+    external_side_effects: false
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: false
 ```
 
 ## Message Types
@@ -160,14 +171,34 @@ For review-loop message types (`review_feedback`, `review_lgtm`, and optionally 
 
 These fields are optional and backward-compatible. Review-loop bodies may also include a nested `telemetry:` map for richer per-round detail.
 
+### Autonomy Fields
+
+Messages may include `autonomy_hint: auto_proceed` as an advisory top-level
+field. Receivers remain authoritative; the hint never bypasses receiver config,
+hard stops, workspace checks, or runtime tool permissions.
+
+For `auto_review`, `task_request` and `question` bodies require a
+machine-parseable `task_profile` block. Missing profile pauses with
+`task_profile_missing`; unparsable profile pauses with
+`task_profile_unparsable`. Message types explicitly listed in a receiver's
+`allow_without_task_profile` config, such as `brainstorm_request`, may
+auto-accept without the block.
+
+Full receiver policy and audit rules are in
+[`autonomy.md`](autonomy.md).
+
 ## Lifecycle
 
 1. Sender creates message YAML.
 2. Sender writes to `agents/<recipient>/inbox/<filename>.yaml`.
 3. Sender copies to their own `agents/<sender>/outbox/<filename>.yaml`.
 4. Recipient reads from inbox when polling or at session start.
-5. Recipient deletes from inbox after processing.
-6. Replies are new messages in the original sender's inbox.
+5. Recipient evaluates receiver acceptance policy. In `always_pause`, the
+   message waits for human confirmation. In `auto_review`, the receiver may
+   move `received -> accepted` only after the four-gate autonomy evaluator
+   passes and an audit event is written.
+6. Recipient deletes from inbox after processing.
+7. Replies are new messages in the original sender's inbox.
 
 ## Polling Convention
 
@@ -183,7 +214,7 @@ When multiple messages are pending in an agent's inbox, process by priority: P0 
 
 ## Inbox Cleanup
 
-- Delete messages from inbox immediately after processing (see Lifecycle step 5).
+- Delete messages from inbox immediately after processing (see Lifecycle step 6).
 - Outbox files: retain for 30 days, then may be pruned by the sending agent.
 - Dispatcher cleanup: when archiving a completed dispatch, also delete any intermediate WIP/ack notifications for that dispatch from the dispatcher's own inbox.
 
@@ -320,6 +351,7 @@ body: |
 # Optional fields
 expires_at: "<ISO 8601 UTC>"         # when message expires (advisory)
 channel: "<free_text>"               # conversation category tag
+autonomy_hint: "auto_proceed"        # advisory only; receiver policy decides
 related_packet: "<packet_id>"
 related_pr: "<pr_number>"
 conversation_id: "<conv-YYYYMMDD-agent-seq>"

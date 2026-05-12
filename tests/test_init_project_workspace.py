@@ -25,6 +25,16 @@ class TestInitializeWorkspace(unittest.TestCase):
             self.assertTrue((project_root / "agents" / "codex" / "inbox").is_dir())
             self.assertTrue((project_root / "agents" / "claude" / "inbox").is_dir())
             self.assertTrue((project_root / "agents" / "gemini" / "inbox").is_dir())
+            self.assertTrue(
+                (
+                    project_root
+                    / "agents"
+                    / "codex"
+                    / "audit"
+                    / "autonomy_decisions"
+                ).is_dir()
+            )
+            self.assertTrue((project_root / "agents" / "codex" / "config.yaml").is_file())
             self.assertTrue((project_root / "packets" / "review").is_dir())
             self.assertTrue((project_root / "memory" / "project_facts.md").is_file())
             self.assertTrue((project_root / "memory" / "known_debt.md").is_file())
@@ -44,6 +54,17 @@ class TestInitializeWorkspace(unittest.TestCase):
             project_root = Path(result["project_root"])
             self.assertTrue((project_root / "agents" / "alice" / "inbox").is_dir())
             self.assertTrue((project_root / "agents" / "bob" / "inbox").is_dir())
+            self.assertTrue(
+                (
+                    project_root
+                    / "agents"
+                    / "alice"
+                    / "audit"
+                    / "autonomy_decisions"
+                    / ".gitkeep"
+                ).is_file()
+            )
+            self.assertTrue((project_root / "agents" / "alice" / "config.yaml").is_file())
             # Default agents should NOT exist
             self.assertFalse((project_root / "agents" / "claude").exists())
             self.assertFalse((project_root / "agents" / "codex").exists())

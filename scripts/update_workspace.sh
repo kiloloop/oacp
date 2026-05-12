@@ -88,12 +88,15 @@ EXPECTED_DIRS=(
   "agents/codex/inbox"
   "agents/codex/outbox"
   "agents/codex/dead_letter"
+  "agents/codex/audit/autonomy_decisions"
   "agents/claude/inbox"
   "agents/claude/outbox"
   "agents/claude/dead_letter"
+  "agents/claude/audit/autonomy_decisions"
   "agents/gemini/inbox"
   "agents/gemini/outbox"
   "agents/gemini/dead_letter"
+  "agents/gemini/audit/autonomy_decisions"
   "packets/review"
   "packets/findings"
   "packets/test"
@@ -130,12 +133,15 @@ GITKEEP_DIRS=(
   "agents/codex/inbox"
   "agents/codex/outbox"
   "agents/codex/dead_letter"
+  "agents/codex/audit/autonomy_decisions"
   "agents/claude/inbox"
   "agents/claude/outbox"
   "agents/claude/dead_letter"
+  "agents/claude/audit/autonomy_decisions"
   "agents/gemini/inbox"
   "agents/gemini/outbox"
   "agents/gemini/dead_letter"
+  "agents/gemini/audit/autonomy_decisions"
   "packets/review"
   "packets/findings"
   "packets/test"
@@ -161,8 +167,78 @@ for dir in "${GITKEEP_DIRS[@]}"; do
   fi
 done
 
-# ── Phase 3: Ensure memory files ────────────────────────────────────────
+# ── Phase 3: Ensure receiver autonomy config templates ──────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+RECEIVER_CONFIG_TEMPLATE="$SCRIPT_DIR/../templates/receiver_config.template.yaml"
+
+if [[ -d "$PROJECT_ROOT/agents" ]]; then
+  for agent_dir in "$PROJECT_ROOT"/agents/*; do
+    [[ -d "$agent_dir" ]] || continue
+    agent_name="$(basename "$agent_dir")"
+    audit_dir="$agent_dir/audit/autonomy_decisions"
+    config_file="$agent_dir/config.yaml"
+
+    if [[ -d "$audit_dir" ]]; then
+      log_action "~" "dir  agents/$agent_name/audit/autonomy_decisions"
+      ((UNCHANGED+=1))
+    else
+      if [[ "$DRY_RUN" == true ]]; then
+        log_action "+" "dir  agents/$agent_name/audit/autonomy_decisions (dry-run)"
+      else
+        mkdir -p "$audit_dir"
+        log_action "+" "dir  agents/$agent_name/audit/autonomy_decisions"
+      fi
+      ((CREATED+=1))
+    fi
+
+    if [[ -f "$audit_dir/.gitkeep" ]]; then
+      log_action "~" "file agents/$agent_name/audit/autonomy_decisions/.gitkeep"
+      ((UNCHANGED+=1))
+    else
+      if [[ "$DRY_RUN" == true ]]; then
+        log_action "+" "file agents/$agent_name/audit/autonomy_decisions/.gitkeep (dry-run)"
+      else
+        mkdir -p "$audit_dir"
+        touch "$audit_dir/.gitkeep"
+        log_action "+" "file agents/$agent_name/audit/autonomy_decisions/.gitkeep"
+      fi
+      ((CREATED+=1))
+    fi
+
+    if [[ -f "$config_file" ]]; then
+      log_action "~" "file agents/$agent_name/config.yaml"
+      ((UNCHANGED+=1))
+    else
+      if [[ "$DRY_RUN" == true ]]; then
+        log_action "+" "file agents/$agent_name/config.yaml (dry-run)"
+      else
+        if [[ -f "$RECEIVER_CONFIG_TEMPLATE" ]]; then
+          cp "$RECEIVER_CONFIG_TEMPLATE" "$config_file"
+        else
+          cat > "$config_file" <<'EOM'
+autonomy:
+  default_mode: always_pause
+  auto_review_thresholds:
+    max_estimated_minutes: 30
+    max_expected_files_touched: 5
+    destructive_ops: pause
+    external_side_effects: pause
+    auth_config_or_secrets: pause
+    dependency_changes: pause
+    public_visibility: pause
+    git_push_or_deploy: pause
+  allow_without_task_profile:
+    - brainstorm_request
+EOM
+        fi
+        log_action "+" "file agents/$agent_name/config.yaml"
+      fi
+      ((CREATED+=1))
+    fi
+  done
+fi
+
+# ── Phase 4: Ensure memory files ────────────────────────────────────────
 EXAMPLES_DIR="$SCRIPT_DIR/../examples"
 
 if [[ ! -f "$PROJECT_ROOT/memory/project_facts.md" ]]; then
@@ -243,7 +319,7 @@ else
   ((UNCHANGED+=1))
 fi
 
-# ── Phase 4: workspace.json ──────────────────────────────────────────────
+# ── Phase 5: workspace.json ──────────────────────────────────────────────
 VERSION_FILE="$SCRIPT_DIR/../VERSION"
 if [[ -f "$VERSION_FILE" ]]; then
   STANDARDS_VERSION="$(head -1 "$VERSION_FILE" | tr -d '[:space:]')"
@@ -293,7 +369,7 @@ with open(sys.argv[3], 'w') as f:
   ((CREATED+=1))
 fi
 
-# ── Phase 5: Symlink management ─────────────────────────────────────────
+# ── Phase 6: Symlink management ─────────────────────────────────────────
 # Validate existing symlinks in artifacts/
 if [[ -d "$PROJECT_ROOT/artifacts" ]]; then
   for link in "$PROJECT_ROOT/artifacts"/*; do
