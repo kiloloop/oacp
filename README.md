@@ -13,7 +13,7 @@ A file-based protocol for multi-agent AI workflows. Two pillars — cross-agent 
 [Read the spec →](SPEC.md)
 
 ```bash
-$ pip install oacp-cli
+$ uv tool install oacp-cli
 ```
 
 ## See it in action
@@ -96,7 +96,7 @@ $OACP_HOME/org-memory/                org-wide
 ## Quick Start
 
 ```bash
-pip install oacp-cli
+uv tool install oacp-cli
 oacp init my-project --agents alice,bob
 oacp send my-project --from alice --to bob --type task_request \
   --subject "Implement feature X" --body "Details here..."
@@ -113,6 +113,14 @@ When running inside a configured agent runtime, `--from` can be omitted — OACP
 - **Durable shared memory** — project facts, decisions, and known debt with active/archive split
 - **Agent safety defaults** — baseline rules for git, credentials, and scope discipline
 - **Runtime-agnostic** — works with any runtime that reads/writes files
+
+## Coming from `claude -p`?
+
+`claude -p` runs an agent synchronously and headless — your script blocks while it works, and as of June 15 programmatic usage draws from a separate metered credit.
+
+OACP routes the same work to a **standing interactive Claude Code session** instead: `oacp send` queues the task, the session picks it up and runs it async, you're not blocked — and because it's a real interactive session, it stays on your subscription.
+
+**[From `claude -p` to an interactive Claude Code session →](docs/from-claude-p.md)** — paste-into-your-agent setup, the honest tradeoffs, and where it fits.
 
 ## Try It Now
 
