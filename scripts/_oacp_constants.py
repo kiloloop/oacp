@@ -11,8 +11,8 @@ from importlib import resources
 from pathlib import Path
 
 AGENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-CREATABLE_RUNTIMES = ("claude", "codex", "gemini")
-ALL_RUNTIMES = ("claude", "codex", "gemini", "human", "unknown")
+CREATABLE_RUNTIMES = ("claude", "codex", "cursor", "gemini")
+ALL_RUNTIMES = ("claude", "codex", "cursor", "gemini", "human", "unknown")
 CANONICAL_CAPABILITIES = {
     "headless",
     "mcp_tools",

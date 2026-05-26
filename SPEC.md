@@ -3,7 +3,7 @@
 **Version**: 0.2.0
 **License**: Apache-2.0
 
-This document is the protocol specification for OACP (Open Agent Coordination Protocol) — a file-based coordination layer for multi-agent engineering workflows. It defines the message formats, state machines, review processes, and safety rules that enable agents on different runtimes (Claude, Codex, Gemini, or any future runtime) to collaborate asynchronously through a shared filesystem.
+This document is the protocol specification for OACP (Open Agent Coordination Protocol) — a file-based coordination layer for multi-agent engineering workflows. It defines the message formats, state machines, review processes, and safety rules that enable agents on different runtimes (Claude, Codex, Cursor, Gemini, or any future runtime) to collaborate asynchronously through a shared filesystem.
 
 OACP is not a framework or SDK. It is a set of conventions, YAML schemas, and shell scripts that any agent runtime can implement.
 
@@ -47,7 +47,7 @@ $OACP_HOME/
     │   │   ├── inbox/
     │   │   ├── outbox/
     │   │   └── ...
-    │   └── gemini/
+    │   └── cursor/
     │       └── ...
     ├── memory/                      # Shared durable memory
     │   ├── project_facts.md
@@ -85,6 +85,9 @@ Messages are YAML files. Filename convention: `<timestamp>_<from>_<type>.yaml`
 remain authoritative: local autonomy config, message content, safety defaults,
 and runtime/tool permissions determine whether a message can be accepted without
 interactive human confirmation.
+
+Receiver autonomy is defined by `agents/<receiver>/config.yaml` and the
+scope-envelope contract in [`docs/protocol/autonomy.md`](docs/protocol/autonomy.md).
 
 ### Message Types
 
@@ -223,6 +226,12 @@ reason_codes:
   - task_profile_present
   - risk_threshold_passed
 ```
+
+Autonomy audit results use a stable terminal-state taxonomy
+(`done`, `paused`, `blocked`, `superseded`, `error`) plus
+`completion_kind` for detailed outcomes. Post-acceptance scope drift is recorded
+through the threshold checkpoint described in
+[`docs/protocol/autonomy.md`](docs/protocol/autonomy.md).
 
 ### Brainstorm Lifecycle
 
@@ -422,7 +431,7 @@ Credential scoping: [`docs/protocol/credential_scoping.md`](docs/protocol/creden
 
 ### Baseline Rules
 
-These defaults apply to all agents (Claude, Codex, Gemini) unless a project-level config explicitly overrides a specific rule. Safety defaults can only be made **stricter** by project rules, never relaxed.
+These defaults apply to all agents (Claude, Codex, Cursor, Gemini) unless a project-level config explicitly overrides a specific rule. Safety defaults can only be made **stricter** by project rules, never relaxed.
 
 Autonomy introduces a separate receiver acceptance policy layer; it does not
 relax the safety floor. OACP distinguishes three layers:
@@ -438,12 +447,14 @@ relax the safety floor. OACP distinguishes three layers:
    after acceptance, such as editor edit approval, shell sandboxing, or Codex
    approval modes. OACP acceptance never grants runtime tool permissions.
 
-Regardless of autonomy mode, receivers must pause on any of: destructive command
-tokens (`rm -rf`, `--force`, `--no-verify`,
-`--dangerously-skip-permissions`), external side effects
-(push/deploy/merge/publish/rotate/install), or modifications to auth, config,
-secrets, dependencies, public repos, pricing/commercial content, or memory SSOT,
-unless explicitly authorized by a separate safety-default exception.
+Regardless of autonomy mode, receivers must pause on destructive command tokens
+(`rm -rf`, `--force`, `--no-verify`, `--dangerously-skip-permissions`) and on
+actual requests for external side effects or sensitive scope: push, deploy,
+merge, publish, credential rotation, dependency install, auth/config/secrets,
+public repos, pricing/commercial content, or memory SSOT. Profileless message
+types that are explicitly allowed for auto-review may log incidental
+side-effect verb mentions as notes instead of hard stops, but destructive tokens
+and real side-effect requests still pause.
 
 #### Git Safety
 
@@ -639,6 +650,7 @@ Scripts marked **CLI** are exposed as `oacp` subcommands. Scripts marked **scrip
 | `init_org_memory.py` | Scaffold org-level memory directory | CLI: `oacp org-memory` |
 | `write_event.py` | Write timestamped events to org-memory | CLI: `oacp write-event` |
 | `oacp_doctor.py` | Environment and workspace health check (flutter-doctor-style) | CLI: `oacp doctor` |
+| `autonomy_gate.py` | Evaluates receiver autonomy scope-envelope decisions and checkpoint drift | script-only |
 | `validate_message.py` | Validates inbox/outbox message YAML | CLI: `oacp validate` |
 | `session_lifecycle_hooks.py` | Session init and close hooks (`init_session`, `close_session`) | CLI-wrapped |
 | `codex_session_init.py` | Codex startup protocol loader | CLI-wrapped |

@@ -1,0 +1,9 @@
+id: msg-20260526042400-iris-risk-no-profile
+from: iris
+to: codex
+type: task_request
+priority: P2
+created_at_utc: "2026-05-26T04:24:00Z"
+subject: "Open PR without profile"
+body: |
+  Open a PR, comment on GitHub, and commit the result.

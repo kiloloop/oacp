@@ -49,7 +49,7 @@ schema:
       type: "list of string"
       required: true
       description: "Runtimes that support this skill"
-      allowed_values: ["claude", "codex", "gemini"]
+      allowed_values: ["claude", "codex", "cursor", "gemini"]
 
 # ── Tier Semantics ───────────────────────────────────────────────────────────
 
@@ -77,7 +77,7 @@ example:
     core:
       - id: "code_review"
         description: "Review code changes for correctness, security, and style"
-        compatible_runtimes: ["claude", "codex", "gemini"]
+        compatible_runtimes: ["claude", "codex", "cursor", "gemini"]
       - id: "testing"
         description: "Write and run tests, report results"
         compatible_runtimes: ["claude", "codex"]

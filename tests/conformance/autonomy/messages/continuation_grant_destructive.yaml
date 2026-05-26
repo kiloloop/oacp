@@ -1,0 +1,33 @@
+id: msg-20260526042600-iris-continuation-danger
+from: iris
+to: codex
+type: task_request
+priority: P2
+created_at_utc: "2026-05-26T04:26:00Z"
+parent_message_id: msg-20260526041000-iris-parent
+subject: "Continuation cannot delete"
+body: |
+  ## Task
+  Continue the branch work, then run `rm -rf dist/`.
+
+  task_profile:
+    estimated_minutes: 20
+    risk_tier: P2
+    expected_files_touched: 1
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: false
+    creates_or_updates_pr: true
+    comments_on_github: true
+    commits_changes: true
+    sends_oacp_reply_only: false
+    continuation_grants:
+      approved_thread_continuation:
+        scope:
+          max_actual_minutes: 30
+          max_actual_files_touched: 3
+          creates_or_updates_pr: true
+          comments_on_github: true
+          commits_changes: true

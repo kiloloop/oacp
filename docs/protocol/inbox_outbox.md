@@ -45,6 +45,11 @@ body: |
     touches_auth_config_or_secrets: false
     touches_dependencies: false
     public_visibility: false
+    creates_or_updates_pr: false
+    comments_on_github: false
+    commits_changes: false
+    sends_oacp_reply_only: true
+    continuation_grants: {}
 ```
 
 ## Message Types
@@ -178,11 +183,18 @@ field. Receivers remain authoritative; the hint never bypasses receiver config,
 hard stops, workspace checks, or runtime tool permissions.
 
 For `auto_review`, `task_request` and `question` bodies require a
-machine-parseable `task_profile` block. Missing profile pauses with
-`task_profile_missing`; unparsable profile pauses with
-`task_profile_unparsable`. Message types explicitly listed in a receiver's
+machine-parseable `task_profile` scope envelope. Missing profile pauses with
+`task_profile_missing` or `risk_obvious_no_profile`; unparsable profile pauses
+with `task_profile_unparsable`. Message types explicitly listed in a receiver's
 `allow_without_task_profile` config, such as `brainstorm_request`, may
-auto-accept without the block.
+auto-accept without the block, and side-effect verbs are logged as notes instead
+of hard stops for those profileless types.
+
+The scope envelope may also include side-effect booleans
+(`creates_or_updates_pr`, `comments_on_github`, `commits_changes`) and
+default-off `continuation_grants.approved_thread_continuation` data for
+same-thread continuations. Receivers ignore continuation grants unless
+`autonomy.continuation_grants.enabled: true` is set in their config.
 
 Full receiver policy and audit rules are in
 [`autonomy.md`](autonomy.md).

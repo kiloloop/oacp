@@ -1,0 +1,18 @@
+case: continuation_grant_drift_pauses
+config: configs/auto_review_continuation_enabled.yaml
+message: messages/continuation_grant.yaml
+actuals: actuals/continuation_drift.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - threshold_checkpoint_breached
+  continuation_grant:
+    decision: accepted
+  result:
+    final_state: paused
+    predicted_risk_materialized: true
+    threshold_checkpoint:
+      evaluated: true
+      breached: true
+      action: paused_for_reauthorization

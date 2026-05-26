@@ -903,6 +903,10 @@ class TestSenderInference(unittest.TestCase):
         env = {"OACP_RUNTIME": "claude", "CODEX_SHELL": "1"}
         self.assertEqual(infer_current_runtime(env), "claude")
 
+    def test_infer_current_runtime_accepts_cursor(self):
+        env = {"OACP_RUNTIME": "cursor"}
+        self.assertEqual(infer_current_runtime(env), "cursor")
+
     def test_infer_sender_from_single_matching_agent_card(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

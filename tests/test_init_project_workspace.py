@@ -24,7 +24,8 @@ class TestInitializeWorkspace(unittest.TestCase):
             project_root = Path(result["project_root"])
             self.assertTrue((project_root / "agents" / "codex" / "inbox").is_dir())
             self.assertTrue((project_root / "agents" / "claude" / "inbox").is_dir())
-            self.assertTrue((project_root / "agents" / "gemini" / "inbox").is_dir())
+            self.assertTrue((project_root / "agents" / "cursor" / "inbox").is_dir())
+            self.assertFalse((project_root / "agents" / "gemini").exists())
             self.assertTrue(
                 (
                     project_root
@@ -68,9 +69,20 @@ class TestInitializeWorkspace(unittest.TestCase):
             # Default agents should NOT exist
             self.assertFalse((project_root / "agents" / "claude").exists())
             self.assertFalse((project_root / "agents" / "codex").exists())
-            self.assertFalse((project_root / "agents" / "gemini").exists())
+            self.assertFalse((project_root / "agents" / "cursor").exists())
             # Static dirs still created
             self.assertTrue((project_root / "packets" / "review").is_dir())
+
+    def test_custom_agents_can_include_gemini(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hub_root = Path(tmpdir)
+            result = initialize_workspace(
+                "demo", oacp_root=hub_root, agents=["claude", "codex", "gemini"]
+            )
+
+            project_root = Path(result["project_root"])
+            self.assertTrue((project_root / "agents" / "gemini" / "inbox").is_dir())
+            self.assertTrue((project_root / "agents" / "gemini" / "config.yaml").is_file())
 
     def test_rejects_traversal_agent_names(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

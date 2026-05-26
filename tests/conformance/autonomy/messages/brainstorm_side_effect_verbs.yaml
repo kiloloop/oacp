@@ -1,0 +1,10 @@
+id: msg-20260526042000-iris-brainstorm-verbs
+from: iris
+to: codex
+type: brainstorm_request
+priority: P3
+created_at_utc: "2026-05-26T04:20:00Z"
+subject: "Brainstorm release language"
+body: |
+  Explore wording for a future release note that may mention deploy, publish,
+  and merge workflows. Do not change files or contact external services.

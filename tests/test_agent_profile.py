@@ -376,7 +376,7 @@ class TestAgentInit(unittest.TestCase):
 
     def test_all_valid_runtimes(self) -> None:
         """All VALID_RUNTIMES are accepted."""
-        for runtime in ("claude", "codex", "gemini", "human"):
+        for runtime in ("claude", "codex", "cursor", "gemini", "human"):
             with tempfile.TemporaryDirectory() as tmpdir:
                 root = Path(tmpdir)
                 args = _make_args(name=f"agent-{runtime}", runtime=runtime)

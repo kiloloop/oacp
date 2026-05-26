@@ -11,15 +11,15 @@ skills:
   core:  # Required for all agents in this project
     - id: ""           # CUSTOMIZE: skill identifier
       description: ""  # CUSTOMIZE: what this skill covers
-      compatible_runtimes: [claude, codex, gemini]  # CUSTOMIZE: which runtimes support this
+      compatible_runtimes: [claude, codex, cursor, gemini]  # CUSTOMIZE: which runtimes support this
 
     # Example core skills (uncomment and customize):
     # - id: code_review
     #   description: "Review PRs for correctness, security, and style compliance"
-    #   compatible_runtimes: [claude, codex, gemini]
+    #   compatible_runtimes: [claude, codex, cursor, gemini]
     # - id: implementation
     #   description: "Implement features and bug fixes following project conventions"
-    #   compatible_runtimes: [claude, codex, gemini]
+    #   compatible_runtimes: [claude, codex, cursor, gemini]
 
   optional:  # Specialized skills for specific roles
     - id: ""           # CUSTOMIZE: skill identifier

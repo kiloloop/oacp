@@ -1,0 +1,9 @@
+id: msg-20260526042100-iris-brainstorm-rmrf
+from: iris
+to: codex
+type: brainstorm_request
+priority: P3
+created_at_utc: "2026-05-26T04:21:00Z"
+subject: "Brainstorm cleanup command"
+body: |
+  Explore whether `rm -rf dist/` belongs in the cleanup playbook.

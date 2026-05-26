@@ -74,6 +74,89 @@ class TestSetupRuntime(unittest.TestCase):
             self.assertIn("oacp send", content)
             self.assertIn(".agent/rules/oacp.md", result["created_files"])
 
+    def test_cursor_creates_todo_stub(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            result = setup_runtime("cursor", repo_dir=repo_dir)
+
+            todo_file = repo_dir / ".cursor" / "rules" / "oacp.todo.mdc"
+            self.assertTrue(todo_file.is_file())
+            content = todo_file.read_text(encoding="utf-8")
+            self.assertIn("TODO", content)
+            self.assertIn("check-inbox rules and memory hooks", content)
+            self.assertIn("OACP_RUNTIME=cursor", content)
+            self.assertIn(".cursor/rules/oacp.todo.mdc", result["created_files"])
+
+    def test_cursor_setup_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            setup_runtime("cursor", repo_dir=repo_dir)
+
+            todo_file = repo_dir / ".cursor" / "rules" / "oacp.todo.mdc"
+            todo_file.write_text("custom", encoding="utf-8")
+
+            result = setup_runtime("cursor", repo_dir=repo_dir)
+            self.assertEqual(result["created_files"], [])
+            self.assertIn(".cursor/rules/oacp.todo.mdc", result["skipped_files"])
+            self.assertEqual(todo_file.read_text(encoding="utf-8"), "custom")
+
+    def test_cursor_setup_provisions_project_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_dir = root / "repo"
+            oacp_root = root / "oacp"
+            repo_dir.mkdir()
+            (oacp_root / "projects" / "demo").mkdir(parents=True)
+
+            result = setup_runtime(
+                "cursor",
+                repo_dir=repo_dir,
+                project_name="demo",
+                oacp_root=oacp_root,
+            )
+
+            agent_dir = oacp_root / "projects" / "demo" / "agents" / "cursor"
+            self.assertTrue((agent_dir / "inbox").is_dir())
+            self.assertTrue((agent_dir / "outbox").is_dir())
+            self.assertTrue((agent_dir / "dead_letter").is_dir())
+            self.assertTrue((agent_dir / "audit" / "autonomy_decisions").is_dir())
+            self.assertTrue((agent_dir / "config.yaml").is_file())
+            self.assertTrue((agent_dir / "status.yaml").is_file())
+            self.assertTrue((agent_dir / "agent_card.yaml").is_file())
+            self.assertIn("agents/cursor/status.yaml", result["project_created_files"])
+            status = (agent_dir / "status.yaml").read_text(encoding="utf-8")
+            self.assertIn("runtime: cursor", status)
+            card = (agent_dir / "agent_card.yaml").read_text(encoding="utf-8")
+            self.assertIn('runtime: "cursor"', card)
+
+            result2 = setup_runtime(
+                "cursor",
+                repo_dir=repo_dir,
+                project_name="demo",
+                oacp_root=oacp_root,
+            )
+            self.assertIn(".cursor/rules/oacp.todo.mdc", result2["skipped_files"])
+            self.assertIn("agents/cursor/status.yaml", result2["project_skipped_files"])
+            self.assertIn("agents/cursor/agent_card.yaml", result2["project_skipped_files"])
+
+    def test_cursor_setup_missing_project_does_not_write_stub(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_dir = root / "repo"
+            oacp_root = root / "oacp"
+            repo_dir.mkdir()
+
+            with self.assertRaises(ValueError) as ctx:
+                setup_runtime(
+                    "cursor",
+                    repo_dir=repo_dir,
+                    project_name="missing",
+                    oacp_root=oacp_root,
+                )
+
+            self.assertIn("oacp init missing", str(ctx.exception))
+            self.assertFalse((repo_dir / ".cursor" / "rules" / "oacp.todo.mdc").exists())
+
     def test_does_not_overwrite_existing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_dir = Path(tmpdir)
@@ -108,6 +191,15 @@ class TestSetupRuntime(unittest.TestCase):
             )
             from setup_runtime import _detect_project_name
             self.assertEqual(_detect_project_name(repo_dir), "fromjson")
+
+    def test_detects_project_from_oacp_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            (repo_dir / ".oacp").write_text(
+                json.dumps({"project_name": "from-oacp"}), encoding="utf-8"
+            )
+            from setup_runtime import _detect_project_name
+            self.assertEqual(_detect_project_name(repo_dir), "from-oacp")
 
     def test_claude_without_project_uses_placeholder(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

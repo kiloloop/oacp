@@ -22,3 +22,10 @@ expected:
 
 Consumers may add implementation-specific trace fields, but `decision`, `mode`,
 `reason_codes`, and `matched_pattern` when present must match.
+
+These fixtures may also include:
+
+- `actuals:` pointing at checkpoint input under `actuals/`
+- `expected.logged_notes` for demoted side-effect verb matches
+- `expected.continuation_grant` for default-off and enabled grant behavior
+- `expected.result.threshold_checkpoint` for envelope drift decisions

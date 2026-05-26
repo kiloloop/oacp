@@ -1,0 +1,9 @@
+case: brainstorm_destructive_pauses
+config: configs/auto_review_standard.yaml
+message: messages/brainstorm_destructive.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - hard_stop_destructive_command
+  matched_pattern: "rm -rf"

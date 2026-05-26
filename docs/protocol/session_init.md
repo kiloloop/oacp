@@ -116,7 +116,7 @@ The top-level files in `memory/` are the active working set. `memory/archive/` i
 **Fields to set:**
 
 ```yaml
-runtime: <runtime>           # claude | codex | gemini
+runtime: <runtime>           # claude | codex | cursor | gemini
 model: <model_id>            # e.g., claude-opus-4-6
 status: available             # or "busy" if starting with an assigned task
 current_task: ""              # populated if starting with a task

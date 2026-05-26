@@ -8,7 +8,7 @@ Define per-agent, per-project fine-grained token boundaries so that agents opera
 
 ### Per-Agent Credentials
 
-Each agent (claude, codex, gemini) receives its own set of credentials. No two agents share the same token for the same service. This provides:
+Each agent (claude, codex, cursor, gemini) receives its own set of credentials. No two agents share the same token for the same service. This provides:
 
 - **Audit trail** — API logs attribute actions to the correct agent.
 - **Blast-radius containment** — a leaked token only compromises one agent's access.

@@ -345,7 +345,7 @@ The inbox-based review loop and project-specific background review automation ar
 | Communication | Inbox YAML messages | GitHub API + runtime-specific automation |
 | Reviewer runtime model | Stateless one-invocation-per-round | Fresh process per poll cycle |
 | State tracking | Message chain in inbox/outbox | External state file |
-| Runtime | Any (Claude, Codex, Gemini, manual) | Runtime-specific |
+| Runtime | Any (Claude, Codex, Cursor, Gemini, manual) | Runtime-specific |
 | Best for | Structured multi-round reviews, explicit round controls | Continuous background monitoring, quick automated fixes |
 
 Both can coexist. Use background polling for lightweight monitoring and the review loop protocol for explicit quality gate sign-off and cross-agent coordination.

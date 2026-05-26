@@ -147,7 +147,7 @@ class TestName(unittest.TestCase):
 
 class TestRuntime(unittest.TestCase):
     def test_valid_runtimes(self):
-        for rt in ("claude", "codex", "gemini", "human", "unknown"):
+        for rt in ("claude", "codex", "cursor", "gemini", "human", "unknown"):
             errors = validate_agent_card(_base_card(runtime=rt))
             self.assertEqual(errors, [], f"runtime {rt} should be valid")
 

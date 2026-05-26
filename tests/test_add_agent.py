@@ -64,6 +64,22 @@ class TestAddAgent(unittest.TestCase):
             # 4 gitkeeps + config.yaml + status.yaml + agent_card.yaml = 7
             self.assertEqual(len(result["created_files"]), 7)
 
+    def test_creates_cursor_status_and_card(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            oacp_root = self._make_project(Path(tmpdir))
+            result = add_agent(
+                "demo", "cursor", oacp_root=oacp_root, runtime="cursor"
+            )
+
+            agent_dir = result["agent_dir"]
+            status = (agent_dir / "status.yaml").read_text(encoding="utf-8")
+            self.assertIn("runtime: cursor", status)
+
+            card = (agent_dir / "agent_card.yaml").read_text(encoding="utf-8")
+            self.assertIn('name: "cursor"', card)
+            self.assertIn('runtime: "cursor"', card)
+            self.assertIn('description: "cursor agent (cursor runtime)"', card)
+
     def test_no_optional_files_without_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             oacp_root = self._make_project(Path(tmpdir))

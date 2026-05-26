@@ -11,3 +11,5 @@ autonomy:
     git_push_or_deploy: pause
   allow_without_task_profile:
     - brainstorm_request
+  continuation_grants:
+    enabled: false

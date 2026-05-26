@@ -1,0 +1,20 @@
+id: msg-20260526042200-iris-path-deploy
+from: iris
+to: codex
+type: task_request
+priority: P2
+created_at_utc: "2026-05-26T04:22:00Z"
+subject: "Document deploy packet path"
+body: |
+  ## Task
+  Update one docs sentence that references `packets/deploy/` as a directory.
+
+  task_profile:
+    estimated_minutes: 20
+    risk_tier: P3
+    expected_files_touched: 1
+    destructive_ops: false
+    external_side_effects: false
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: false
