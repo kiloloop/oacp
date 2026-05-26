@@ -104,7 +104,7 @@ def generate_timestamp() -> str:
 
 
 _SAFE_SUFFIX_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-_VALID_RUNTIMES = frozenset({"claude", "codex", "gemini", "human"})
+_VALID_RUNTIMES = frozenset({"claude", "codex", "cursor", "gemini", "human"})
 _RUNTIME_MARKERS = (
     ("CODEX_CI", "codex"),
     ("CODEX_SHELL", "codex"),

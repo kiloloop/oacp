@@ -1,0 +1,27 @@
+case: top_level_side_effect_actuals_ignored
+config: configs/auto_review_standard.yaml
+message: messages/clean_task.yaml
+actuals: actuals/top_level_side_effect_keys.yaml
+expected:
+  decision: auto_accepted
+  mode: auto_review
+  reason_codes:
+    - message_valid
+    - message_not_expired
+    - message_hash_recorded
+    - task_profile_present
+    - task_type_allowed
+    - risk_threshold_passed
+    - hard_stops_clear
+    - workspace_check_required
+  result:
+    final_state: done
+    predicted_risk_materialized: false
+    threshold_checkpoint:
+      evaluated: true
+      breached: false
+      action: within_declared_envelope
+      side_effects_actual:
+        creates_or_updates_pr: false
+        comments_on_github: false
+        commits_changes: false

@@ -1,0 +1,26 @@
+case: continuation_grant_enabled_auto_accepts
+config: configs/auto_review_continuation_enabled.yaml
+message: messages/continuation_grant.yaml
+actuals: actuals/continuation_within.yaml
+expected:
+  decision: auto_accepted
+  mode: auto_review
+  reason_codes:
+    - message_valid
+    - message_not_expired
+    - message_hash_recorded
+    - task_profile_present
+    - task_type_allowed
+    - risk_threshold_passed
+    - hard_stops_clear
+    - workspace_check_required
+    - continuation_grant_accepted
+  continuation_grant:
+    decision: accepted
+  result:
+    final_state: done
+    predicted_risk_materialized: false
+    threshold_checkpoint:
+      evaluated: true
+      breached: false
+      action: continued_with_grant

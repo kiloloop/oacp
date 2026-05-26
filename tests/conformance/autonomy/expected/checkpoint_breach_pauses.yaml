@@ -1,0 +1,16 @@
+case: checkpoint_breach_pauses
+config: configs/auto_review_standard.yaml
+message: messages/clean_task.yaml
+actuals: actuals/checkpoint_breach.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - threshold_checkpoint_breached
+  result:
+    final_state: paused
+    predicted_risk_materialized: true
+    threshold_checkpoint:
+      evaluated: true
+      breached: true
+      action: paused_for_reauthorization

@@ -4,6 +4,7 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Claude Code](https://img.shields.io/badge/Runtime-Claude_Code-6B4FBB.svg)](https://claude.ai/code)
 [![Codex](https://img.shields.io/badge/Runtime-Codex-74AA9C.svg)](https://openai.com/index/codex/)
+[![Cursor](https://img.shields.io/badge/Runtime-Cursor-222222.svg)](https://cursor.com/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen)](https://github.com/kiloloop/oacp/pulls)
 
 > Coordinate agents *without* the chaos.
@@ -101,6 +102,9 @@ oacp init my-project --agents alice,bob
 oacp send my-project --from alice --to bob --type task_request \
   --subject "Implement feature X" --body "Details here..."
 ```
+
+By default, `oacp init my-project` creates `claude`, `codex`, and `cursor`
+agents. Pass `--agents` to include Gemini or custom agent names.
 
 When running inside a configured agent runtime, `--from` can be omitted — OACP infers the sender from `OACP_AGENT`, `AGENT_NAME`, or the agent card. See [QUICKSTART.md](QUICKSTART.md) for a full walkthrough. Or try the [5-minute quickstart →](examples/quickstart/) to send your first message to a real AI agent.
 
@@ -223,7 +227,7 @@ uv tool install .
 |---------|-------------|
 | `oacp init` | Create a project workspace under `$OACP_HOME/projects/` |
 | `oacp add-agent` | Add an agent to an existing project workspace |
-| `oacp setup` | Generate runtime-specific config files (Claude, Codex, etc.) |
+| `oacp setup` | Generate runtime-specific config files (Claude, Codex, Cursor, Gemini) |
 | `oacp send` | Send a protocol-compliant inbox message (`--from` auto-inferred) |
 | `oacp inbox` | List pending messages across agents (table or `--json`) |
 | `oacp watch` | Emit inbox delta events for one agent across selected projects |

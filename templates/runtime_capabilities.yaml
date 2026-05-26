@@ -28,6 +28,13 @@ codex:
     - web_search
     - session_memory
 
+cursor:
+  model: cursor
+  capabilities:
+    - shell_access
+    - git_ops
+    - github_cli
+
 gemini:
   model: gemini
   capabilities:

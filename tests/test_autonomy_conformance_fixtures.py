@@ -27,10 +27,16 @@ def test_expected_cases_reference_existing_config_and_message() -> None:
 
         assert config.is_file(), f"{expected_path.name} references missing {config}"
         assert message.is_file(), f"{expected_path.name} references missing {message}"
+        if data.get("actuals"):
+            actuals = FIXTURE_ROOT / data["actuals"]
+            assert actuals.is_file(), f"{expected_path.name} references missing {actuals}"
         assert data["expected"]["decision"] in {"auto_accepted", "paused", "rejected"}
         assert data["expected"]["mode"] in {"always_pause", "auto_review"}
         assert isinstance(data["expected"]["reason_codes"], list)
         assert data["expected"]["reason_codes"]
+        result = data["expected"].get("result")
+        if result:
+            assert result.get("final_state") in {"done", "paused", "blocked", "superseded", "error"}
 
 
 def test_no_sender_trust_fixture_surface() -> None:

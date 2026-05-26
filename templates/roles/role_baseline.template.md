@@ -1,6 +1,6 @@
 # Role Baseline
 
-Shared expectations applied to **all** agent roles regardless of runtime (Claude, Codex, Gemini).
+Shared expectations applied to **all** agent roles regardless of runtime (Claude, Codex, Cursor, Gemini).
 
 ---
 

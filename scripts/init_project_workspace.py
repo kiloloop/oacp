@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from _oacp_constants import AGENT_RE, _template_path, _write_if_missing
 
-DEFAULT_AGENTS = ("claude", "codex", "gemini")
+DEFAULT_AGENTS = ("claude", "codex", "cursor")
 
 
 def _validate_agent_name(name: str) -> None:

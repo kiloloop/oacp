@@ -2,7 +2,7 @@
 
 ## Problem
 
-Multi-agent workflows span different runtimes — Claude, Codex, Gemini — each with its own context window, memory mechanism, and conversation state. Without an explicit sync protocol, agents lose context at handoff boundaries, duplicate decisions, or contradict prior work.
+Multi-agent workflows span different runtimes — Claude, Codex, Cursor, Gemini — each with its own context window, memory mechanism, and conversation state. Without an explicit sync protocol, agents lose context at handoff boundaries, duplicate decisions, or contradict prior work.
 
 Key challenges:
 

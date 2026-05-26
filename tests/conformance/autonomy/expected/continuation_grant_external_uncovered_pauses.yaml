@@ -1,0 +1,10 @@
+case: continuation_grant_external_uncovered_pauses
+config: configs/auto_review_continuation_enabled.yaml
+message: messages/continuation_grant_external_uncovered.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - external_side_effects_pause
+  continuation_grant:
+    decision: accepted

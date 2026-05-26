@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+from add_agent import add_agent
 from _oacp_constants import CREATABLE_RUNTIMES, _template_path, _write_if_missing
 
 # ── Inline defaults (used when no template file exists) ──────────────────────
@@ -61,6 +62,18 @@ oacp doctor --project <project>          # health check
 oacp send <project> --from gemini ...    # send a message
 oacp validate <message.yaml>             # validate a message
 ```
+"""
+
+CURSOR_OACP_TODO = """\
+# OACP for Cursor
+
+TODO: Cursor-owned onboarding will add check-inbox rules and memory hooks here.
+
+This placeholder only marks the repo as intentionally prepared for OACP. Do not
+treat it as a working inbox processor.
+
+Until Cursor-owned rules land, Cursor sessions must set OACP_RUNTIME=cursor or
+pass --from explicitly when sending OACP messages.
 """
 
 CLAUDE_MEMORY_PULL_HOOK = """\
@@ -204,16 +217,17 @@ def _detect_repo_root(start: Path) -> Optional[Path]:
 
 
 def _detect_project_name(repo_dir: Path) -> Optional[str]:
-    """Detect project name from .oacp symlink or workspace.json."""
+    """Detect project name from .oacp or workspace.json."""
     for name in (".oacp", "workspace.json"):
         marker = repo_dir / name
         if marker.is_symlink() or marker.is_file():
             try:
                 resolved = marker.resolve()
-                if resolved.name == "workspace.json":
-                    data = json.loads(resolved.read_text(encoding="utf-8"))
-                    return data.get("project_name")
-            except (OSError, json.JSONDecodeError, KeyError):
+                data = json.loads(resolved.read_text(encoding="utf-8"))
+                project_name = data.get("project_name")
+                if project_name:
+                    return project_name
+            except (OSError, json.JSONDecodeError):
                 pass
     return None
 
@@ -250,6 +264,7 @@ def setup_runtime(
     *,
     repo_dir: Path,
     project_name: Optional[str] = None,
+    oacp_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Generate runtime-specific configuration files.
 
@@ -263,6 +278,8 @@ def setup_runtime(
     created_files: List[str] = []
     skipped_files: List[str] = []
     warning_files: List[str] = []
+    project_created_files: List[str] = []
+    project_skipped_files: List[str] = []
 
     project_label = project_name or "<project>"
 
@@ -331,10 +348,39 @@ def setup_runtime(
         else:
             skipped_files.append(str(rules_file.relative_to(repo_dir)))
 
+    elif runtime == "cursor":
+        if project_name:
+            if oacp_root is None:
+                from _oacp_env import resolve_oacp_home
+
+                oacp_root = resolve_oacp_home()
+            project_dir = oacp_root / "projects" / project_name
+            if not project_dir.is_dir():
+                raise ValueError(
+                    f"Project '{project_name}' not found at {project_dir}. "
+                    f"Run `oacp init {project_name}` first."
+                )
+            result = add_agent(
+                project_name,
+                "cursor",
+                oacp_root=oacp_root,
+                runtime="cursor",
+            )
+            project_created_files.extend(result["created_files"])
+            project_skipped_files.extend(result["skipped_files"])
+
+        todo_file = repo_dir / ".cursor" / "rules" / "oacp.todo.mdc"
+        if _write_if_missing(todo_file, CURSOR_OACP_TODO):
+            created_files.append(str(todo_file.relative_to(repo_dir)))
+        else:
+            skipped_files.append(str(todo_file.relative_to(repo_dir)))
+
     return {
         "created_files": created_files,
         "skipped_files": skipped_files,
         "warning_files": warning_files,
+        "project_created_files": project_created_files,
+        "project_skipped_files": project_skipped_files,
     }
 
 
@@ -353,12 +399,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     # Resolve project name
     project_name = args.project or _detect_project_name(repo_dir)
+    from _oacp_env import resolve_oacp_home
+
+    oacp_root = resolve_oacp_home(explicit=args.oacp_dir)
 
     try:
         result = setup_runtime(
             args.runtime,
             repo_dir=repo_dir,
             project_name=project_name,
+            oacp_root=oacp_root,
         )
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -371,10 +421,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"  ~ {f} (already exists, skipped)")
     for f in result["warning_files"]:
         print(f"  ! {f} (warning, skipped)")
+    if result["project_created_files"] or result["project_skipped_files"]:
+        print(f"Project agent '{args.runtime}' setup in {oacp_root / 'projects' / str(project_name)}:")
+        for f in result["project_created_files"]:
+            print(f"  + {f}")
+        for f in result["project_skipped_files"]:
+            print(f"  ~ {f} (already exists, skipped)")
     if (
         not result["created_files"]
         and not result["skipped_files"]
         and not result["warning_files"]
+        and not result["project_created_files"]
+        and not result["project_skipped_files"]
     ):
         print("  (no files to create)")
     return 0

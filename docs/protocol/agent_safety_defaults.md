@@ -1,6 +1,6 @@
 # Agent Safety Defaults
 
-Cross-agent baseline safety rules. All agents (Claude, Codex, Gemini) follow these defaults unless a project-level `AGENTS.md` explicitly overrides a specific rule.
+Cross-agent baseline safety rules. All agents (Claude, Codex, Cursor, Gemini) follow these defaults unless a project-level `AGENTS.md` explicitly overrides a specific rule.
 
 ## Git Safety
 
@@ -36,14 +36,16 @@ Receiver autonomy controls only whether a message can move from `received` to
 `accepted` without interactive human confirmation. It does not relax this safety
 floor.
 
-Regardless of autonomy mode, receivers must pause on any of:
+Regardless of autonomy mode, receivers must pause on actual requests for:
 
 - Destructive command tokens: `rm -rf`, `--force`, `--no-verify`, `--dangerously-skip-permissions`
 - External side effects: push, deploy, merge, publish, credential rotation, dependency install
 - Sensitive scope: auth, config, secrets, dependencies, public repos, pricing/commercial content, memory SSOT
 
-The only exception is an explicit, separate safety-default exception. The
-Phase 1 autonomy RFC does not introduce any such exception.
+Profileless message types that are explicitly allowed for auto-review may log
+incidental side-effect verb mentions as notes instead of hard stops, but
+destructive tokens and real side-effect requests still pause. The only exception
+is an explicit, separate safety-default exception.
 
 ## Scope Discipline
 

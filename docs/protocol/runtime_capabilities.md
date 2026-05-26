@@ -33,21 +33,21 @@ Each runtime declares a fixed set of capabilities. These do not change during a 
 
 These are reference defaults. Actual capabilities may vary by configuration.
 
-| Capability | Claude | Codex | Gemini |
-|------------|--------|-------|--------|
-| `headless` | yes | yes | yes |
-| `mcp_tools` | yes | partial | yes |
-| `shell_access` | yes | yes | yes |
-| `git_ops` | yes | yes | yes |
-| `github_cli` | yes | yes | yes |
-| `subagents` | yes | no | partial |
-| `parallel_teams` | yes | no | no |
-| `web_search` | yes | yes | yes |
-| `browser` | partial | partial | yes |
-| `session_memory` | yes | partial | partial |
-| `notifications` | yes | yes | yes |
-| `async_tasks` | yes | yes | yes |
-| `image_generation` | no | no | yes |
+| Capability | Claude | Codex | Cursor | Gemini |
+|------------|--------|-------|--------|--------|
+| `headless` | yes | yes | no | yes |
+| `mcp_tools` | yes | partial | no | yes |
+| `shell_access` | yes | yes | yes | yes |
+| `git_ops` | yes | yes | yes | yes |
+| `github_cli` | yes | yes | yes | yes |
+| `subagents` | yes | no | no | partial |
+| `parallel_teams` | yes | no | no | no |
+| `web_search` | yes | yes | no | yes |
+| `browser` | partial | partial | no | yes |
+| `session_memory` | yes | partial | no | partial |
+| `notifications` | yes | yes | no | yes |
+| `async_tasks` | yes | yes | no | yes |
+| `image_generation` | no | no | no | yes |
 
 See `docs/guides/runtime_capability_matrix.md` for the full parity matrix with details.
 
@@ -64,7 +64,7 @@ projects/<project>/agents/<agent_name>/status.yaml
 ### Schema
 
 ```yaml
-runtime: claude                         # Runtime identifier: claude | codex | gemini | human
+runtime: claude                         # Runtime identifier: claude | codex | cursor | gemini | human
 model: claude-opus-4-6                  # Model version string
 status: available                       # available | busy | offline
 current_task: ""                        # Free-text description of current work (empty if idle)
@@ -79,7 +79,7 @@ updated_at: "2026-02-16T20:00:00Z"     # ISO 8601 UTC timestamp of last update
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `runtime` | string | yes | One of: `claude`, `codex`, `gemini`, `human`, `unknown` |
+| `runtime` | string | yes | One of: `claude`, `codex`, `cursor`, `gemini`, `human`, `unknown` |
 | `model` | string | no | Model version identifier |
 | `status` | string | yes | One of: `available`, `busy`, `offline` |
 | `current_task` | string | no | What the agent is currently doing |
@@ -200,7 +200,7 @@ projects/<project>/agents/<agent_name>/agent_card.yaml
 ```yaml
 version: "0.2.0"                       # Card schema version (semver)
 name: claude                           # Agent name (matches inbox/outbox directory)
-runtime: claude                        # claude | codex | gemini | human
+runtime: claude                        # claude | codex | cursor | gemini | human
 model: claude-opus-4-6                 # Model version string
 description: "Primary implementer"     # One-line role summary
 
@@ -239,7 +239,7 @@ protocol:
 |-------|------|-------------|
 | `version` | string | Card schema version (semver) |
 | `name` | string | Agent identifier (1-64 chars, alphanumeric/dots/hyphens/underscores) |
-| `runtime` | string | One of: `claude`, `codex`, `gemini`, `human`, `unknown` |
+| `runtime` | string | One of: `claude`, `codex`, `cursor`, `gemini`, `human`, `unknown` |
 | `description` | string | One-line role summary |
 
 ### Agent Card vs status.yaml

@@ -304,7 +304,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     # init
     p_init = sub.add_parser("init", help="Create a global agent profile")
     p_init.add_argument("name", help="Agent name")
-    p_init.add_argument("--runtime", required=True, help="Agent runtime (claude, codex, gemini, human)")
+    p_init.add_argument("--runtime", required=True, help="Agent runtime (claude, codex, cursor, gemini, human)")
 
     # show
     p_show = sub.add_parser("show", help="Show merged agent profile")

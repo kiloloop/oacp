@@ -2,7 +2,7 @@
 # Location: projects/<project>/agents/<agent_name>/status.yaml
 # See: docs/protocol/runtime_capabilities.md
 
-runtime: claude               # claude | codex | gemini | human | unknown
+runtime: claude               # claude | codex | cursor | gemini | human | unknown
 model: claude-opus-4-6        # model version identifier
 status: available              # available | busy | offline
 current_task: ""               # free-text description of current work (empty if idle)

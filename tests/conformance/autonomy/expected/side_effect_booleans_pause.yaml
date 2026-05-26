@@ -1,0 +1,11 @@
+case: side_effect_booleans_pause
+config: configs/auto_review_standard.yaml
+message: messages/side_effect_booleans.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - external_side_effects_pause
+    - creates_or_updates_pr_pause
+    - comments_on_github_pause
+    - commits_changes_pause

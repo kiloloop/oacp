@@ -12,7 +12,7 @@ version: "0.2.0"
 # ── Identity ─────────────────────────────────────────────────────────────────
 
 name: ""                          # CUSTOMIZE: agent name (matches inbox/outbox directory)
-runtime: ""                       # CUSTOMIZE: claude | codex | gemini | human
+runtime: ""                       # CUSTOMIZE: claude | codex | cursor | gemini | human
 model: ""                         # CUSTOMIZE: model id (e.g., claude-opus-4-6, gpt-5-codex)
 description: ""                   # CUSTOMIZE: one-line role summary
 

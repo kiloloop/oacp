@@ -2,7 +2,7 @@
 
 **Date**: 2026-04-29
 
-This is a capability comparison across 3 agent runtimes (Claude Code, Codex, Gemini), compiled from each runtime's self-report and current runtime changelogs. Use this as a reference when deciding which agent to assign for a given task.
+This is a capability comparison across the currently profiled agent runtimes (Claude Code, Codex, Gemini), compiled from each runtime's self-report and current runtime changelogs. Cursor support is scaffold-only until Cursor-owned onboarding lands, so Cursor is intentionally excluded from this comparison table; see `docs/protocol/runtime_capabilities.md` for its conservative scaffold defaults.
 
 Claude was last checked against Claude Code `v2.1.123`.
 

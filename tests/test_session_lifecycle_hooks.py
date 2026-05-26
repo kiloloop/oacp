@@ -355,6 +355,30 @@ class TestSessionLifecycleHooks(unittest.TestCase):
         args = parser.parse_args(["init_session", "demo", "--agent", "claude"])
         self.assertEqual(args.runtime, "unknown")
 
+    def test_cursor_runtime_is_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hub_dir = Path(tmp)
+            _setup_project(hub_dir, "demo")
+
+            report = init_session(
+                project="demo",
+                hub_dir=hub_dir,
+                agent="cursor",
+                runtime="cursor",
+                role="implementer",
+                packet_id="20260526_demo_cursor_r1",
+                packet_state=None,
+                conversation_id=None,
+                branch=None,
+                notes=None,
+                session_id=None,
+                dry_run=False,
+            )
+
+            events_file = Path(report["events_file"])
+            event = json.loads(events_file.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(event["runtime"], "cursor")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,4 +5,5 @@ expected:
   decision: paused
   mode: auto_review
   reason_codes:
-    - risk_threshold_exceeded
+    - estimated_minutes_exceeds_threshold
+    - expected_files_touched_exceeds_threshold

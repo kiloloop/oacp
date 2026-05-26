@@ -1,0 +1,9 @@
+case: continuation_grant_destructive_pauses
+config: configs/auto_review_continuation_enabled.yaml
+message: messages/continuation_grant_destructive.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - hard_stop_destructive_command
+  matched_pattern: "rm -rf"

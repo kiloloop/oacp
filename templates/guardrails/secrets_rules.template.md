@@ -59,7 +59,7 @@ If a secret is accidentally committed:
 
 Agent credentials must follow the per-agent, per-project scoping rules defined in `docs/protocol/credential_scoping.md`. Key requirements:
 
-- **Per-agent tokens**: each agent (claude, codex, gemini) gets its own credentials. Never share a token across agents.
+- **Per-agent tokens**: each agent (claude, codex, cursor, gemini) gets its own credentials. Never share a token across agents.
 - **Per-project boundaries**: credentials for project A must not be used to access project B.
 - **Env var naming**: use the pattern `<TYPE>_<AGENT>` (e.g., `GH_TOKEN_CLAUDE`, `ANTHROPIC_API_KEY_CODEX`).
 - **Least privilege**: grant only the permissions each agent's role requires (e.g., read-only for QA agents, write for implementers).

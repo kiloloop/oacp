@@ -1,0 +1,14 @@
+case: continuation_grant_disabled_pauses
+config: configs/auto_review_standard.yaml
+message: messages/continuation_grant.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - continuation_grant_ignored_disabled
+    - external_side_effects_pause
+    - creates_or_updates_pr_pause
+    - comments_on_github_pause
+    - commits_changes_pause
+  continuation_grant:
+    decision: ignored_disabled

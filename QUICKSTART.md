@@ -34,10 +34,10 @@ pipx install oacp-cli
 Every project gets its own workspace with agent inboxes, shared memory, and packet directories.
 
 ```bash
-oacp init my-first-project --agents claude,codex,gemini --repo /path/to/repo
+oacp init my-first-project --agents claude,codex,cursor --repo /path/to/repo
 ```
 
-Or with defaults (agents: claude, codex, gemini):
+Or with defaults (agents: claude, codex, cursor):
 
 ```bash
 oacp init my-first-project
@@ -54,7 +54,7 @@ $OACP_HOME/projects/my-first-project/
 │   ├── codex/
 │   │   ├── inbox/
 │   │   └── outbox/
-│   └── gemini/
+│   └── cursor/
 │       ├── inbox/
 │       └── outbox/
 ├── memory/
@@ -72,24 +72,37 @@ $OACP_HOME/projects/my-first-project/
 
 ## 4. Connect Your Runtime
 
-Tell your agent runtime where the OACP workspace lives.
+Run the runtime setup command from the repo you want the agent to work in:
 
-**Claude Code** — add the OACP workspace path to your project's `CLAUDE.md`:
-
-```markdown
-## OACP
-OACP workspace: $OACP_HOME/projects/my-first-project/
-Check inbox: ls $OACP_HOME/projects/my-first-project/agents/claude/inbox/
+```bash
+cd /path/to/repo
+oacp setup <runtime> --project my-first-project
 ```
 
-**Codex** — add the workspace path to your repo's `AGENTS.md`:
+For Claude Code:
 
-```markdown
-## OACP
-OACP workspace: $OACP_HOME/projects/my-first-project/
+```bash
+oacp setup claude --project my-first-project
 ```
 
-**Other runtimes** — point your agent's system prompt at the workspace path and instruct it to read the standard `memory/` files at session start.
+This creates or updates:
+
+- `.claude/agents/my-first-project.md`
+- `.claude/skills/`
+- `.claude/hooks/oacp-memory-pull.sh`
+- `.claude/hooks/oacp-memory-push.sh`
+- `.claude/settings.json`
+
+For other supported runtimes, use the same shape:
+
+```bash
+oacp setup codex --project my-first-project
+oacp setup cursor --project my-first-project
+oacp setup gemini --project my-first-project
+```
+
+Cursor support is scaffold-only until Cursor-owned rules land. Cursor sessions
+must set `OACP_RUNTIME=cursor` or pass `--from` explicitly when sending messages.
 
 For full runtime setup (role templates, guardrails, skills), see [docs/guides/setup.md](docs/guides/setup.md).
 
@@ -111,6 +124,12 @@ This writes a YAML file to `agents/codex/inbox/` and a copy to `agents/claude/ou
 ## 6. Check the Inbox
 
 See what's waiting for an agent:
+
+```bash
+oacp inbox my-first-project --agent codex
+```
+
+Or inspect the inbox directory directly:
 
 ```bash
 ls "$OACP_HOME/projects/my-first-project/agents/codex/inbox/"
@@ -136,6 +155,17 @@ body: |
   Add POST /login with JWT auth. See docs/api-spec.md for details.
 ```
 
+To watch for new messages from a standing runtime or Monitor, use `oacp watch`.
+A single `oacp watch` run scans once and exits, so keep re-running it when you
+want a persistent worker:
+
+```bash
+while true; do
+  oacp watch --project my-first-project --agent codex || true
+  sleep 120
+done
+```
+
 ## 7. Reply
 
 Send a response back:
@@ -146,7 +176,7 @@ oacp send my-first-project \
   --type notification \
   --subject "Re: Implement login endpoint" \
   --body "Accepted. Starting implementation on branch codex/login-endpoint." \
-  --parent-message-id "msg-20260311T120000Z-claude-a1b2"
+  --in-reply-to "msg-20260311T120000Z-claude-a1b2"
 ```
 
 ## 8. Validate Messages
@@ -160,12 +190,20 @@ oacp validate \
 
 ## 9. Run Health Checks
 
-Verify your environment and workspace are set up correctly:
+Verify your environment first:
 
 ```bash
 oacp doctor
+```
+
+Then check the workspace you just created:
+
+```bash
 oacp doctor --project my-first-project
 ```
+
+Plain `oacp doctor` checks global environment health. The `--project` form also
+checks the project workspace, inboxes, schemas, and agent status files.
 
 ## What's Next?
 

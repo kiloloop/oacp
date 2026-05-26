@@ -559,6 +559,16 @@ def validate_autonomy_config_data(data: Any) -> List[str]:
             "autonomy.trusted_senders is not supported; sender trust is messenger-bound"
         )
 
+    continuation_grants = autonomy.get("continuation_grants", {})
+    if continuation_grants is None:
+        continuation_grants = {}
+    if not isinstance(continuation_grants, dict):
+        errors.append("autonomy.continuation_grants must be a mapping")
+    else:
+        enabled = continuation_grants.get("enabled", False)
+        if not isinstance(enabled, bool):
+            errors.append("autonomy.continuation_grants.enabled must be a boolean")
+
     return errors
 
 

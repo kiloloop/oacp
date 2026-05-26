@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "oacp-cli"
-version = "0.3.1"
+version = "0.3.2"
 description = "Open Agent Coordination Protocol CLI for file-based multi-agent workflows"
 readme = "README.md"
 license = "Apache-2.0"
@@ -54,6 +54,7 @@ packages = ["oacp"]
 "scripts/_oacp_env.py" = "oacp/_scripts/_oacp_env.py"
 "scripts/handoff_schema.py" = "oacp/_scripts/handoff_schema.py"
 "scripts/oacp_doctor.py" = "oacp/_scripts/oacp_doctor.py"
+"scripts/autonomy_gate.py" = "oacp/_scripts/autonomy_gate.py"
 "scripts/init_project_workspace.py" = "oacp/_scripts/init_project_workspace.py"
 "scripts/send_inbox_message.py" = "oacp/_scripts/send_inbox_message.py"
 "scripts/session_lifecycle_hooks.py" = "oacp/_scripts/session_lifecycle_hooks.py"

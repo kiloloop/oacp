@@ -5,7 +5,7 @@
 - `bash` 3.2+ (macOS default) or 4+ (recommended)
 - `python3` 3.9+ (for JSON state management, quality gate scripts, and inbox messaging)
 - `gh` CLI (optional, for GitHub operations — `gh auth login`)
-- Agent runtime CLI: `claude`, `codex`, or `gemini` (depending on your agents)
+- Agent runtime CLI: `claude`, `codex`, `cursor`, or `gemini` (depending on your agents)
 
 ## 1) Install OACP
 
@@ -37,6 +37,12 @@ pip install -e .
 ```bash
 oacp init <project>
 ```
+
+By default, `oacp init` creates `claude`, `codex`, and `cursor` agents.
+Use `--agents` to include Gemini or custom agent names.
+
+Cursor support is scaffold-only until Cursor-owned rules land. Cursor sessions
+must set `OACP_RUNTIME=cursor` or pass `--from` explicitly when sending messages.
 
 With artifact symlinks from a repo checkout:
 

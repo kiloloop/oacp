@@ -245,9 +245,31 @@ class TestAutonomyConfig(unittest.TestCase):
                     "git_push_or_deploy": "pause",
                 },
                 "allow_without_task_profile": ["brainstorm_request"],
+                "continuation_grants": {"enabled": False},
             }
         }
         self.assertEqual(validate_autonomy_config_data(data), [])
+
+    def test_rejects_malformed_continuation_grants(self) -> None:
+        data = {
+            "autonomy": {
+                "default_mode": "auto_review",
+                "auto_review_thresholds": {
+                    "max_estimated_minutes": 30,
+                    "max_expected_files_touched": 5,
+                    "destructive_ops": "pause",
+                    "external_side_effects": "pause",
+                    "auth_config_or_secrets": "pause",
+                    "dependency_changes": "pause",
+                    "public_visibility": "pause",
+                    "git_push_or_deploy": "pause",
+                },
+                "allow_without_task_profile": ["brainstorm_request"],
+                "continuation_grants": {"enabled": "yes"},
+            }
+        }
+        errors = validate_autonomy_config_data(data)
+        self.assertTrue(any("continuation_grants.enabled" in error for error in errors))
 
     def test_rejects_trusted_senders(self) -> None:
         data = {
@@ -653,6 +675,20 @@ class TestApplyFixes(unittest.TestCase):
             status_file = oacp_dir / "projects" / "test" / "agents" / "codex" / "status.yaml"
             data = yaml.safe_load(status_file.read_text())
             self.assertEqual(data["runtime"], "codex")
+
+    def test_create_status_sets_cursor_runtime(self):
+        """Cursor is a recognized runtime when doctor creates status.yaml."""
+        with tempfile.TemporaryDirectory() as tmp:
+            oacp_dir = self._make_workspace(tmp, ["cursor"])
+            cats = run_doctor(project="test", oacp_dir=oacp_dir)
+            fixed = apply_fixes(cats, oacp_dir, "test")
+
+            self.assertTrue(any("cursor/status.yaml" in f for f in fixed))
+
+            import yaml
+            status_file = oacp_dir / "projects" / "test" / "agents" / "cursor" / "status.yaml"
+            data = yaml.safe_load(status_file.read_text())
+            self.assertEqual(data["runtime"], "cursor")
 
     def test_create_status_unknown_runtime(self):
         """Agents not in VALID_RUNTIMES get runtime: unknown."""

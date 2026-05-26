@@ -9,7 +9,7 @@ version: "0.2.0"
 # ── Identity ─────────────────────────────────────────────────────────────
 
 name: ""                              # agent name (matches directory name)
-runtime: ""                           # claude | codex | gemini | human
+runtime: ""                           # claude | codex | cursor | gemini | human
 model: ""                             # model id (e.g., claude-opus-4-6)
 description: ""                       # one-line role summary
 
