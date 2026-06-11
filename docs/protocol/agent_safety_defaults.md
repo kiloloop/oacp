@@ -40,7 +40,7 @@ Regardless of autonomy mode, receivers must pause on actual requests for:
 
 - Destructive command tokens: `rm -rf`, `--force`, `--no-verify`, `--dangerously-skip-permissions`
 - External side effects: push, deploy, merge, publish, credential rotation, dependency install
-- Sensitive scope: auth, config, secrets, dependencies, public repos, pricing/commercial content, memory SSOT
+- Sensitive scope: auth, config, secrets, credentials, dependencies, public repos, pricing/commercial content, memory SSOT
 
 Profileless message types that are explicitly allowed for auto-review may log
 incidental side-effect verb mentions as notes instead of hard stops, but

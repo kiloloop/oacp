@@ -1,0 +1,8 @@
+case: invalid_message_pauses
+config: configs/auto_review_standard.yaml
+message: messages/invalid_message.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - message_invalid

@@ -1,0 +1,9 @@
+case: hard_stop_side_effect_before_sensitive_pauses
+config: configs/auto_review_standard.yaml
+message: messages/side_effect_before_sensitive.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - hard_stop_external_side_effect
+  matched_pattern: "merge"

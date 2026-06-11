@@ -97,8 +97,8 @@ If any required gate is missing or uncertain, the receiver pauses.
      as deploy/publish/merge are logged as notes instead of hard stops.
      Destructive tokens still pause.
    - Path-like tokens such as `packets/deploy/` are not deploy verbs.
-   - Pause when the body touches auth, config, secrets, dependencies, public
-     repos, pricing/commercial content, or memory SSOT.
+   - Pause when the body touches auth, config, secrets, credentials,
+     dependencies, public repos, pricing/commercial content, or memory SSOT.
    - Pause when file scope is ambiguous or broader than the declared profile.
 4. **Runtime/workspace**
    - Worktree is clean or the task can be isolated to a fresh branch.
@@ -114,11 +114,12 @@ Regardless of autonomy mode, receivers must pause on any of: destructive command
 tokens (`rm -rf`, `--force`, `--no-verify`,
 `--dangerously-skip-permissions`), external side effects
 (push/deploy/merge/publish/rotate/install), or modifications to auth, config,
-secrets, dependencies, public repos, pricing/commercial content, or memory SSOT,
-unless explicitly authorized by a separate safety-default exception.
+secrets, credentials, dependencies, public repos, pricing/commercial content, or
+memory SSOT, unless explicitly authorized by a separate safety-default
+exception.
 
-Continuation grants do not override destructive tokens, auth/secrets,
-dependency, public-scope, pricing/commercial, or memory-SSOT hard stops.
+Continuation grants do not override destructive tokens, auth/secrets/credentials,
+dependency, public-scope, pricing/commercial, config, or memory-SSOT hard stops.
 When explicitly enabled, a valid continuation grant may cover declared external
 side effects only for the scoped PR, GitHub comment, or commit continuation
 fields that the grant marks true.
@@ -131,7 +132,7 @@ Every autonomy decision writes one YAML file:
 
 ```yaml
 schema_version: 1
-spec_version: "0.3.0"
+spec_version: "0.3.1"
 created_at_utc: "2026-05-12T13:23:25Z"
 receiver: codex
 sender: iris
@@ -176,6 +177,9 @@ result:
 
 `policy_path` and `policy_sha256` may be null when the pause is caused by
 missing or malformed config. `sender` is logged only for traceability.
+`spec_version: "0.3.1"` pins Gate 1 integrity enforcement: schema validation,
+expiry rejection, raw YAML SHA-256 recording, and same-receiver replay
+detection.
 
 ## State Transition Metadata
 

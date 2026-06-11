@@ -1,0 +1,8 @@
+case: expired_message_pauses
+config: configs/auto_review_standard.yaml
+message: messages/expired_message.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - message_expired

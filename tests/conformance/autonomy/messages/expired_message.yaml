@@ -1,0 +1,21 @@
+id: msg-20260512121200-iris-expired
+from: iris
+to: codex
+type: task_request
+priority: P2
+created_at_utc: "2026-05-12T12:12:00Z"
+expires_at: "2020-01-01T00:00:00Z"
+subject: "Expired task"
+body: |
+  ## Task
+  Update one documentation paragraph for clarity.
+
+  task_profile:
+    estimated_minutes: 20
+    risk_tier: P3
+    expected_files_touched: 1
+    destructive_ops: false
+    external_side_effects: false
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: false
