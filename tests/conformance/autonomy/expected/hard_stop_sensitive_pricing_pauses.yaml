@@ -1,0 +1,9 @@
+case: hard_stop_sensitive_pricing_pauses
+config: configs/auto_review_standard.yaml
+message: messages/sensitive_pricing.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - hard_stop_sensitive_scope
+  matched_pattern: "pricing"

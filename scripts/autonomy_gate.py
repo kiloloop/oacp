@@ -11,6 +11,8 @@ scope-envelope contract. The module is intentionally separate from
 from __future__ import annotations
 
 import argparse
+import datetime as dt
+import hashlib
 import json
 import re
 import sys
@@ -18,6 +20,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import yaml
+
+from validate_message import validate_message_dict
 
 
 VALID_MODES = {"always_pause", "auto_review"}
@@ -87,6 +91,18 @@ NON_DEMOTABLE_SIDE_EFFECT_PATTERNS = (
 SENSITIVE_SCOPE_PATTERNS = (
     ("auth", re.compile(r"(?<![\w/-])auth(?![\w/-])", re.IGNORECASE)),
     ("secrets", re.compile(r"(?<![\w/-])secrets?(?![\w/-])", re.IGNORECASE)),
+    ("credentials", re.compile(r"(?<![\w/-])credentials?(?![\w/-])", re.IGNORECASE)),
+    ("pricing", re.compile(r"(?<![\w/-])pricing(?![\w/-])", re.IGNORECASE)),
+    ("commercial", re.compile(r"(?<![\w/-])commercial(?![\w/-])", re.IGNORECASE)),
+    (
+        "config",
+        re.compile(
+            r"\bconfig(?:uration)?\s+(?:file|files|setting|settings|template|templates|yaml|yml)\b"
+            r"|\b(?:project|workspace|runtime|agent)\s+config(?:uration)?\b"
+            r"|\bconfig\.ya?ml\b",
+            re.IGNORECASE,
+        ),
+    ),
     (
         "public repo",
         re.compile(r"\bpublic\s+repositor(?:y|ies)|\bpublic\s+repo\b", re.IGNORECASE),
@@ -246,6 +262,57 @@ def first_match(
         if pattern.search(body):
             return label
     return None
+
+
+def message_sha256(
+    message: Dict[str, Any],
+    message_path: Optional[Path] = None,
+) -> str:
+    """Return the raw YAML hash when a path is available, otherwise a stable fallback."""
+    if message_path is not None:
+        return hashlib.sha256(message_path.read_bytes()).hexdigest()
+    serialized = yaml.safe_dump(message, sort_keys=True, allow_unicode=False).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def message_expired(
+    message: Dict[str, Any],
+    now_utc: Optional[dt.datetime] = None,
+) -> bool:
+    expires_at = str(message.get("expires_at") or "").strip()
+    if not expires_at:
+        return False
+    now = now_utc or dt.datetime.now(dt.timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=dt.timezone.utc)
+    # validate_message_dict enforces Z-only format; ValueError here is defensive.
+    expires = dt.datetime.strptime(expires_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=dt.timezone.utc
+    )
+    return now >= expires
+
+
+def prior_auto_accept_exists(
+    message_id: str,
+    receiver: str,
+    audit_dir: Optional[Path],
+) -> bool:
+    if not message_id or audit_dir is None or not audit_dir.is_dir():
+        return False
+    for audit_path in audit_dir.glob("*.yaml"):
+        try:
+            audit = yaml.safe_load(audit_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            continue
+        if not isinstance(audit, dict):
+            continue
+        if audit.get("message_id") != message_id:
+            continue
+        if audit.get("receiver") != receiver:
+            continue
+        if audit.get("decision") == "auto_accepted":
+            return True
+    return False
 
 
 def side_effect_notes_for_allowed_type(body: str) -> List[Dict[str, str]]:
@@ -449,8 +516,13 @@ def evaluate_autonomy(
     message: Dict[str, Any],
     config: Dict[str, Any],
     actuals: Optional[Dict[str, Any]] = None,
+    message_path: Optional[Path] = None,
+    audit_dir: Optional[Path] = None,
+    receiver: str = "codex",
+    now_utc: Optional[dt.datetime] = None,
 ) -> Dict[str, Any]:
     """Evaluate a message/config pair and return a canonical decision dict."""
+    msg_hash = message_sha256(message, message_path)
     try:
         mode, policy = receiver_policy(config)
     except AutonomyConfigError:
@@ -459,6 +531,7 @@ def evaluate_autonomy(
             "decision": "paused",
             "mode": "always_pause",
             "reason_codes": ["config_malformed"],
+            "message_sha256": msg_hash,
             "scope_envelope": None,
             "logged_notes": [],
             "continuation_grant": {"present": False, "enabled": False},
@@ -471,10 +544,52 @@ def evaluate_autonomy(
             "decision": "paused",
             "mode": mode,
             "reason_codes": ["mode_always_pause"],
+            "message_sha256": msg_hash,
             "scope_envelope": None,
             "logged_notes": [],
             "continuation_grant": {"present": False, "enabled": False},
             "result": _base_result("paused", "always_pause", checkpoint),
+        }
+
+    message_errors = validate_message_dict(message)
+    if message_errors:
+        checkpoint = evaluate_threshold_checkpoint(None, {}, actuals)
+        return {
+            "decision": "paused",
+            "mode": mode,
+            "reason_codes": ["message_invalid"],
+            "message_sha256": msg_hash,
+            "message_validation_errors": message_errors,
+            "scope_envelope": None,
+            "logged_notes": [],
+            "continuation_grant": {"present": False, "enabled": False},
+            "result": _base_result("paused", "message_invalid", checkpoint),
+        }
+
+    if message_expired(message, now_utc):
+        checkpoint = evaluate_threshold_checkpoint(None, {}, actuals)
+        return {
+            "decision": "paused",
+            "mode": mode,
+            "reason_codes": ["message_expired"],
+            "message_sha256": msg_hash,
+            "scope_envelope": None,
+            "logged_notes": [],
+            "continuation_grant": {"present": False, "enabled": False},
+            "result": _base_result("paused", "message_expired", checkpoint),
+        }
+
+    if prior_auto_accept_exists(str(message.get("id") or ""), receiver, audit_dir):
+        checkpoint = evaluate_threshold_checkpoint(None, {}, actuals)
+        return {
+            "decision": "paused",
+            "mode": mode,
+            "reason_codes": ["message_replayed"],
+            "message_sha256": msg_hash,
+            "scope_envelope": None,
+            "logged_notes": [],
+            "continuation_grant": {"present": False, "enabled": False},
+            "result": _base_result("paused", "message_replayed", checkpoint),
         }
 
     body = str(message.get("body") or "")
@@ -482,10 +597,14 @@ def evaluate_autonomy(
     allow_without_profile = msg_type in policy["allow_without_task_profile"]
     logged_notes: List[Dict[str, str]] = []
 
+    def with_message_hash(decision: Dict[str, Any]) -> Dict[str, Any]:
+        decision["message_sha256"] = msg_hash
+        return decision
+
     profile, profile_error = extract_task_profile(body)
     if profile_error:
         checkpoint = evaluate_threshold_checkpoint(None, {}, actuals)
-        return {
+        return with_message_hash({
             "decision": "paused",
             "mode": mode,
             "reason_codes": [profile_error],
@@ -493,12 +612,12 @@ def evaluate_autonomy(
             "logged_notes": logged_notes,
             "continuation_grant": {"present": False, "enabled": False},
             "result": _base_result("paused", profile_error, checkpoint),
-        }
+        })
 
     if profile is None and not allow_without_profile:
         reason = "risk_obvious_no_profile" if obvious_no_profile_risk(body) else "task_profile_missing"
         checkpoint = evaluate_threshold_checkpoint(None, {}, actuals)
-        return {
+        return with_message_hash({
             "decision": "paused",
             "mode": mode,
             "reason_codes": [reason],
@@ -506,7 +625,7 @@ def evaluate_autonomy(
             "logged_notes": logged_notes,
             "continuation_grant": {"present": False, "enabled": False},
             "result": _base_result("paused", reason, checkpoint),
-        }
+        })
 
     envelope: Optional[Dict[str, Any]] = None
     profile_required_reason = "task_profile_present"
@@ -518,7 +637,7 @@ def evaluate_autonomy(
             envelope = normalize_scope_envelope(profile)
         except TaskProfileError:
             checkpoint = evaluate_threshold_checkpoint(None, {}, actuals)
-            return {
+            return with_message_hash({
                 "decision": "paused",
                 "mode": mode,
                 "reason_codes": ["task_profile_unparsable"],
@@ -526,12 +645,12 @@ def evaluate_autonomy(
                 "logged_notes": logged_notes,
                 "continuation_grant": {"present": False, "enabled": False},
                 "result": _base_result("paused", "task_profile_unparsable", checkpoint),
-            }
+            })
 
     matched = first_match(DESTRUCTIVE_PATTERNS, body)
     if matched:
         checkpoint = evaluate_threshold_checkpoint(envelope, {}, actuals)
-        return {
+        return with_message_hash({
             "decision": "paused",
             "mode": mode,
             "reason_codes": ["hard_stop_destructive_command"],
@@ -540,35 +659,7 @@ def evaluate_autonomy(
             "logged_notes": logged_notes,
             "continuation_grant": {"present": False, "enabled": False},
             "result": _base_result("paused", "hard_stop", checkpoint),
-        }
-
-    matched = first_match(SENSITIVE_SCOPE_PATTERNS, body)
-    if matched:
-        checkpoint = evaluate_threshold_checkpoint(envelope, {}, actuals)
-        return {
-            "decision": "paused",
-            "mode": mode,
-            "reason_codes": ["hard_stop_sensitive_scope"],
-            "matched_pattern": matched,
-            "scope_envelope": envelope,
-            "logged_notes": logged_notes,
-            "continuation_grant": {"present": False, "enabled": False},
-            "result": _base_result("paused", "hard_stop", checkpoint),
-        }
-
-    matched = first_match(AMBIGUOUS_SCOPE_PATTERNS, body)
-    if matched:
-        checkpoint = evaluate_threshold_checkpoint(envelope, {}, actuals)
-        return {
-            "decision": "paused",
-            "mode": mode,
-            "reason_codes": ["file_scope_ambiguous"],
-            "matched_pattern": matched,
-            "scope_envelope": envelope,
-            "logged_notes": logged_notes,
-            "continuation_grant": {"present": False, "enabled": False},
-            "result": _base_result("paused", "ambiguous_scope", checkpoint),
-        }
+        })
 
     side_effect_patterns = NON_DEMOTABLE_SIDE_EFFECT_PATTERNS
     if not allow_without_profile or profile is not None:
@@ -576,7 +667,7 @@ def evaluate_autonomy(
     matched = first_match(side_effect_patterns, body)
     if matched:
         checkpoint = evaluate_threshold_checkpoint(envelope, {}, actuals)
-        return {
+        return with_message_hash({
             "decision": "paused",
             "mode": mode,
             "reason_codes": ["hard_stop_external_side_effect"],
@@ -585,7 +676,35 @@ def evaluate_autonomy(
             "logged_notes": logged_notes,
             "continuation_grant": {"present": False, "enabled": False},
             "result": _base_result("paused", "hard_stop", checkpoint),
-        }
+        })
+
+    matched = first_match(SENSITIVE_SCOPE_PATTERNS, body)
+    if matched:
+        checkpoint = evaluate_threshold_checkpoint(envelope, {}, actuals)
+        return with_message_hash({
+            "decision": "paused",
+            "mode": mode,
+            "reason_codes": ["hard_stop_sensitive_scope"],
+            "matched_pattern": matched,
+            "scope_envelope": envelope,
+            "logged_notes": logged_notes,
+            "continuation_grant": {"present": False, "enabled": False},
+            "result": _base_result("paused", "hard_stop", checkpoint),
+        })
+
+    matched = first_match(AMBIGUOUS_SCOPE_PATTERNS, body)
+    if matched:
+        checkpoint = evaluate_threshold_checkpoint(envelope, {}, actuals)
+        return with_message_hash({
+            "decision": "paused",
+            "mode": mode,
+            "reason_codes": ["file_scope_ambiguous"],
+            "matched_pattern": matched,
+            "scope_envelope": envelope,
+            "logged_notes": logged_notes,
+            "continuation_grant": {"present": False, "enabled": False},
+            "result": _base_result("paused", "ambiguous_scope", checkpoint),
+        })
 
     grant_result: Dict[str, Any] = {"present": False, "enabled": False}
     if envelope is not None:
@@ -605,7 +724,7 @@ def evaluate_autonomy(
             hard_profile_reasons.append("public_visibility_pause")
         if hard_profile_reasons:
             checkpoint = evaluate_threshold_checkpoint(envelope, grant_result, actuals)
-            return {
+            return with_message_hash({
                 "decision": "paused",
                 "mode": mode,
                 "reason_codes": hard_profile_reasons,
@@ -613,7 +732,7 @@ def evaluate_autonomy(
                 "logged_notes": logged_notes,
                 "continuation_grant": grant_result,
                 "result": _base_result("paused", "hard_stop", checkpoint),
-            }
+            })
 
         reasons = _threshold_reasons(envelope, policy["thresholds"])
         side_effect_reasons = _side_effect_reasons(envelope, grant_result)
@@ -622,7 +741,7 @@ def evaluate_autonomy(
         reasons.extend(side_effect_reasons)
         if reasons:
             checkpoint = evaluate_threshold_checkpoint(envelope, grant_result, actuals)
-            return {
+            return with_message_hash({
                 "decision": "paused",
                 "mode": mode,
                 "reason_codes": reasons,
@@ -630,11 +749,11 @@ def evaluate_autonomy(
                 "logged_notes": logged_notes,
                 "continuation_grant": grant_result,
                 "result": _base_result("paused", "auto_review_paused", checkpoint),
-            }
+            })
 
     checkpoint = evaluate_threshold_checkpoint(envelope, grant_result, actuals)
     if checkpoint["evaluated"] and checkpoint["breached"]:
-        return {
+        return with_message_hash({
             "decision": "paused",
             "mode": mode,
             "reason_codes": ["threshold_checkpoint_breached"],
@@ -642,7 +761,7 @@ def evaluate_autonomy(
             "logged_notes": logged_notes,
             "continuation_grant": grant_result,
             "result": _base_result("paused", "threshold_checkpoint_breached", checkpoint),
-        }
+        })
 
     reason_codes = [
         "message_valid",
@@ -658,7 +777,7 @@ def evaluate_autonomy(
     if grant_result.get("decision") == "accepted":
         reason_codes.append("continuation_grant_accepted")
 
-    return {
+    return with_message_hash({
         "decision": "auto_accepted",
         "mode": mode,
         "reason_codes": reason_codes,
@@ -666,7 +785,7 @@ def evaluate_autonomy(
         "logged_notes": logged_notes,
         "continuation_grant": grant_result,
         "result": _base_result("done", "auto_accepted", checkpoint),
-    }
+    })
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -674,13 +793,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--message", required=True, type=Path)
     parser.add_argument("--actuals", type=Path)
+    parser.add_argument("--audit-dir", type=Path)
+    parser.add_argument("--receiver", default="codex")
     args = parser.parse_args(argv)
 
     try:
         config = load_yaml_file(args.config)
         message = load_yaml_file(args.message)
         actuals = load_yaml_file(args.actuals) if args.actuals else None
-        print(json.dumps(evaluate_autonomy(message, config, actuals), indent=2))
+        print(json.dumps(
+            evaluate_autonomy(
+                message,
+                config,
+                actuals,
+                message_path=args.message,
+                audit_dir=args.audit_dir,
+                receiver=args.receiver,
+            ),
+            indent=2,
+        ))
         return 0
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

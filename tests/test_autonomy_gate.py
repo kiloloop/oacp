@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from pathlib import Path
 from typing import Any, Dict
@@ -81,3 +82,96 @@ def test_autonomy_gate_output_uses_canonical_final_states() -> None:
 
         decision = evaluate_autonomy(message, config, actuals=actuals)
         assert decision["result"]["final_state"] in allowed
+
+
+def test_autonomy_gate_records_raw_message_hash_when_path_provided() -> None:
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml")
+    message_path = FIXTURE_ROOT / "messages" / "clean_task.yaml"
+    message = _load_yaml(message_path)
+
+    decision = evaluate_autonomy(message, config, message_path=message_path)
+
+    expected_hash = hashlib.sha256(message_path.read_bytes()).hexdigest()
+    assert decision["message_sha256"] == expected_hash
+    assert "message_hash_recorded" in decision["reason_codes"]
+
+
+def test_autonomy_gate_records_hash_for_always_pause_mode() -> None:
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "always_pause.yaml")
+    message_path = FIXTURE_ROOT / "messages" / "clean_task.yaml"
+    message = _load_yaml(message_path)
+
+    decision = evaluate_autonomy(message, config, message_path=message_path)
+
+    expected_hash = hashlib.sha256(message_path.read_bytes()).hexdigest()
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["mode_always_pause"]
+    assert decision["message_sha256"] == expected_hash
+
+
+def test_autonomy_gate_records_hash_for_malformed_config() -> None:
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "malformed_config.yaml")
+    message_path = FIXTURE_ROOT / "messages" / "clean_task.yaml"
+    message = _load_yaml(message_path)
+
+    decision = evaluate_autonomy(message, config, message_path=message_path)
+
+    expected_hash = hashlib.sha256(message_path.read_bytes()).hexdigest()
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["config_malformed"]
+    assert decision["message_sha256"] == expected_hash
+
+
+def test_autonomy_gate_pauses_same_receiver_replay(tmp_path: Path) -> None:
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml")
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "clean_task.yaml")
+    audit_path = tmp_path / "20260512T120000Z_replay.yaml"
+    audit_path.write_text(
+        yaml.safe_dump({
+            "receiver": "codex",
+            "message_id": message["id"],
+            "decision": "auto_accepted",
+        }),
+        encoding="utf-8",
+    )
+
+    decision = evaluate_autonomy(message, config, audit_dir=tmp_path, receiver="codex")
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["message_replayed"]
+
+
+def test_autonomy_gate_allows_same_receiver_paused_audit(tmp_path: Path) -> None:
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml")
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "clean_task.yaml")
+    audit_path = tmp_path / "20260512T120000Z_paused.yaml"
+    audit_path.write_text(
+        yaml.safe_dump({
+            "receiver": "codex",
+            "message_id": message["id"],
+            "decision": "paused",
+        }),
+        encoding="utf-8",
+    )
+
+    decision = evaluate_autonomy(message, config, audit_dir=tmp_path, receiver="codex")
+
+    assert decision["decision"] == "auto_accepted"
+
+
+def test_autonomy_gate_allows_different_receiver_audit(tmp_path: Path) -> None:
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml")
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "clean_task.yaml")
+    audit_path = tmp_path / "20260512T120000Z_other_receiver.yaml"
+    audit_path.write_text(
+        yaml.safe_dump({
+            "receiver": "claude",
+            "message_id": message["id"],
+            "decision": "auto_accepted",
+        }),
+        encoding="utf-8",
+    )
+
+    decision = evaluate_autonomy(message, config, audit_dir=tmp_path, receiver="codex")
+
+    assert decision["decision"] == "auto_accepted"

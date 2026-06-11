@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4] - 2026-06-11
+
+### Fixed
+
+- Receiver autonomy Gate 1 now performs real message schema validation, expiry
+  comparison, SHA-256 hash recording, and same-receiver replay detection before
+  auto-accepting work.
+- Receiver autonomy Gate 3 now pauses on credentials, pricing, commercial
+  content, and anchored config-sensitive scope, and evaluates external
+  side-effect hard stops before sensitive-scope hard stops to match the
+  protocol.
+
 ## [0.3.3] - 2026-06-11
 
 ### Added
@@ -180,6 +192,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Checkout step in github-release workflow job (#19)
 - Pre-release audit fixes: SHA-pinned actions, dangling doc refs (#15, #16)
 
+[0.3.4]: https://github.com/kiloloop/oacp/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/kiloloop/oacp/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/kiloloop/oacp/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/kiloloop/oacp/compare/v0.3.0...v0.3.1

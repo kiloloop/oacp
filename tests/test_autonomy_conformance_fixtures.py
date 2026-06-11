@@ -54,6 +54,13 @@ def test_matched_pattern_fixture_coverage() -> None:
         "--dangerously-skip-permissions",
         "deploy",
         "auth",
+        "commercial",
+        "config",
+        "credentials",
+        "memory SSOT",
+        "pricing",
+        "public repo",
+        "secrets",
         "all files",
     }
     found = set()
