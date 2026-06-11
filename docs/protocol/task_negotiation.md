@@ -153,7 +153,10 @@ Agents that lack headless mode (e.g., Gemini in some configurations):
 
 ### Codex
 
-- Codex operates in `--full-auto` headless mode by default.
+- Codex can run interactively, from the desktop app or CLI, or through
+  explicit automation flows. Do not assume legacy `--full-auto` behavior;
+  set the intended approval policy, sandbox, and permission profile for the
+  receiving environment.
 - Codex can both propose and receive proposals.
 - When Codex receives a proposal, it processes the inbox at session start per the inbox/outbox polling convention.
 

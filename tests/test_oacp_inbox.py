@@ -7,10 +7,12 @@ from __future__ import annotations
 import datetime as dt
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
@@ -155,6 +157,41 @@ class TestMainCli(unittest.TestCase):
         payload = json.loads(stdout)
         self.assertEqual(payload["project"], "demo")
         self.assertEqual(payload["agents"][0]["messages"][0]["type"], "task_request")
+
+    def test_cli_oacp_dir_expands_tilde(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            cwd = Path(tmpdir) / "cwd"
+            root = home / "oacp-tilde-test"
+            home.mkdir()
+            cwd.mkdir()
+            _write_message(
+                root,
+                "demo",
+                "claude",
+                "20260319120000_codex_task_request.yaml",
+                sender="codex",
+                msg_type="task_request",
+                priority="P1",
+                subject="Implement feature",
+                created_at_utc="2026-03-19T12:00:00Z",
+            )
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(cwd)
+                with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
+                    code, stdout, stderr = self._run_main(
+                        ["demo", "--agent", "claude", "--oacp-dir", "~/oacp-tilde-test", "--json"]
+                    )
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        payload = json.loads(stdout)
+        self.assertEqual(payload["agents"][0]["message_count"], 1)
+        self.assertTrue(payload["agents"][0]["inbox_path"].startswith(str(home)))
+        self.assertFalse((cwd / "~").exists())
 
     def test_missing_project_returns_error(self) -> None:
         code, stdout, stderr = self._run_main(["missing", "--all"])

@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-06-11
+
+### Added
+
+- `oacp watch --state-id <id>` for per-subscriber cursor files, allowing
+  concurrent watchers of the same agent inbox to receive the same new-message
+  events without sharing a cursor.
+
+### Changed
+
+- Docs: refreshed the runtime capability matrix and prompt-caching guidance
+  for current runtime releases.
+
+### Fixed
+
+- `oacp send --oacp-dir` and `oacp inbox --oacp-dir` now expand `~` through the
+  shared OACP home resolver instead of treating it as a literal path component.
+- Inbox and outbox delivery writes now use same-directory temp files plus
+  atomic replace so readers do not observe partial `.yaml` messages.
+- Memory archive tests now isolate git config while preserving test identities,
+  so local commit-signing settings do not break the suite.
+
 ## [0.3.2] - 2026-05-26
 
 ### Added
@@ -158,6 +180,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Checkout step in github-release workflow job (#19)
 - Pre-release audit fixes: SHA-pinned actions, dangling doc refs (#15, #16)
 
+[0.3.3]: https://github.com/kiloloop/oacp/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/kiloloop/oacp/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/kiloloop/oacp/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/kiloloop/oacp/compare/v0.2.3...v0.3.0
