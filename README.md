@@ -244,7 +244,7 @@ uv tool install .
 
 **`oacp send`**: `--in-reply-to`, `--expires`, `--body-file`, `--channel`, `--dry-run`, `--json`, `--quiet`
 
-**`oacp watch`**: `--agent`, repeatable `--project`, `--all-projects`, `--json`, `--since` (default `now`), `--show-archived`
+**`oacp watch`**: `--agent`, repeatable `--project`, `--all-projects`, `--json`, `--since` (default `now`), `--state-id <id>` for per-subscriber cursors, `--show-archived`
 
 **`oacp doctor`**: `--fix` (auto-fix safe issues), `--memory`, `--json`, `-o/--output`
 

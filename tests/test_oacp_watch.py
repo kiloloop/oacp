@@ -144,6 +144,69 @@ class TestOacpWatch(unittest.TestCase):
         self.assertEqual(stdout, "")
         self.assertEqual(stderr, "")
 
+    def test_state_id_uses_independent_cursor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _write_message(
+                root,
+                "demo",
+                "codex",
+                "20260411050000_iris_task_request_abcd.yaml",
+                sender="iris",
+                msg_type="task_request",
+                priority="P2",
+                subject="First",
+            )
+            for state_id in ("session-a", "session-b"):
+                code, stdout, stderr = self._run(
+                    [
+                        "--agent",
+                        "codex",
+                        "--project",
+                        "demo",
+                        "--oacp-dir",
+                        tmpdir,
+                        "--state-id",
+                        state_id,
+                        "--since",
+                        "epoch",
+                        "--json",
+                    ]
+                )
+                self.assertEqual(code, 0)
+                self.assertEqual(stderr, "")
+                events = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0]["subject"], "First")
+
+            state_dir = root / "projects" / "demo" / "state" / "watch"
+            self.assertTrue((state_dir / "codex.session-a.json").is_file())
+            self.assertTrue((state_dir / "codex.session-b.json").is_file())
+            self.assertFalse((state_dir / "codex.json").exists())
+
+    def test_default_state_file_remains_backward_compatible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _write_message(
+                root,
+                "demo",
+                "codex",
+                "20260411050000_iris_task_request_abcd.yaml",
+                sender="iris",
+                msg_type="task_request",
+                priority="P2",
+                subject="First",
+            )
+            code, stdout, stderr = self._run(
+                ["--agent", "codex", "--project", "demo", "--oacp-dir", tmpdir, "--json"]
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(stdout, "")
+            self.assertEqual(stderr, "")
+            self.assertTrue(
+                (root / "projects" / "demo" / "state" / "watch" / "codex.json").is_file()
+            )
+
     def test_new_message_after_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

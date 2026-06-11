@@ -5,8 +5,8 @@ How to maximize prompt cache hits across Claude, Codex, and Gemini to reduce cos
 ## Why It Matters
 
 Prompt caching avoids reprocessing static context (system prompts, CLAUDE.md, project facts) on every turn. In practice:
-- **Cache read**: 10x cheaper than uncached input ($1.50/MTok vs $15/MTok for Opus)
-- **Cache write**: 1.25x input price (one-time cost, amortized over subsequent reads)
+- **Cache read**: 10x cheaper than uncached input ($0.50/MTok vs $5.00/MTok for Opus 4.8)
+- **Cache write**: 1.25x input price for the default 5-minute TTL, 2x for the 1-hour TTL (one-time cost, amortized over subsequent reads)
 - **Observed savings**: 83-95% cost reduction on cached input in multi-turn agent sessions
 
 ## Claude
@@ -127,13 +127,14 @@ Gemini supports implicit context caching for large prompts. The API automaticall
 
 ## Cost Comparison
 
-Approximate pricing as of early 2026 (per million tokens). Check each provider's current pricing page for up-to-date rates:
+Approximate pricing as of June 2026 (per million tokens). Cache read is 0.1x input; cache write is shown at the default 5-minute TTL (1.25x input) — the 1-hour TTL costs 2x input. Check each provider's current pricing page for up-to-date rates:
 
 | Runtime | Input | Cached Read | Cache Write | Output |
 |---------|------:|------------:|------------:|-------:|
-| Claude Opus | $15.00 | $1.50 | $18.75 | $75.00 |
-| Claude Sonnet | $3.00 | $0.30 | $3.75 | $15.00 |
-| Claude Haiku | $0.80 | $0.08 | $1.00 | $4.00 |
+| Claude Fable 5 | $10.00 | $1.00 | $12.50 | $50.00 |
+| Claude Opus (4.6/4.7/4.8) | $5.00 | $0.50 | $6.25 | $25.00 |
+| Claude Sonnet 4.6 | $3.00 | $0.30 | $3.75 | $15.00 |
+| Claude Haiku 4.5 | $1.00 | $0.10 | $1.25 | $5.00 |
 | Codex | varies | N/A | N/A | varies |
 | Gemini Pro | $1.25 | $0.31 | — | $10.00 |
 
@@ -146,3 +147,4 @@ Approximate pricing as of early 2026 (per million tokens). Check each provider's
    - Injecting timestamps or random IDs into system prompts
    - Reordering tool definitions between turns
    - Changing the user message prefix frequently
+5. **Mind the minimum cacheable prefix** — prefixes below the model minimum silently don't cache (no error; `cache_creation_input_tokens` stays 0). The minimum is 2,048 tokens on Fable 5 and Sonnet 4.6, and 4,096 tokens on Opus 4.8/4.7/4.6 and Haiku 4.5.

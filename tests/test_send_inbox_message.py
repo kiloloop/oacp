@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from send_inbox_message import (  # noqa: E402
     FIELD_ORDER,
+    _atomic_write_text,
     build_message_dict,
     generate_filename,
     generate_message_id,
@@ -28,6 +29,7 @@ from send_inbox_message import (  # noqa: E402
     render_yaml,
     resolve_body,
     send_message,
+    write_broadcast_files,
     write_message_files,
     main,
 )
@@ -380,6 +382,78 @@ class TestWriteMessageFiles(unittest.TestCase):
             )
             self.assertIn("issue24", inbox_path.name)
 
+    def test_writes_via_non_yaml_temp_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir)
+            yaml_content = "id: test\nbody: complete\n"
+            test_case = self
+            original_write_text = Path.write_text
+            write_paths = []
+
+            def spy_write_text(path, content, *args, **kwargs):
+                if content == yaml_content:
+                    write_paths.append(path)
+                    test_case.assertNotEqual(path.suffix, ".yaml")
+                    test_case.assertIn(".tmp-", path.name)
+                return original_write_text(path, content, *args, **kwargs)
+
+            with mock.patch.object(Path, "write_text", spy_write_text):
+                inbox_path, outbox_path = write_message_files(
+                    project_dir=project_dir,
+                    sender="claude",
+                    recipient="codex",
+                    msg_type="task_request",
+                    yaml_content=yaml_content,
+                )
+
+            self.assertEqual(len(write_paths), 2)
+            self.assertTrue(inbox_path.is_file())
+            self.assertTrue(outbox_path.is_file())
+            self.assertFalse(list(project_dir.rglob("*.tmp-*")))
+
+    def test_broadcast_writes_via_non_yaml_temp_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir)
+            yaml_content = "id: test\nbody: complete\n"
+            test_case = self
+            original_write_text = Path.write_text
+            write_paths = []
+
+            def spy_write_text(path, content, *args, **kwargs):
+                if content == yaml_content:
+                    write_paths.append(path)
+                    test_case.assertNotEqual(path.suffix, ".yaml")
+                    test_case.assertIn(".tmp-", path.name)
+                return original_write_text(path, content, *args, **kwargs)
+
+            with mock.patch.object(Path, "write_text", spy_write_text):
+                inbox_paths, outbox_path = write_broadcast_files(
+                    project_dir=project_dir,
+                    sender="claude",
+                    recipients=["codex", "gemini"],
+                    msg_type="notification",
+                    yaml_content=yaml_content,
+                )
+
+            self.assertEqual(len(write_paths), 3)
+            for inbox_path in inbox_paths:
+                self.assertTrue(inbox_path.is_file())
+            self.assertTrue(outbox_path.is_file())
+            self.assertFalse(list(project_dir.rglob("*.tmp-*")))
+
+    def test_atomic_write_cleanup_does_not_mask_replace_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "message.yaml"
+            with (
+                mock.patch(
+                    "send_inbox_message.os.replace",
+                    side_effect=RuntimeError("replace failed"),
+                ),
+                mock.patch.object(Path, "unlink", side_effect=OSError("cleanup failed")),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "replace failed"):
+                    _atomic_write_text(target, "content\n")
+
 
 class TestSendMessage(unittest.TestCase):
     def test_success(self):
@@ -401,6 +475,32 @@ class TestSendMessage(unittest.TestCase):
             # Verify files exist
             self.assertTrue(Path(report["inbox_path"]).is_file())
             self.assertTrue(Path(report["outbox_path"]).is_file())
+
+    def test_programmatic_oacp_dir_expands_tilde(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            cwd = Path(tmpdir) / "cwd"
+            home.mkdir()
+            cwd.mkdir()
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(cwd)
+                with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
+                    report = send_message(
+                        project="test-project",
+                        sender="claude",
+                        recipient="codex",
+                        msg_type="notification",
+                        subject="Tilde",
+                        body="Body",
+                        oacp_dir=Path("~/oacp-tilde-test"),
+                    )
+            finally:
+                os.chdir(old_cwd)
+
+            self.assertTrue(str(report["inbox_path"]).startswith(str(home)))
+            self.assertTrue(Path(report["inbox_path"]).is_file())
+            self.assertFalse((cwd / "~").exists())
 
     def test_dry_run(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -695,6 +795,35 @@ class TestMainCli(unittest.TestCase):
             self.assertIn("message_id", data)
             self.assertEqual(data["from"], "claude")
             self.assertEqual(data["to"], "codex")
+
+    def test_cli_oacp_dir_expands_tilde(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "home"
+            cwd = Path(tmpdir) / "cwd"
+            home.mkdir()
+            cwd.mkdir()
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(cwd)
+                with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
+                    code, stdout, stderr = self._run_main([
+                        "test-project",
+                        "--from", "claude", "--to", "codex",
+                        "--type", "notification",
+                        "--subject", "Tilde test",
+                        "--body", "Body",
+                        "--oacp-dir", "~/oacp-tilde-test",
+                        "--json",
+                    ])
+            finally:
+                os.chdir(old_cwd)
+
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr, "")
+            data = json.loads(stdout)
+            self.assertTrue(data["inbox_path"].startswith(str(home)))
+            self.assertTrue(Path(data["inbox_path"]).is_file())
+            self.assertFalse((cwd / "~").exists())
 
     def test_quiet_mode(self):
         with tempfile.TemporaryDirectory() as tmpdir:

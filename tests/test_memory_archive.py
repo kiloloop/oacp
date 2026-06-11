@@ -51,6 +51,8 @@ class TestMemoryArchiveScripts(unittest.TestCase):
                 "GIT_AUTHOR_EMAIL": "oacp-test@example.com",
                 "GIT_COMMITTER_NAME": "OACP Test",
                 "GIT_COMMITTER_EMAIL": "oacp-test@example.com",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_SYSTEM": os.devnull,
                 "OACP_AGENT": "codex",
             },
         ):

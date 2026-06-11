@@ -21,7 +21,7 @@ import datetime as dt
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 try:
     import yaml
@@ -33,6 +33,10 @@ def _resolve_oacp_home(explicit: Optional[str] = None) -> Path:
     from _oacp_env import resolve_oacp_home
 
     return resolve_oacp_home(explicit)
+
+
+def _coerce_oacp_home(explicit: Optional[Union[str, Path]]) -> Path:
+    return _resolve_oacp_home(str(explicit)) if explicit is not None else _resolve_oacp_home()
 
 
 def _load_yaml_mapping(path: Path) -> Dict[str, Any]:
@@ -134,14 +138,14 @@ def list_inbox(
     *,
     agent: Optional[str] = None,
     list_all: bool = False,
-    oacp_dir: Optional[Path] = None,
+    oacp_dir: Optional[Union[str, Path]] = None,
     now: Optional[dt.datetime] = None,
 ) -> Dict[str, Any]:
     """Return inbox metadata for one agent or all project agents."""
     if agent is None and not list_all:
         raise ValueError("either --agent or --all is required")
 
-    oacp_root = oacp_dir or _resolve_oacp_home()
+    oacp_root = _coerce_oacp_home(oacp_dir)
     project_dir = oacp_root / "projects" / project
     if not project_dir.is_dir():
         raise ValueError(f"project '{project}' not found under {oacp_root / 'projects'}")
@@ -228,7 +232,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.project,
             agent=args.agent,
             list_all=args.list_all,
-            oacp_dir=Path(args.oacp_dir) if args.oacp_dir else None,
+            oacp_dir=args.oacp_dir if args.oacp_dir else None,
         )
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

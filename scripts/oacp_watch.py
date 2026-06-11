@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ except ImportError:  # pragma: no cover
 STATE_VERSION = 1
 
 _DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+_STATE_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
 def _parse_since(spec: str, *, now: float) -> float:
@@ -70,6 +72,7 @@ class WatchTarget:
     agent: str
     inbox_dir: Path
     state_file: Path
+    state_id: Optional[str] = None
 
 
 def _resolve_oacp_home(explicit: Optional[str] = None) -> Path:
@@ -183,12 +186,18 @@ def _dedupe_keep_order(values: Iterable[str]) -> List[str]:
     return result
 
 
+def _watch_state_file(project_dir: Path, agent: str, state_id: Optional[str]) -> Path:
+    state_name = f"{agent}.json" if state_id is None else f"{agent}.{state_id}.json"
+    return project_dir / "state" / "watch" / state_name
+
+
 def _resolve_targets(
     *,
     projects: Optional[List[str]],
     all_projects: bool,
     agent: str,
     oacp_root: Path,
+    state_id: Optional[str] = None,
 ) -> tuple[List[WatchTarget], List[Dict[str, Any]]]:
     errors: List[Dict[str, Any]] = []
     if all_projects:
@@ -243,13 +252,14 @@ def _resolve_targets(
                 )
             )
             continue
-        state_file = project_dir / "state" / "watch" / f"{agent}.json"
+        state_file = _watch_state_file(project_dir, agent, state_id)
         targets.append(
             WatchTarget(
                 project=project,
                 agent=agent,
                 inbox_dir=inbox_dir,
                 state_file=state_file,
+                state_id=state_id,
             )
         )
     return targets, errors
@@ -374,6 +384,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--oacp-dir", default=None, help="Override OACP home directory")
     parser.add_argument("--json", action="store_true", dest="json_output", help="Emit JSON Lines")
     parser.add_argument(
+        "--state-id",
+        default=None,
+        help=(
+            "Use a per-subscriber cursor file state/watch/<agent>.<state-id>.json. "
+            "Omit for the legacy shared state/watch/<agent>.json cursor."
+        ),
+    )
+    parser.add_argument(
         "--since",
         default="now",
         help=(
@@ -394,6 +412,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     args = parser.parse_args(list(argv) if argv is not None else None)
+    if args.state_id is not None and not _STATE_ID_RE.fullmatch(args.state_id):
+        parser.error("--state-id must match [A-Za-z0-9._-]{1,64}")
     try:
         since_epoch = _parse_since(args.since, now=time.time())
     except argparse.ArgumentTypeError as exc:
@@ -405,6 +425,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         all_projects=args.all_projects,
         agent=args.agent,
         oacp_root=oacp_root,
+        state_id=args.state_id,
     )
     had_errors = False
     if target_errors:
@@ -457,6 +478,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "agent": target.agent,
             "messages": current_messages,
         }
+        if target.state_id is not None:
+            payload["state_id"] = target.state_id
         try:
             _write_state(target.state_file, payload)
         except Exception as exc:

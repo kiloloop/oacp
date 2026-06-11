@@ -157,11 +157,14 @@ body: |
 
 To watch for new messages from a standing runtime or Monitor, use `oacp watch`.
 A single `oacp watch` run scans once and exits, so keep re-running it when you
-want a persistent worker:
+want a persistent worker. If more than one watcher follows the same agent
+inbox, give each watcher a stable `--state-id` so each subscriber has its own
+cursor:
 
 ```bash
+OACP_WATCH_STATE_ID="${OACP_WATCH_STATE_ID:-$(uuidgen 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())')}"
 while true; do
-  oacp watch --project my-first-project --agent codex || true
+  oacp watch --project my-first-project --agent codex --state-id "$OACP_WATCH_STATE_ID" || true
   sleep 120
 done
 ```

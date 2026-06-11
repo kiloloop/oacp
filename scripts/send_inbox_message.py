@@ -408,8 +408,8 @@ def write_message_files(
     inbox_path = inbox_dir / filename
     outbox_path = outbox_dir / filename
 
-    inbox_path.write_text(yaml_content, encoding="utf-8")
-    outbox_path.write_text(yaml_content, encoding="utf-8")
+    _atomic_write_text(inbox_path, yaml_content)
+    _atomic_write_text(outbox_path, yaml_content)
 
     return inbox_path, outbox_path
 
@@ -431,17 +431,32 @@ def write_broadcast_files(
     outbox_dir = project_dir / "agents" / sender / "outbox"
     outbox_dir.mkdir(parents=True, exist_ok=True)
     outbox_path = outbox_dir / filename
-    outbox_path.write_text(yaml_content, encoding="utf-8")
+    _atomic_write_text(outbox_path, yaml_content)
 
     inbox_paths: List[Path] = []
     for recipient in recipients:
         inbox_dir = project_dir / "agents" / recipient / "inbox"
         inbox_dir.mkdir(parents=True, exist_ok=True)
         inbox_path = inbox_dir / filename
-        inbox_path.write_text(yaml_content, encoding="utf-8")
+        _atomic_write_text(inbox_path, yaml_content)
         inbox_paths.append(inbox_path)
 
     return inbox_paths, outbox_path
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write content via a same-directory temp file, then atomically replace."""
+    temp_name = f".{path.name}.tmp-{os.getpid()}-{secrets.token_hex(3)}"
+    temp_path = path.with_name(temp_name)
+    try:
+        temp_path.write_text(content, encoding="utf-8")
+        os.replace(temp_path, path)
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
 
 
 def _parse_status_yaml(raw: str) -> Optional[str]:
@@ -521,7 +536,10 @@ def send_message(
     """
     if oacp_dir is None:
         from _oacp_env import resolve_oacp_home
+
         oacp_dir = resolve_oacp_home()
+    else:
+        oacp_dir = Path(oacp_dir).expanduser()
 
     # Parse recipient(s)
     recipients_list = [r.strip() for r in recipient.split(",") if r.strip()]
@@ -738,7 +756,12 @@ def main() -> int:
     parser.add_argument("--quiet", action="store_true", help="Suppress success output")
 
     args = parser.parse_args()
-    oacp_dir = Path(args.oacp_dir) if args.oacp_dir else None
+    if args.oacp_dir:
+        from _oacp_env import resolve_oacp_home
+
+        oacp_dir = resolve_oacp_home(args.oacp_dir)
+    else:
+        oacp_dir = None
 
     try:
         sender = infer_sender(args.project, args.sender, oacp_dir=oacp_dir)

@@ -79,10 +79,9 @@ Set me up as an async OACP worker for this repo.
    --project form checks this workspace's inbox, schema, and status.
 6. Start a Monitor that keeps oacp watch re-running for the claude
    agent on this project. A single oacp watch does one scan and exits,
-   so it has to run on a loop — while true; do oacp watch --project
-   <project> --agent claude || true; sleep 120; done — otherwise you
-   only pick up tasks that happened to be there at setup time. Then
-   tell me the exact oacp send command I use to dispatch a task to you.
+   so it has to run on a loop. Use a stable --state-id for that Monitor
+   so concurrent watchers each keep their own cursor. Then tell me the
+   exact oacp send command I use to dispatch a task to you.
 
 Protocol reference: https://github.com/kiloloop/oacp/blob/main/QUICKSTART.md
 ~~~
@@ -116,8 +115,9 @@ oacp doctor --project my-project
 Then, in a Claude Code session, arm the watcher in a Monitor. `oacp watch` does one scan and exits, so it has to run on a loop:
 
 ```
+OACP_WATCH_STATE_ID="${OACP_WATCH_STATE_ID:-$(uuidgen 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())')}"
 while true; do
-  oacp watch --project my-project --agent claude || true
+  oacp watch --project my-project --agent claude --state-id "$OACP_WATCH_STATE_ID" || true
   sleep 120
 done
 ```
