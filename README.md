@@ -94,6 +94,8 @@ $OACP_HOME/org-memory/                org-wide
 
 </details>
 
+Want to see these files populated? Browse [`examples/demo-workspace/`](examples/demo-workspace/) — what a fictional team's project remembers after a month of agent sessions (debt with origins, threads opened and closed, decisions with rationale), plus the org-memory layer mid-curation.
+
 ## Quick Start
 
 ```bash
