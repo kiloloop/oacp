@@ -1,0 +1,6 @@
+case: unparsable_profile_fails
+config: configs/auto_review_standard.yaml
+message: messages/unparsable_profile.yaml
+expected:
+  compiles: false
+  error: envelope_compile_error

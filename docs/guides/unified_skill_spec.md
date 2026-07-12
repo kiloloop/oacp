@@ -179,7 +179,7 @@ Once both runtimes can resolve a shared skill path (e.g., `shared/skills/<name>/
 
 ## Example: check-inbox (unified)
 
-See the current Claude and Codex implementations:
+See the current Claude and Codex implementations in the [oacp-skills](https://github.com/kiloloop/oacp-skills) repo:
 - `claude/skills/check-inbox/SKILL.md`
 - `codex/skills/check-inbox/SKILL.md`
 

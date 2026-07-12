@@ -79,7 +79,10 @@ Messages are YAML files. Filename convention: `<timestamp>_<from>_<type>.yaml`
 | `subject` | string | Subject line |
 | `body` | string | Message content (multi-line markdown) |
 
-**Optional fields:** `expires_at`, `channel`, `autonomy_hint`, `related_packet`, `related_pr`, `conversation_id`, `parent_message_id`, `context_keys`
+**Optional fields:** `expires_at`, `channel`, `autonomy_hint`, `related_packet`,
+`related_pr`, `conversation_id`, `parent_message_id`, `context_keys`, plus the
+review-loop telemetry fields `model`, `turns`, `input_tokens`, `output_tokens`,
+`wall_time_s`, and `est_cost_usd`
 
 `autonomy_hint` is an advisory sender hint, such as `auto_proceed`. Receivers
 remain authoritative: local autonomy config, message content, safety defaults,
@@ -88,6 +91,8 @@ interactive human confirmation.
 
 Receiver autonomy is defined by `agents/<receiver>/config.yaml` and the
 scope-envelope contract in [`docs/protocol/autonomy.md`](docs/protocol/autonomy.md).
+Sender-marked `oacp-guardrails` body fences and the 45-minute standard
+`auto_review` cap are defined there as well.
 
 ### Message Types
 

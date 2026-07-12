@@ -1,0 +1,6 @@
+case: malformed_config_fails
+config: configs/malformed.yaml
+message: messages/clean_pr_task.yaml
+expected:
+  compiles: false
+  error: envelope_compile_error

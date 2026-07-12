@@ -245,6 +245,7 @@ class TestAutonomyConfig(unittest.TestCase):
                     "git_push_or_deploy": "pause",
                 },
                 "allow_without_task_profile": ["brainstorm_request"],
+                "private_repo_allowlist": ["example-org/private-repo"],
                 "continuation_grants": {"enabled": False},
             }
         }
@@ -270,6 +271,57 @@ class TestAutonomyConfig(unittest.TestCase):
         }
         errors = validate_autonomy_config_data(data)
         self.assertTrue(any("continuation_grants.enabled" in error for error in errors))
+
+    def test_accepts_private_pr_artifact_policy(self) -> None:
+        data = {
+            "autonomy": {
+                "default_mode": "auto_review",
+                "auto_review_thresholds": {
+                    "max_estimated_minutes": 45,
+                    "max_expected_files_touched": 5,
+                    "destructive_ops": "pause",
+                    "external_side_effects": "allow_pr_artifacts",
+                    "auth_config_or_secrets": "pause",
+                    "dependency_changes": "pause",
+                    "public_visibility": "pause",
+                    "git_push_or_deploy": "pause",
+                },
+                "private_repo_allowlist": ["example-org/private-repo"],
+            }
+        }
+        self.assertEqual(validate_autonomy_config_data(data), [])
+
+    def test_rejects_pr_artifact_policy_on_other_thresholds(self) -> None:
+        data = {
+            "autonomy": {
+                "default_mode": "auto_review",
+                "auto_review_thresholds": {
+                    "max_estimated_minutes": 45,
+                    "max_expected_files_touched": 5,
+                    "destructive_ops": "allow_pr_artifacts",
+                    "external_side_effects": "allow_pr_artifacts",
+                    "auth_config_or_secrets": "pause",
+                    "dependency_changes": "pause",
+                    "public_visibility": "pause",
+                    "git_push_or_deploy": "pause",
+                },
+            }
+        }
+        errors = validate_autonomy_config_data(data)
+        self.assertTrue(any("destructive_ops" in error for error in errors))
+
+    def test_rejects_malformed_private_repo_allowlist(self) -> None:
+        data = {
+            "autonomy": {
+                "default_mode": "always_pause",
+                "private_repo_allowlist": ["missing-owner", 42],
+            }
+        }
+        errors = validate_autonomy_config_data(data)
+        self.assertEqual(
+            sum("private_repo_allowlist" in error for error in errors),
+            2,
+        )
 
     def test_rejects_trusted_senders(self) -> None:
         data = {
@@ -635,6 +687,38 @@ class TestCheckMemorySync(unittest.TestCase):
 
             self.assertEqual(results["tracked-allowlist"].severity, Severity.warn)
             self.assertNotIn("agents-tracked", results)
+
+    def test_memory_sync_adapts_legacy_runner_for_network_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write(root / ".oacp-memory-repo", "marker\n")
+            _write(root / ".gitignore", CANONICAL_MEMORY_GITIGNORE)
+            calls = []
+
+            def runner(command: Sequence[str]) -> Tuple[int, str]:
+                calls.append(list(command))
+                args = list(command[1:])
+                if args == ["rev-parse", "--is-inside-work-tree"]:
+                    return 0, "true"
+                if args == ["status", "--porcelain"]:
+                    return 0, ""
+                if args == ["remote"]:
+                    return 0, "origin"
+                if args == ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]:
+                    return 0, "origin/main"
+                if args == ["fetch", "--quiet"]:
+                    return 0, ""
+                if args == ["rev-list", "--left-right", "--count", "HEAD...origin/main"]:
+                    return 0, "0 0"
+                if args == ["rev-parse", "--verify", "HEAD"]:
+                    return 1, ""
+                if args[:1] == ["ls-files"]:
+                    return 0, ""
+                return 0, ""
+
+            check_memory_sync(root, runner=runner)
+
+            self.assertIn(["git", "fetch", "--quiet"], calls)
 
 
 class TestApplyFixes(unittest.TestCase):

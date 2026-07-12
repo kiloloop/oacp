@@ -1,7 +1,7 @@
 autonomy:
   default_mode: auto_review
   auto_review_thresholds:
-    max_estimated_minutes: 30
+    max_estimated_minutes: 45
     max_expected_files_touched: 5
     destructive_ops: pause
     external_side_effects: pause

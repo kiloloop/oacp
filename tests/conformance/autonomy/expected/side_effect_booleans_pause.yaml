@@ -1,5 +1,5 @@
 case: side_effect_booleans_pause
-config: configs/auto_review_standard.yaml
+config: configs/auto_review_external_pause.yaml
 message: messages/side_effect_booleans.yaml
 expected:
   decision: paused

@@ -1,12 +1,12 @@
 # From `claude -p` to an interactive Claude Code session
 
-On June 15, programmatic Claude usage — `claude -p`, the Agent SDK, Claude Code GitHub Actions, third-party tools — moves onto a separate metered monthly credit. Interactive Claude Code and chat stay on your subscription, unchanged.
+`claude -p` is how most people first script a Claude agent. It works — but if you run agents in automation, it's worth asking a question the one-liner never forces: **why is the agent headless and synchronous in the first place?**
 
-It's a reasonable change: programmatic usage is heavier and burstier than a person typing. But if you run agents in automation, it's worth asking a different question than "how do I dodge the meter" — **why is the agent headless and synchronous in the first place?**
+(A pricing footnote, since earlier versions of this page led with it: Anthropic explored moving programmatic usage — `claude -p`, the Agent SDK, Claude Code GitHub Actions — onto a separate metered credit, but paused that change before it took effect; per the June 15 announcement no such credit exists, subscription limits are unchanged, and advance notice is promised before any future version.)
 
 This guide is built to be handed to your agent. Read the first half for the *why*; paste the setup block into your Claude Code session for the *how*.
 
-> **Setup is a one-time ~5 minutes. Every task after that is one `oacp send` — async, non-blocking, on your subscription.**
+> **Setup is a one-time ~5 minutes. Every task after that is one `oacp send` — async, non-blocking, observable.**
 
 ## The shape of `claude -p`
 
@@ -14,7 +14,7 @@ This guide is built to be handed to your agent. Read the first half for the *why
 
 - it **blocks** — your script waits for the agent to finish
 - it runs **headless** — no session to glance at, attach to, or steer mid-run
-- after June 15, it's **metered** — programmatic usage draws from the separate credit pool
+- it's **one-shot** — one prompt in, one result out; there's no queue behind it, and coordinating several calls is your script's problem
 
 That shape was always a compromise. You wanted to script an agent, and `claude -p` was the way to do it from a shell. Synchronous-and-headless came along for the ride.
 
@@ -24,10 +24,10 @@ Run the agent as a **standing interactive Claude Code session**, and *send* it w
 
 ```
 Before:  claude -p "do X"
-         blocks · headless · metered after Jun 15
+         blocks · headless · one-shot
 
 After:   oacp send  →  a standing interactive session picks it up
-         async · you're not blocked · on your subscription
+         async · you're not blocked · a session you can watch
 ```
 
 Concretely — the call that replaces `claude -p "do X"`:
@@ -39,23 +39,23 @@ oacp send my-project --from sender --to claude --type task_request \
 
 Same prompt, different delivery. The text you'd have handed to `claude -p` becomes the message `--body`; `oacp send` drops it in the interactive session's inbox, and the session picks it up and runs it. Sending the prompt as an OACP message is the whole trick — it routes the work into a session running in interactive mode instead of a headless `claude -p` call.
 
-The session is a real interactive Claude Code session — so it stays on your subscription. You're not spoofing interactive mode; you're using it, and feeding it a queue.
+The session is a real interactive Claude Code session — you're not spoofing interactive mode; you're using it, and feeding it a queue.
 
-This isn't only about the credit. Async is the right shape for most automation — a build, an overnight refactor, a research job — none of it needs your script to sit and wait. And once tasks are messages in an inbox, you get real multi-agent coordination — review loops, handoffs, several agents on one project — instead of a pile of blocking shell calls.
+Async is the right shape for most automation — a build, an overnight refactor, a research job — none of it needs your script to sit and wait. And once tasks are messages in an inbox, you get real multi-agent coordination — review loops, handoffs, several agents on one project — instead of a pile of blocking shell calls.
 
 ## Your options, honestly
 
-Two real choices if June 15 affects you.
+Two real choices.
 
-**1. Pay the metered credit (or API rates).** Simplest. Low programmatic volume — the included credit may cover you; past that it's API pricing. Already on the API — nothing changes. No new tooling; it just costs money at scale.
+**1. Keep `claude -p`.** Simplest. It's one line, it works, and nothing about your setup changes. If your automation is a single blocking call and you never need to see inside it, this is fine.
 
-**2. OACP — run interactive for real, feed it a queue.** Run a real interactive Claude Code session and send it work. It stays on your subscription because it genuinely *is* an interactive session. Not a one-liner — it's a workflow change. In exchange you get real agent coordination, not just a credit workaround.
+**2. OACP — run interactive for real, feed it a queue.** Run a real interactive Claude Code session and send it work. Not a one-liner — it's a workflow change. In exchange you get async dispatch, a session you can watch and steer, and real agent coordination.
 
-Option 1 is the no-effort path that costs money at volume. Option 2 is a one-time workflow change that doesn't. Pick on that.
+Option 1 is zero effort and stays synchronous, headless, one-shot. Option 2 is a one-time workflow change that removes all three. Pick on that.
 
 ## What OACP is
 
-OACP isn't a June-15 tool. It's a file-based protocol for coordinating AI agents — inbox/outbox messaging, structured review loops, shared memory — no server, no daemon, just files in a directory. It was built to run a multi-agent fleet; the `claude -p` transition is **one usage** of it. Full picture: the [README](../README.md) and [SPEC](../SPEC.md). The companion [oacp-skills](https://github.com/kiloloop/oacp-skills) repo packages the runtime guidance — skills that teach Claude, Codex, and other agents to operate the protocol.
+OACP isn't a `claude -p` replacement tool. It's a file-based protocol for coordinating AI agents — inbox/outbox messaging, structured review loops, shared memory — no server, no daemon, just files in a directory. It was built to run a multi-agent fleet; the `claude -p` swap is **one usage** of it. Full picture: the [README](../README.md) and [SPEC](../SPEC.md). The companion [oacp-skills](https://github.com/kiloloop/oacp-skills) repo packages the runtime guidance — skills that teach Claude, Codex, and other agents to operate the protocol.
 
 ## Set it up — paste this into your agent
 
@@ -142,7 +142,7 @@ oacp-do() {
 
 **Request-response callers** — CI doing `RESULT=$(claude -p ...)` and using the output inline. Works too, but not a one-liner: the caller also arms `oacp watch --agent sender` to catch the reply. Worth it for a real pipeline — just know it's more than a swap.
 
-**If you just want zero workflow change** and don't care about coordination — keep `claude -p` and pay the meter (option 1). OACP earns its setup cost when you have more than one agent, recurring work, or you want to see and steer what the agent is doing. If that's not you, we'd rather say so.
+**If you just want zero workflow change** and don't care about coordination — keep `claude -p` (option 1). OACP earns its setup cost when you have more than one agent, recurring work, or you want to see and steer what the agent is doing. If that's not you, we'd rather say so.
 
 ## Try it
 

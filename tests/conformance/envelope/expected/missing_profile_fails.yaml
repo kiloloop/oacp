@@ -1,0 +1,6 @@
+case: missing_profile_fails
+config: configs/auto_review_standard.yaml
+message: messages/missing_profile.yaml
+expected:
+  compiles: false
+  error: envelope_compile_error

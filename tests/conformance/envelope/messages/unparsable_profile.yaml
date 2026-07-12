@@ -1,0 +1,14 @@
+id: msg-20260712020003-iris-env4
+from: iris
+to: claude
+type: task_request
+priority: P2
+created_at_utc: "2026-07-12T02:00:03Z"
+subject: "Task with a broken profile block"
+body: |
+  ## Task
+  The profile below does not parse.
+
+  task_profile:
+    estimated_minutes: [broken
+    risk_tier: P2

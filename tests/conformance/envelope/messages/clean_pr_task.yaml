@@ -1,0 +1,25 @@
+id: msg-20260712020000-iris-env1
+from: iris
+to: claude
+type: task_request
+priority: P2
+created_at_utc: "2026-07-12T02:00:00Z"
+subject: "Implement one module with tests, open a PR"
+body: |
+  ## Task
+  Implement one module with unit tests and open a PR for review.
+
+  task_profile:
+    estimated_minutes: 30
+    expected_files_touched: 4
+    risk_tier: P2
+    target_repo: example-org/private-repo
+    destructive_ops: false
+    external_side_effects: true
+    creates_or_updates_pr: true
+    comments_on_github: false
+    commits_changes: true
+    sends_oacp_reply_only: false
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: false

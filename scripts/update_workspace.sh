@@ -219,16 +219,17 @@ if [[ -d "$PROJECT_ROOT/agents" ]]; then
 autonomy:
   default_mode: always_pause
   auto_review_thresholds:
-    max_estimated_minutes: 30
+    max_estimated_minutes: 45
     max_expected_files_touched: 5
     destructive_ops: pause
-    external_side_effects: pause
+    external_side_effects: allow_pr_artifacts
     auth_config_or_secrets: pause
     dependency_changes: pause
     public_visibility: pause
     git_push_or_deploy: pause
   allow_without_task_profile:
     - brainstorm_request
+  private_repo_allowlist: []
 EOM
         fi
         log_action "+" "file agents/$agent_name/config.yaml"

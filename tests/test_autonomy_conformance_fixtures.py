@@ -30,6 +30,9 @@ def test_expected_cases_reference_existing_config_and_message() -> None:
         if data.get("actuals"):
             actuals = FIXTURE_ROOT / data["actuals"]
             assert actuals.is_file(), f"{expected_path.name} references missing {actuals}"
+        for audit_ref in data.get("audits") or []:
+            audit = FIXTURE_ROOT / audit_ref
+            assert audit.is_file(), f"{expected_path.name} references missing {audit}"
         assert data["expected"]["decision"] in {"auto_accepted", "paused", "rejected"}
         assert data["expected"]["mode"] in {"always_pause", "auto_review"}
         assert isinstance(data["expected"]["reason_codes"], list)
@@ -37,6 +40,14 @@ def test_expected_cases_reference_existing_config_and_message() -> None:
         result = data["expected"].get("result")
         if result:
             assert result.get("final_state") in {"done", "paused", "blocked", "superseded", "error"}
+
+
+def test_prior_grant_audits_use_schema_version_two() -> None:
+    for audit_path in sorted((FIXTURE_ROOT / "audits").glob("*.yaml")):
+        audit = _load_yaml(audit_path)
+        assert audit["schema_version"] == 2
+        outcome = audit.get("result", {}).get("human_outcome", {})
+        assert outcome.get("recorded") is True
 
 
 def test_no_sender_trust_fixture_surface() -> None:

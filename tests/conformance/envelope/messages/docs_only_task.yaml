@@ -1,0 +1,20 @@
+id: msg-20260712020001-iris-env2
+from: iris
+to: claude
+type: task_request
+priority: P3
+created_at_utc: "2026-07-12T02:00:01Z"
+subject: "Small docs cleanup"
+body: |
+  ## Task
+  Update one documentation paragraph for clarity.
+
+  task_profile:
+    estimated_minutes: 20
+    risk_tier: P3
+    expected_files_touched: 1
+    destructive_ops: false
+    external_side_effects: false
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: false

@@ -15,7 +15,7 @@ body: |
     risk_tier: P3
     expected_files_touched: 1
     destructive_ops: false
-    external_side_effects: false
+    external_side_effects: true
     touches_auth_config_or_secrets: false
     touches_dependencies: false
     public_visibility: false

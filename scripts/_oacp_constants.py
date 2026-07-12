@@ -11,6 +11,7 @@ from importlib import resources
 from pathlib import Path
 
 AGENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 CREATABLE_RUNTIMES = ("claude", "codex", "cursor", "gemini")
 ALL_RUNTIMES = ("claude", "codex", "cursor", "gemini", "human", "unknown")
 CANONICAL_CAPABILITIES = {

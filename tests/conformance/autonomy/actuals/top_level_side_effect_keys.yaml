@@ -1,5 +1,7 @@
 actual_minutes: 5
 actual_files_touched: 1
+predicted_risk_materialized: false
+completed_at_utc: "2026-05-12T12:25:00Z"
 creates_or_updates_pr: true
 comments_on_github: true
 commits_changes: true

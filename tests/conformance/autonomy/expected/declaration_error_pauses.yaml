@@ -1,0 +1,24 @@
+case: declaration_error_pauses
+config: configs/auto_review_standard.yaml
+message: messages/clean_task.yaml
+actuals: actuals/declaration_error.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - declaration_error
+  breached:
+    - side_effects_actual.creates_or_updates_pr
+  result:
+    final_state: paused
+    completion_kind: declaration_error
+    actual_minutes: 8
+    actual_files_touched: 1
+    predicted_risk_materialized: true
+    completed_at_utc: "2026-07-10T23:58:00Z"
+    threshold_checkpoint:
+      evaluated: true
+      breached: true
+      declaration_errors:
+        - side_effects_actual.creates_or_updates_pr
+      action: paused_for_reauthorization

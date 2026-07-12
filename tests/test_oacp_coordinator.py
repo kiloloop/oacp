@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "mcp_servers"))
 
@@ -222,6 +223,33 @@ class TestOACPCoordinator(unittest.TestCase):
             self.assertIsNotNone(resp)
             self.assertIn("result", resp)
             self.assertNotIn("error", resp)
+
+    def test_mcp_tools_call_unexpected_error_returns_internal_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hub = Path(tmp)
+            _setup_project(hub, "demo")
+            c = OACPCoordinator(oacp_dir=hub)
+            req = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "claim_packet", "arguments": {}},
+            }
+
+            with mock.patch(
+                "oacp_coordinator.call_tool",
+                side_effect=OSError("simulated disk failure"),
+            ):
+                resp = handle_mcp_request(c, req)
+
+            self.assertEqual(
+                resp,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": -32603, "message": "internal error"},
+                },
+            )
 
     def test_mcp_tools_list(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
