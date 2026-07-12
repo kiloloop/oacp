@@ -136,6 +136,57 @@ class TestAutonomyHintAccepted(unittest.TestCase):
         self.assertTrue(any("autonomy_hint" in e for e in errors))
 
 
+class TestReviewTelemetryFields(unittest.TestCase):
+    def test_all_six_fields_are_accepted_for_review_messages(self):
+        msg = _base_msg(
+            type="review_lgtm",
+            model="gpt-5",
+            turns=3,
+            input_tokens=1200,
+            output_tokens=450,
+            wall_time_s=12.5,
+            est_cost_usd=0.42,
+        )
+        self.assertEqual(validate_message_dict(msg), [])
+
+    def test_numeric_strings_from_yaml_base_loader_are_accepted(self):
+        msg = _base_msg(
+            type="review_feedback",
+            model="claude-opus",
+            turns="2",
+            input_tokens="1000",
+            output_tokens="250",
+            wall_time_s="8.75",
+            est_cost_usd="0.10",
+        )
+        self.assertEqual(validate_message_dict(msg), [])
+
+    def test_telemetry_is_rejected_outside_review_loop(self):
+        errors = validate_message_dict(_base_msg(model="gpt-5"))
+        self.assertTrue(any("review telemetry fields" in error for error in errors))
+
+    def test_invalid_telemetry_types_are_rejected(self):
+        msg = _base_msg(
+            type="review_addressed",
+            model="",
+            turns=-1,
+            input_tokens="many",
+            output_tokens=True,
+            wall_time_s="NaN",
+            est_cost_usd=-0.01,
+        )
+        errors = validate_message_dict(msg)
+        for field in (
+            "model",
+            "turns",
+            "input_tokens",
+            "output_tokens",
+            "wall_time_s",
+            "est_cost_usd",
+        ):
+            self.assertTrue(any(field in error for error in errors), field)
+
+
 class TestBackwardCompatStringTo(unittest.TestCase):
     def test_backward_compat_string_to(self):
         """v1 messages with string 'to' field must still validate."""

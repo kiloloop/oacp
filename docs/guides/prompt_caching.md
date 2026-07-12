@@ -94,7 +94,6 @@ Codex CLI sends the full prompt to the Codex API on each invocation. There is no
 
 4. **Lean on diff-only context**
    - For PR fix loops, pass the diff + findings rather than full file contents
-   - `run_agent_task.sh` already scopes context to changed files
 
 ## Gemini
 

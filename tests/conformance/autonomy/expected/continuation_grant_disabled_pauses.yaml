@@ -1,5 +1,5 @@
 case: continuation_grant_disabled_pauses
-config: configs/auto_review_standard.yaml
+config: configs/auto_review_external_pause.yaml
 message: messages/continuation_grant.yaml
 expected:
   decision: paused

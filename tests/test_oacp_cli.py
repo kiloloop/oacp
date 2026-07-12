@@ -89,6 +89,39 @@ class TestOacpCli(unittest.TestCase):
         )
 
     @mock.patch("oacp.cli._run_script", return_value=0)
+    def test_dispatches_autonomy_outcome(self, run_script) -> None:
+        code, stdout, stderr = self._run([
+            "autonomy-outcome",
+            "/tmp/audit.yaml",
+            "--decision",
+            "approved",
+        ])
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "")
+        run_script.assert_called_once_with(
+            "record_autonomy_outcome.py",
+            ["/tmp/audit.yaml", "--decision", "approved"],
+        )
+
+    @mock.patch("oacp.cli._run_script", return_value=0)
+    def test_dispatches_envelope(self, run_script) -> None:
+        code, stdout, stderr = self._run([
+            "envelope",
+            "compile",
+            "/tmp/msg.yaml",
+            "--receiver",
+            "claude",
+        ])
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "")
+        run_script.assert_called_once_with(
+            "envelope_compiler.py",
+            ["compile", "/tmp/msg.yaml", "--receiver", "claude"],
+        )
+
+    @mock.patch("oacp.cli._run_script", return_value=0)
     def test_help_for_subcommand(self, run_script) -> None:
         code, stdout, stderr = self._run(["help", "send"])
         self.assertEqual(code, 0)
@@ -110,6 +143,8 @@ class TestOacpCli(unittest.TestCase):
         self.assertIn("watch", stdout)
         self.assertIn("memory", stdout)
         self.assertIn("setup", stdout)
+        self.assertIn("autonomy-outcome", stdout)
+        self.assertIn("envelope", stdout)
 
     def test_run_script_restores_sys_path_after_nested_mutation(self) -> None:
         script_path = "/tmp/send_inbox_message.py"

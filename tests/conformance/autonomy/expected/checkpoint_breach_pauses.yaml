@@ -10,6 +10,7 @@ expected:
   result:
     final_state: paused
     predicted_risk_materialized: true
+    completed_at_utc: "2026-05-12T12:30:00Z"
     threshold_checkpoint:
       evaluated: true
       breached: true

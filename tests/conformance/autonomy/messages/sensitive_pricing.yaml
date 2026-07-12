@@ -7,7 +7,7 @@ created_at_utc: "2026-05-12T12:18:00Z"
 subject: "Pricing page update"
 body: |
   ## Task
-  Update the pricing page copy.
+  Do not discuss pricing changes in the generated summary.
 
   task_profile:
     estimated_minutes: 10

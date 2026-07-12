@@ -29,6 +29,8 @@ Commands:
   send           Send a protocol-compliant inbox message
   org-memory     Initialize org-level memory at $OACP_HOME/org-memory/
   write-event    Write an event to org-memory/events/
+  autonomy-outcome  Record a human approval/decline in an autonomy audit
+  envelope       Compile, show, or clear the runtime envelope for a task
   doctor         Check environment and workspace health
   validate       Validate an inbox/outbox YAML message
 
@@ -44,6 +46,9 @@ Examples:
   oacp send my-project --to iris --type notification --subject "Done" --body "Completed"
   oacp org-memory init
   oacp write-event --agent claude --project my-project --type decision --slug api-convention --body "Use REST for public APIs"
+  oacp autonomy-outcome /path/to/audit.yaml --decision approved
+  oacp envelope compile /path/to/message.yaml --receiver claude
+  oacp envelope show --project my-project
   oacp doctor
   oacp validate /path/to/message.yaml
 """
@@ -59,6 +64,8 @@ SCRIPT_NAMES = {
     "send": "send_inbox_message.py",
     "org-memory": "init_org_memory.py",
     "write-event": "write_event.py",
+    "autonomy-outcome": "record_autonomy_outcome.py",
+    "envelope": "envelope_compiler.py",
     "doctor": "oacp_doctor.py",
     "validate": "validate_message.py",
 }

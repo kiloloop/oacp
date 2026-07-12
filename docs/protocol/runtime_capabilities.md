@@ -5,7 +5,7 @@
 Define a standard schema for declaring runtime capabilities and dynamic agent status, enabling:
 - **Capability discovery** — agents and tools can query what a runtime supports before dispatching work
 - **Dynamic status** — agents publish their current state so coordinators can route tasks to available agents
-- **Health validation** — `hub doctor` checks environment, workspace, and agent status consistency
+- **Health validation** — `oacp doctor` checks environment, workspace, and agent status consistency
 
 ## Static Capabilities
 
@@ -123,7 +123,7 @@ For review tasks, prefer agents with `github_cli` capability. For parallel work,
 
 ## Health Check Contract
 
-The `hub doctor` command validates environment and workspace health. Every check produces a result with one of four severities:
+The `oacp doctor` command validates environment and workspace health. Every check produces a result with one of four severities:
 
 ### Severity Levels
 
@@ -145,7 +145,8 @@ The `hub doctor` command validates environment and workspace health. Every check
 2. **Workspace** — `workspace.json` existence and validity, agent and packet directories
 3. **Inbox Health** — per-agent inbox directories, stale messages (>24h)
 4. **Schemas** — YAML file validity in `packets/`, `status.yaml` validation
-5. **Agent Status** — `status.yaml` presence per agent, staleness (<1h)
+5. **Autonomy** — receiver `config.yaml` validity, audit directory presence, orphaned audit `policy_path` refs
+6. **Agent Status** — `status.yaml` presence per agent, staleness (<1h)
 
 ### Check Details
 
@@ -177,7 +178,7 @@ The `hub doctor` command validates environment and workspace health. Every check
 
 ### Hub Doctor
 
-Run `hub doctor` to validate the full stack:
+Run `oacp doctor` to validate the full stack:
 
 ```bash
 make doctor                                        # environment checks only

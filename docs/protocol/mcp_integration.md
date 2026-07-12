@@ -49,7 +49,7 @@ findings:
     blocking: true
     status: "open"
     area: "data"
-    file: "src/asterbot/core/signal_cache.py"
+    file: "src/myapp/core/signal_cache.py"
     evidence: "Query shows 3.2% data gaps in signal stream during H19-H20"
     evidence_attachments:
       - type: "query_result"
@@ -138,7 +138,7 @@ and `status` — evidence attachments are informational and don't affect the gat
 
 ### Gemini QA Workflow
 
-When Gemini produces a findings packet (via `aster-review-pr` or similar):
+When Gemini produces a findings packet (via a project review workflow):
 
 1. Run MCP tools (BigQuery queries, browser checks) to gather evidence
 2. Save outputs to `packets/evidence/<finding_id>_<desc>.<ext>`

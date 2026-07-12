@@ -1,0 +1,10 @@
+case: minutes_46_pauses
+config: configs/auto_review_standard.yaml
+message: messages/minutes_46.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - estimated_minutes_exceeds_threshold
+  breached:
+    - estimated_minutes_exceeds_threshold

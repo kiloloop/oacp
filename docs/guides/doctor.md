@@ -13,7 +13,7 @@ No project, no config, no commit required — just install and run.
 
 ## What doctor checks
 
-Doctor organizes its output into five categories. When run without `--project`, only the first category (Environment) runs. With `--project <name>`, all five categories are evaluated.
+Doctor organizes its output into six categories. When run without `--project`, only the first category (Environment) runs. With `--project <name>`, all six categories are evaluated.
 
 ### 1. Environment
 
@@ -50,7 +50,19 @@ Validates YAML files against protocol expectations.
 - **packets/** — parses all `.yaml`/`.yml` files and reports syntax errors
 - **status.yaml** — checks required fields (`runtime`, `status`, `capabilities`, `updated_at`), validates enum values, and verifies timestamp format
 
-### 5. Agent Status
+### 5. Autonomy
+
+Validates each agent's receiver-autonomy setup (see `docs/protocol/autonomy.md`).
+
+- **config.yaml** — validates `autonomy.default_mode`, `auto_review_thresholds`
+  (numeric + policy keys, including `external_side_effects: pause |
+  allow_pr_artifacts | allow`), `allow_without_task_profile` entries, and
+  receiver-controlled `private_repo_allowlist` entries, and
+  `continuation_grants`; an absent config is fine (defaults to `always_pause`)
+- **audit directory** — warns if `agents/<agent>/audit/autonomy_decisions/` is missing
+- **orphaned policy refs** — warns when an audit event's `policy_path` points at a config file that no longer exists
+
+### 6. Agent Status
 
 Checks each agent's `status.yaml` for presence and freshness.
 
@@ -103,6 +115,14 @@ $ oacp doctor --project my-project
     [+] packets/ — 4 YAML file(s) valid
     [+] claude/status.yaml — valid
     [+] codex/status.yaml — valid
+
+[!] Autonomy
+    [+] claude/audit/autonomy_decisions — present
+    [+] claude/config.yaml — valid
+    [+] claude/autonomy audit — no orphaned policy refs
+    [!] codex/audit/autonomy_decisions — missing
+        mkdir -p $OACP_HOME/projects/my-project/agents/codex/audit/autonomy_decisions
+    [+] codex/config.yaml — absent; defaults to always_pause
 
 [!] Agent Status
     [+] claude/status.yaml — present
@@ -179,6 +199,8 @@ oacp doctor                          # environment checks only
 oacp doctor --project <name>         # full workspace + agent checks
 oacp doctor --json                   # machine-readable JSON output
 oacp doctor --project <name> --json  # full checks in JSON format
+oacp doctor --project <name> --fix   # auto-fix safe issues (missing inbox dirs, missing/stale status.yaml)
+oacp doctor --memory                 # advisory checks for OACP_HOME memory git sync
 oacp doctor -o report.txt            # save report to file
 ```
 

@@ -80,7 +80,6 @@ For Claude Code projects, copy templates into the repo's `.claude/` directory:
 # From the oacp repo root:
 cp templates/claude/agents/role_agent.template.md /path/to/repo/.claude/agents/<role>.md
 cp templates/claude/rules/guardrail.template.md /path/to/repo/.claude/rules/guardrails.md
-cp templates/claude/skills/session_lifecycle.template.md /path/to/repo/.claude/skills/lifecycle/SKILL.md
 ```
 
 ## 5) Initialize packet files (source checkout only)

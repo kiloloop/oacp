@@ -2,6 +2,8 @@ case: continuation_grant_drift_pauses
 config: configs/auto_review_continuation_enabled.yaml
 message: messages/continuation_grant.yaml
 actuals: actuals/continuation_drift.yaml
+audits:
+  - audits/prior_thread_grant_approved.yaml
 expected:
   decision: paused
   mode: auto_review
@@ -9,6 +11,7 @@ expected:
     - threshold_checkpoint_breached
   continuation_grant:
     decision: accepted
+    standing_grant_found: true
   result:
     final_state: paused
     predicted_risk_materialized: true

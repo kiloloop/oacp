@@ -1,0 +1,48 @@
+schema_version: 2
+spec_version: "0.3.5"
+created_at_utc: "2026-05-26T04:10:05Z"
+receiver: codex
+sender: iris
+message_id: msg-20260526041000-iris-parent
+message_type: task_request
+conversation_id: conv-20260526-iris-001
+decision: paused
+mode: auto_review
+reason_codes:
+  - external_side_effects_pause
+task_profile:
+  continuation_grants:
+    approved_thread_continuation:
+      scope:
+        max_actual_minutes: 30
+        max_actual_files_touched: 3
+        creates_or_updates_pr: true
+        comments_on_github: true
+        commits_changes: true
+result:
+  final_state: done
+  completion_kind: human_approved
+  human_outcome:
+    recorded: true
+    actor: human
+    decision: approved
+    decided_at_utc: "2026-05-26T04:12:00Z"
+    decision_latency_seconds: 115
+    pause_reason_codes:
+      - external_side_effects_pause
+    grant:
+      decision: approved
+      request_present: true
+      request_error: null
+      requested_scope:
+        max_actual_minutes: 30
+        max_actual_files_touched: 3
+        creates_or_updates_pr: true
+        comments_on_github: true
+        commits_changes: true
+      granted_scope:
+        max_actual_minutes: 30
+        max_actual_files_touched: 3
+        creates_or_updates_pr: true
+        comments_on_github: true
+        commits_changes: true

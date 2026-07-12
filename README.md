@@ -122,9 +122,9 @@ When running inside a configured agent runtime, `--from` can be omitted — OACP
 
 ## Coming from `claude -p`?
 
-`claude -p` runs an agent synchronously and headless — your script blocks while it works, and as of June 15 programmatic usage draws from a separate metered credit.
+`claude -p` runs an agent synchronously and headless — your script blocks while it works, and there's no session to glance at, attach to, or steer mid-run.
 
-OACP routes the same work to a **standing interactive Claude Code session** instead: `oacp send` queues the task, the session picks it up and runs it async, you're not blocked — and because it's a real interactive session, it stays on your subscription.
+OACP routes the same work to a **standing interactive Claude Code session** instead: `oacp send` queues the task, the session picks it up and runs it async, you're not blocked — and the session is right there to watch and steer. Once tasks are messages, review loops, handoffs, and multi-agent coordination come with the shape.
 
 **[From `claude -p` to an interactive Claude Code session →](docs/from-claude-p.md)** — paste-into-your-agent setup, the honest tradeoffs, and where it fits.
 

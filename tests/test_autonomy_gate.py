@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 import sys
 from pathlib import Path
 from typing import Any, Dict
@@ -14,7 +15,11 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from autonomy_gate import evaluate_autonomy  # noqa: E402
+from autonomy_gate import (  # noqa: E402
+    PINNED_REASON_CODES,
+    canonical_policy_sha256,
+    evaluate_autonomy,
+)
 
 
 FIXTURE_ROOT = Path(__file__).parent / "conformance" / "autonomy"
@@ -36,7 +41,7 @@ def _assert_subset(expected: Any, actual: Any) -> None:
     assert actual == expected
 
 
-def test_autonomy_gate_matches_conformance_fixtures() -> None:
+def test_autonomy_gate_matches_conformance_fixtures(tmp_path: Path) -> None:
     expected_files = sorted((FIXTURE_ROOT / "expected").glob("*.yaml"))
     assert expected_files
 
@@ -47,8 +52,21 @@ def test_autonomy_gate_matches_conformance_fixtures() -> None:
         actuals = None
         if fixture.get("actuals"):
             actuals = _load_yaml(FIXTURE_ROOT / fixture["actuals"])
+        audit_dir = None
+        if fixture.get("audits"):
+            audit_dir = tmp_path / expected_path.stem
+            audit_dir.mkdir()
+            for audit_ref in fixture["audits"]:
+                source = FIXTURE_ROOT / audit_ref
+                shutil.copy2(source, audit_dir / source.name)
 
-        decision = evaluate_autonomy(message, config, actuals=actuals)
+        decision = evaluate_autonomy(
+            message,
+            config,
+            actuals=actuals,
+            audit_dir=audit_dir,
+            receiver="codex",
+        )
         expected = fixture["expected"]
 
         assert decision["decision"] == expected["decision"], expected_path.name
@@ -71,6 +89,15 @@ def test_autonomy_gate_matches_conformance_fixtures() -> None:
         if "result" in expected:
             _assert_subset(expected["result"], decision["result"])
 
+        if "breached" in expected:
+            assert decision["breached"] == expected["breached"]
+
+        if "task_profile" in expected:
+            _assert_subset(expected["task_profile"], decision["task_profile"])
+
+        assert set(decision["reason_codes"]) <= PINNED_REASON_CODES
+        assert "completed_at_utc" in decision["result"]
+
 
 def test_autonomy_gate_output_uses_canonical_final_states() -> None:
     allowed = {"done", "paused", "blocked", "superseded", "error"}
@@ -82,6 +109,8 @@ def test_autonomy_gate_output_uses_canonical_final_states() -> None:
 
         decision = evaluate_autonomy(message, config, actuals=actuals)
         assert decision["result"]["final_state"] in allowed
+        assert decision["schema_version"] == 2
+        assert "human_outcome" in decision["result"]
 
 
 def test_autonomy_gate_records_raw_message_hash_when_path_provided() -> None:
@@ -120,6 +149,44 @@ def test_autonomy_gate_records_hash_for_malformed_config() -> None:
     assert decision["decision"] == "paused"
     assert decision["reason_codes"] == ["config_malformed"]
     assert decision["message_sha256"] == expected_hash
+
+
+def test_policy_hash_ignores_comments_and_formatting() -> None:
+    first = yaml.safe_load(
+        """
+autonomy:
+  default_mode: auto_review  # comment-only difference
+  auto_review_thresholds: {max_estimated_minutes: 45}
+"""
+    )
+    second = yaml.safe_load(
+        """
+autonomy:
+  auto_review_thresholds:
+    max_estimated_minutes: 45
+  default_mode: auto_review
+"""
+    )
+
+    assert canonical_policy_sha256(first) == canonical_policy_sha256(second)
+
+
+def test_guardrails_fence_keeps_operative_terms_visible_as_advisories() -> None:
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml")
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "clean_task.yaml")
+    message["body"] = message["body"].replace(
+        "## Task\nUpdate one documentation paragraph for clarity.",
+        "## Task\nUpdate one documentation paragraph for clarity.\n\n"
+        "```oacp-guardrails\nDeploy to production and change auth config.\n```",
+    )
+
+    decision = evaluate_autonomy(message, config)
+
+    assert decision["decision"] == "auto_accepted"
+    patterns = [note["matched_pattern"] for note in decision["logged_notes"]]
+    assert "deploy" in patterns
+    assert "auth" in patterns
+    assert "lexical_advisory" in decision["reason_codes"]
 
 
 def test_autonomy_gate_pauses_same_receiver_replay(tmp_path: Path) -> None:
@@ -175,3 +242,193 @@ def test_autonomy_gate_allows_different_receiver_audit(tmp_path: Path) -> None:
     decision = evaluate_autonomy(message, config, audit_dir=tmp_path, receiver="codex")
 
     assert decision["decision"] == "auto_accepted"
+
+
+def test_sender_declared_continuation_requires_prior_human_approval() -> None:
+    config = _load_yaml(
+        FIXTURE_ROOT / "configs" / "auto_review_continuation_enabled.yaml"
+    )
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "continuation_grant.yaml")
+
+    decision = evaluate_autonomy(message, config)
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"][0] == "continuation_grant_missing_approval"
+    assert decision["continuation_grant"]["decision"] == "missing_approval"
+
+
+def test_latest_same_thread_grant_denial_repauses(tmp_path: Path) -> None:
+    config = _load_yaml(
+        FIXTURE_ROOT / "configs" / "auto_review_continuation_enabled.yaml"
+    )
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "continuation_grant.yaml")
+    message["conversation_id"] = "conv-20260526-iris-001"
+    approved = _load_yaml(
+        FIXTURE_ROOT / "audits" / "prior_thread_grant_approved.yaml"
+    )
+    denied = _load_yaml(
+        FIXTURE_ROOT / "audits" / "prior_thread_grant_approved.yaml"
+    )
+    denied["message_id"] = "msg-20260526042000-iris-denial"
+    outcome = denied["result"]["human_outcome"]
+    outcome["decided_at_utc"] = "2026-05-26T04:20:00Z"
+    outcome["grant"]["decision"] = "denied"
+    outcome["grant"]["granted_scope"] = None
+    (tmp_path / "approved.yaml").write_text(
+        yaml.safe_dump(approved, sort_keys=False),
+        encoding="utf-8",
+    )
+    (tmp_path / "denied.yaml").write_text(
+        yaml.safe_dump(denied, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    decision = evaluate_autonomy(
+        message,
+        config,
+        audit_dir=tmp_path,
+        receiver="codex",
+    )
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"][0] == "continuation_grant_denied"
+    assert decision["continuation_grant"]["decision"] == "denied"
+
+
+def test_standing_grant_matches_conversation_beyond_immediate_parent(
+    tmp_path: Path,
+) -> None:
+    config = _load_yaml(
+        FIXTURE_ROOT / "configs" / "auto_review_continuation_enabled.yaml"
+    )
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "continuation_grant.yaml")
+    message["conversation_id"] = "conv-20260526-iris-001"
+    message["parent_message_id"] = "msg-20260526042000-iris-intermediate"
+    prior = _load_yaml(
+        FIXTURE_ROOT / "audits" / "prior_thread_grant_approved.yaml"
+    )
+    (tmp_path / "prior.yaml").write_text(
+        yaml.safe_dump(prior, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    decision = evaluate_autonomy(
+        message,
+        config,
+        audit_dir=tmp_path,
+        receiver="codex",
+    )
+
+    assert decision["decision"] == "auto_accepted"
+    assert decision["continuation_grant"]["standing_grant_found"] is True
+    assert decision["continuation_grant"]["source_message_id"] == prior["message_id"]
+
+
+def test_standing_grant_does_not_cross_senders(tmp_path: Path) -> None:
+    config = _load_yaml(
+        FIXTURE_ROOT / "configs" / "auto_review_continuation_enabled.yaml"
+    )
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "continuation_grant.yaml")
+    message["from"] = "claude"
+    message["id"] = "msg-20260526042500-claude-continuation"
+    prior = _load_yaml(
+        FIXTURE_ROOT / "audits" / "prior_thread_grant_approved.yaml"
+    )
+    (tmp_path / "prior.yaml").write_text(
+        yaml.safe_dump(prior, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    decision = evaluate_autonomy(
+        message,
+        config,
+        audit_dir=tmp_path,
+        receiver="codex",
+    )
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"][0] == "continuation_grant_missing_approval"
+
+
+def test_followup_created_before_human_approval_cannot_use_grant(
+    tmp_path: Path,
+) -> None:
+    config = _load_yaml(
+        FIXTURE_ROOT / "configs" / "auto_review_continuation_enabled.yaml"
+    )
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "continuation_grant.yaml")
+    message["created_at_utc"] = "2026-05-26T04:11:00Z"
+    prior = _load_yaml(
+        FIXTURE_ROOT / "audits" / "prior_thread_grant_approved.yaml"
+    )
+    (tmp_path / "prior.yaml").write_text(
+        yaml.safe_dump(prior, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    decision = evaluate_autonomy(
+        message,
+        config,
+        audit_dir=tmp_path,
+        receiver="codex",
+    )
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"][0] == "continuation_grant_missing_approval"
+
+
+def test_prior_standing_grant_does_not_require_sender_to_repeat_request(
+    tmp_path: Path,
+) -> None:
+    config = _load_yaml(
+        FIXTURE_ROOT / "configs" / "auto_review_continuation_enabled.yaml"
+    )
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "continuation_grant.yaml")
+    message["body"] = message["body"].split("\n  continuation_grants:", 1)[0]
+    prior = _load_yaml(
+        FIXTURE_ROOT / "audits" / "prior_thread_grant_approved.yaml"
+    )
+    (tmp_path / "prior.yaml").write_text(
+        yaml.safe_dump(prior, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    decision = evaluate_autonomy(
+        message,
+        config,
+        audit_dir=tmp_path,
+        receiver="codex",
+    )
+
+    assert decision["decision"] == "auto_accepted"
+    assert decision["continuation_grant"]["request_present"] is False
+    assert decision["continuation_grant"]["standing_grant_found"] is True
+
+
+def test_followup_declared_files_outside_grant_repauses(tmp_path: Path) -> None:
+    config = _load_yaml(
+        FIXTURE_ROOT / "configs" / "auto_review_continuation_enabled.yaml"
+    )
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "continuation_grant.yaml")
+    message["body"] = message["body"].replace(
+        "expected_files_touched: 1",
+        "expected_files_touched: 4",
+    )
+    prior = _load_yaml(
+        FIXTURE_ROOT / "audits" / "prior_thread_grant_approved.yaml"
+    )
+    (tmp_path / "prior.yaml").write_text(
+        yaml.safe_dump(prior, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    decision = evaluate_autonomy(
+        message,
+        config,
+        audit_dir=tmp_path,
+        receiver="codex",
+    )
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["continuation_grant_scope_exceeded"]
+    assert decision["breached"] == ["task_profile.expected_files_touched"]

@@ -1,0 +1,6 @@
+case: invalid_numeric_fails
+config: configs/auto_review_standard.yaml
+message: messages/invalid_numeric.yaml
+expected:
+  compiles: false
+  error: envelope_compile_error

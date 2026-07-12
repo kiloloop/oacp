@@ -1,0 +1,29 @@
+case: docs_only_task_compiles
+config: configs/auto_review_standard.yaml
+message: messages/docs_only_task.yaml
+expected:
+  compiles: true
+  envelope:
+    envelope_version: 1
+    project: test-proj
+    receiver: claude
+    message_id: msg-20260712020001-iris-env2
+    enforcement: hooks
+    constraints:
+      estimated_minutes: 20
+      expected_files_touched: 1
+      risk_tier: P3
+      target_repo: ""
+      destructive_ops: false
+      external_side_effects: false
+      creates_or_updates_pr: false
+      comments_on_github: false
+      commits_changes: false
+      sends_oacp_reply_only: false
+      touches_auth_config_or_secrets: false
+      touches_dependencies: false
+      public_visibility: false
+      private_repo_allowlist:
+        - example-org/private-repo
+    counters:
+      files_touched: []

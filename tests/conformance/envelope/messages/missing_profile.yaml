@@ -1,0 +1,10 @@
+id: msg-20260712020002-iris-env3
+from: iris
+to: claude
+type: task_request
+priority: P2
+created_at_utc: "2026-07-12T02:00:02Z"
+subject: "Task without a declared profile"
+body: |
+  ## Task
+  Do a thing, no profile declared.

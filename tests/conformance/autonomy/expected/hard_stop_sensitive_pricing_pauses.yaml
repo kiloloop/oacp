@@ -5,5 +5,5 @@ expected:
   decision: paused
   mode: auto_review
   reason_codes:
-    - hard_stop_sensitive_scope
+    - hard_stop_content_sensitivity
   matched_pattern: "pricing"

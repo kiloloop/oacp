@@ -333,7 +333,7 @@ This aligns with existing merge-readiness criteria in the shared workspace proto
 
 Integration points:
 - `scripts/preflight.py` — automated quality checks (conflict markers, linting, etc.)
-- Future: `check_quality_gate.py` — dedicated script for full quality-gate evaluation
+- `scripts/check_quality_gate.py` — dedicated script for machine-readable quality-gate evaluation (see `packet_states.yaml`)
 
 ## Comparison with background review automation
 

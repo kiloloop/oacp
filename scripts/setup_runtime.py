@@ -103,7 +103,7 @@ oacp memory push --oacp-dir "$OACP_ROOT" || true
 """
 
 CLAUDE_SETTINGS_SCHEMA = "https://json.schemastore.org/claude-code-settings.json"
-CLAUDE_MEMORY_HOOK_COMMANDS = {
+CLAUDE_HOOK_COMMANDS = {
     "SessionStart": {
         "matcher": "startup",
         "hooks": [
@@ -120,6 +120,19 @@ CLAUDE_MEMORY_HOOK_COMMANDS = {
                 "type": "command",
                 "command": ".claude/hooks/oacp-memory-push.sh",
                 "timeout": 30,
+            }
+        ],
+    },
+    # Static envelope shim: per-task constraints live in the
+    # compiled active_envelope.json, so this settings entry never changes per
+    # dispatch and is a no-op while no envelope is active.
+    "PreToolUse": {
+        "matcher": "Bash|Edit|Write|NotebookEdit",
+        "hooks": [
+            {
+                "type": "command",
+                "command": "oacp-envelope-hook",
+                "timeout": 15,
             }
         ],
     },
@@ -186,7 +199,7 @@ def _write_claude_memory_settings(repo_dir: Path) -> Optional[bool]:
         return None
 
     changed = False
-    for event_name, entry in CLAUDE_MEMORY_HOOK_COMMANDS.items():
+    for event_name, entry in CLAUDE_HOOK_COMMANDS.items():
         entries = hooks.setdefault(event_name, [])
         if not isinstance(entries, list):
             _warn_claude_settings(

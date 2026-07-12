@@ -5,6 +5,68 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.5] - 2026-07-11
+
+### Added
+
+- Receiver autonomy supports sender-marked `oacp-guardrails` fences, negation
+  fallback, declaration-aware lexical advisories, and a pinned reason-code
+  taxonomy backed by executable conformance fixtures.
+- `external_side_effects: allow_pr_artifacts` permits declared PR, review, and
+  issue-comment artifacts only for receiver-allowlisted private repositories,
+  while retaining pre-approval for public/unlisted artifacts, direct main
+  pushes, merges, deploys, and publishes.
+- Autonomy audit output records the full declared task profile, an explicit
+  breach list, a semantic policy hash, and a shared outcome block including
+  completion time and materialized-risk telemetry.
+- Default-off standing continuation grants now resolve from an explicit prior
+  human approval in the same conversation thread; sender-declared grant data
+  alone cannot authorize follow-up scope.
+- `oacp autonomy-outcome` atomically records structured approval, modification,
+  decline, latency, and grant-decision telemetry in schema-v2 autonomy audits.
+  The subcommand is exposed by the installed CLI starting with this release.
+- Envelope compilation: `oacp envelope compile|show|clear`
+  turns an admitted message's `task_profile` plus receiver config into a
+  runtime envelope (`active_envelope.json`), enforced at the tool-call layer
+  by a static Claude PreToolUse hook (`oacp-envelope-hook`, registered once
+  by `oacp setup claude`). Compilation is fail-closed
+  (`envelope_compile_error`), envelope drift denies with the canonical
+  threshold-checkpoint opener, unclassifiable calls escalate to `ask`, and
+  the audit outcome block records `envelope_enforcement: hooks | none`.
+  Contract pinned by executable fixtures under `tests/conformance/envelope/`.
+- The security policy documents the Tier-1.5 trust ceiling for single-OS-user
+  hosts: `from` fields are unauthenticated traceability today, future optional
+  signing would add tamper-evidence and provenance but not same-host
+  anti-impersonation, and hard isolation requires separate OS users,
+  containers, or hosts.
+
+### Changed
+
+- The versioning guide documents the staged release pipeline end to end,
+  replacing the retired single-repo flow.
+- Documentation examples and conformance fixtures use neutral example
+  repository slugs.
+- The standard `auto_review` estimate cap is 45 minutes; estimates above 45
+  still pause and the five-file cap remains unchanged.
+- Pricing and commercial matches remain hard pauses but now use the separate
+  `hard_stop_content_sensitivity` category.
+- Follow-up declarations outside a standing grant's time, file, or side-effect
+  scope re-pause before work begins.
+
+### Fixed
+
+- `doctor --memory` now forwards bounded network timeouts to remote Git fetches
+  without breaking custom runners that implement the original command interface.
+- The MCP stdio coordinator now converts unexpected request exceptions into
+  structured `-32603` responses instead of crashing the server.
+- Undeclared runtime side effects now produce `declaration_error` at the
+  threshold checkpoint instead of silently completing outside the profile.
+- Message validation now accepts and type-checks the six documented
+  review-loop telemetry fields: `model`, `turns`, `input_tokens`,
+  `output_tokens`, `wall_time_s`, and `est_cost_usd`.
+- Receiver config and doctor validation share one repository-slug regex instead
+  of maintaining duplicate definitions.
+
 ## [0.3.4] - 2026-06-11
 
 ### Fixed
@@ -192,6 +254,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Checkout step in github-release workflow job (#19)
 - Pre-release audit fixes: SHA-pinned actions, dangling doc refs (#15, #16)
 
+[0.3.5]: https://github.com/kiloloop/oacp/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/kiloloop/oacp/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/kiloloop/oacp/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/kiloloop/oacp/compare/v0.3.1...v0.3.2

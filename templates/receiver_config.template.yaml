@@ -3,16 +3,21 @@
 autonomy:
   default_mode: always_pause  # always_pause | auto_review
   auto_review_thresholds:
-    max_estimated_minutes: 30
+    max_estimated_minutes: 45
     max_expected_files_touched: 5
     destructive_ops: pause
-    external_side_effects: pause
+    # allow_pr_artifacts permits PR/review/issue-comment artifacts on private
+    # repos; direct main pushes, deploys, publishes, and merges still pause.
+    external_side_effects: allow_pr_artifacts
     auth_config_or_secrets: pause
     dependency_changes: pause
     public_visibility: pause
     git_push_or_deploy: pause
   allow_without_task_profile:
     - brainstorm_request
+  # Populate explicitly with repositories independently known to be private.
+  # allow_pr_artifacts never trusts the sender's visibility declaration alone.
+  private_repo_allowlist: []
   continuation_grants:
     # Default-off. When enabled, receivers may honor explicit same-thread
     # continuation grants that stay inside the granted scope envelope.

@@ -12,12 +12,20 @@ import socket
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Protocol, Sequence, Tuple
 
-Runner = Callable[[Sequence[str]], Tuple[int, str]]
+
+class Runner(Protocol):
+    def __call__(
+        self,
+        command: Sequence[str],
+        *,
+        timeout: Optional[int] = None,
+    ) -> Tuple[int, str]: ...
+
 
 MARKER_FILE = ".oacp-memory-repo"
-GIT_FETCH_TIMEOUT_SECONDS = 30
+GIT_NETWORK_TIMEOUT_SECONDS = 30
 CANONICAL_MEMORY_GITIGNORE = """\
 *
 !*/
@@ -82,7 +90,9 @@ def _git(
     command = ["git", *args]
     if runner is None:
         return run_command(command, cwd=cwd, timeout=timeout)
-    return runner(command)
+    if timeout is None:
+        return runner(command)
+    return runner(command, timeout=timeout)
 
 
 def marker_path(oacp_root: Path) -> Path:
@@ -196,7 +206,7 @@ def fetch_remote(oacp_root: Path, runner: Optional[Runner] = None) -> Tuple[bool
         oacp_root,
         ["fetch", "--quiet"],
         runner,
-        timeout=GIT_FETCH_TIMEOUT_SECONDS,
+        timeout=GIT_NETWORK_TIMEOUT_SECONDS,
     )
     return rc == 0, output
 
@@ -298,10 +308,20 @@ def push_remote(oacp_root: Path, runner: Optional[Runner] = None) -> Tuple[int, 
         return 0, "No memory remote configured; commit remains local."
     upstream = configured_upstream(oacp_root, runner)
     if upstream:
-        return _git(oacp_root, ["push"], runner)
+        return _git(
+            oacp_root,
+            ["push"],
+            runner,
+            timeout=GIT_NETWORK_TIMEOUT_SECONDS,
+        )
     remote = default_remote(oacp_root, runner)
     branch = current_branch(oacp_root, runner)
-    return _git(oacp_root, ["push", "-u", remote, branch], runner)
+    return _git(
+        oacp_root,
+        ["push", "-u", remote, branch],
+        runner,
+        timeout=GIT_NETWORK_TIMEOUT_SECONDS,
+    )
 
 
 def pull_memory(oacp_root: Path, runner: Optional[Runner] = None) -> List[str]:
@@ -319,7 +339,12 @@ def pull_memory(oacp_root: Path, runner: Optional[Runner] = None) -> List[str]:
         return ["OACP memory pull: local-only memory repo; no remote to pull."]
     if state.behind:
         behind = state.behind
-        rc, output = _git(oacp_root, ["pull", "--ff-only"], runner)
+        rc, output = _git(
+            oacp_root,
+            ["pull", "--ff-only"],
+            runner,
+            timeout=GIT_NETWORK_TIMEOUT_SECONDS,
+        )
         if rc != 0:
             return [*lines, f"WARNING: memory pull --ff-only failed: {output}"]
         return [f"OACP memory pull: synced {behind} commit(s)."]
@@ -438,7 +463,12 @@ def clone_memory_repo(
 
     if not oacp_root.exists() or not _is_non_empty(oacp_root):
         oacp_root.parent.mkdir(parents=True, exist_ok=True)
-        rc, output = _git(oacp_root.parent, ["clone", url, str(oacp_root)], runner)
+        rc, output = _git(
+            oacp_root.parent,
+            ["clone", url, str(oacp_root)],
+            runner,
+            timeout=GIT_NETWORK_TIMEOUT_SECONDS,
+        )
         if rc != 0:
             raise MemorySyncError(f"git clone failed: {output}")
         return [f"Cloned OACP memory repo into {oacp_root}."]
@@ -448,7 +478,12 @@ def clone_memory_repo(
     )
     shutil.move(str(oacp_root), str(backup))
     try:
-        rc, output = _git(oacp_root.parent, ["clone", url, str(oacp_root)], runner)
+        rc, output = _git(
+            oacp_root.parent,
+            ["clone", url, str(oacp_root)],
+            runner,
+            timeout=GIT_NETWORK_TIMEOUT_SECONDS,
+        )
     except Exception:
         if not oacp_root.exists():
             shutil.move(str(backup), str(oacp_root))

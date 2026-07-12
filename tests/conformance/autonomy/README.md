@@ -26,6 +26,13 @@ Consumers may add implementation-specific trace fields, but `decision`, `mode`,
 These fixtures may also include:
 
 - `actuals:` pointing at checkpoint input under `actuals/`
+- `audits:` pointing at prior same-thread audit records under `audits/`
 - `expected.logged_notes` for demoted side-effect verb matches
 - `expected.continuation_grant` for default-off and enabled grant behavior
 - `expected.result.threshold_checkpoint` for envelope drift decisions
+- `expected.breached` for the pinned top-level breach list
+- `expected.task_profile` for full declared-profile capture
+
+The executable runner is `tests/test_autonomy_gate.py`; every expected fixture
+is evaluated against `scripts/autonomy_gate.py`. Evaluator reason codes are a
+pinned enum, and any unregistered code fails the runner.

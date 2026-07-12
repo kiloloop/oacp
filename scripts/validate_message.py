@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import math
 import re
 import sys
 from pathlib import Path
@@ -38,6 +39,12 @@ OPTIONAL_FIELDS = (
     "expires_at",
     "channel",
     "autonomy_hint",
+    "model",
+    "turns",
+    "input_tokens",
+    "output_tokens",
+    "wall_time_s",
+    "est_cost_usd",
 )
 ALLOWED_FIELDS = set(REQUIRED_FIELDS + OPTIONAL_FIELDS)
 ALLOWED_TYPES = {
@@ -56,6 +63,19 @@ ALLOWED_TYPES = {
 }
 ALLOWED_PRIORITIES = {"P0", "P1", "P2", "P3"}
 ALLOWED_AUTONOMY_HINTS = frozenset({"auto_proceed"})
+REVIEW_TELEMETRY_FIELDS = frozenset({
+    "model",
+    "turns",
+    "input_tokens",
+    "output_tokens",
+    "wall_time_s",
+    "est_cost_usd",
+})
+REVIEW_TELEMETRY_TYPES = frozenset({
+    "review_feedback",
+    "review_lgtm",
+    "review_addressed",
+})
 UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 CONVERSATION_ID_RE = re.compile(r"^conv-\d{8}-[A-Za-z0-9._-]{1,64}-\d{1,6}$")
@@ -212,6 +232,24 @@ def _agent_pattern_error(field: str, value: Optional[str] = None) -> str:
     return f"field '{field}' list entry '{value}' must match {AGENT_RE.pattern}"
 
 
+def _is_nonnegative_int(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value >= 0
+    return bool(re.fullmatch(r"\d+", str(value).strip()))
+
+
+def _is_nonnegative_number(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    try:
+        number = float(str(value).strip())
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(number) and number >= 0
+
+
 def validate_message_dict(data: Dict[str, Any]) -> List[str]:
     errors: List[str] = []
 
@@ -273,6 +311,23 @@ def validate_message_dict(data: Dict[str, Any]) -> List[str]:
         errors.append(f"field 'type' must be one of: {', '.join(sorted(ALLOWED_TYPES))}")
     if priority and priority not in ALLOWED_PRIORITIES:
         errors.append(f"field 'priority' must be one of: {', '.join(sorted(ALLOWED_PRIORITIES))}")
+
+    present_telemetry = REVIEW_TELEMETRY_FIELDS.intersection(data)
+    if present_telemetry and msg_type not in REVIEW_TELEMETRY_TYPES:
+        errors.append(
+            "review telemetry fields are allowed only for: "
+            f"{', '.join(sorted(REVIEW_TELEMETRY_TYPES))}"
+        )
+    if "model" in data:
+        model = data.get("model")
+        if not isinstance(model, str) or not model.strip():
+            errors.append("field 'model' must be a non-empty string")
+    for field in ("turns", "input_tokens", "output_tokens"):
+        if field in data and not _is_nonnegative_int(data.get(field)):
+            errors.append(f"field '{field}' must be a non-negative integer")
+    for field in ("wall_time_s", "est_cost_usd"):
+        if field in data and not _is_nonnegative_number(data.get(field)):
+            errors.append(f"field '{field}' must be a non-negative number")
 
     autonomy_hint_value = data.get("autonomy_hint", "")
     if not isinstance(autonomy_hint_value, (dict, list)):

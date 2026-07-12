@@ -663,6 +663,10 @@ def handle_mcp_request(coordinator: OACPCoordinator, request: Dict[str, Any]) ->
             if request_id is None:
                 return None
             return jsonrpc_error(request_id, -32000, str(exc))
+        except Exception:
+            if request_id is None:
+                return None
+            return jsonrpc_error(request_id, -32603, "internal error")
         if request_id is None:
             return None
         return jsonrpc_result(

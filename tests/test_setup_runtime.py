@@ -44,11 +44,33 @@ class TestSetupRuntime(unittest.TestCase):
             settings = json.loads(settings_file.read_text(encoding="utf-8"))
             self.assertIn("SessionStart", settings["hooks"])
             self.assertIn("SessionEnd", settings["hooks"])
+            self.assertIn("PreToolUse", settings["hooks"])
+            envelope_entry = settings["hooks"]["PreToolUse"][0]
+            self.assertEqual(envelope_entry["matcher"], "Bash|Edit|Write|NotebookEdit")
+            self.assertEqual(
+                envelope_entry["hooks"][0]["command"], "oacp-envelope-hook"
+            )
             self.assertIn(".claude/agents/myproj.md", result["created_files"])
             self.assertIn(".claude/skills/", result["created_files"])
             self.assertIn(".claude/hooks/oacp-memory-pull.sh", result["created_files"])
             self.assertIn(".claude/hooks/oacp-memory-push.sh", result["created_files"])
             self.assertIn(".claude/settings.json", result["created_files"])
+
+    def test_claude_envelope_hook_registration_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            setup_runtime("claude", repo_dir=repo_dir, project_name="myproj")
+            setup_runtime("claude", repo_dir=repo_dir, project_name="myproj")
+
+            settings_file = repo_dir / ".claude" / "settings.json"
+            settings = json.loads(settings_file.read_text(encoding="utf-8"))
+            envelope_entries = [
+                entry
+                for entry in settings["hooks"]["PreToolUse"]
+                for hook in entry.get("hooks", [])
+                if hook.get("command") == "oacp-envelope-hook"
+            ]
+            self.assertEqual(len(envelope_entries), 1)
 
     def test_codex_creates_agents_md(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

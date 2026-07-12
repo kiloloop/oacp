@@ -1,0 +1,20 @@
+id: msg-20260710235300-iris-minutes-46
+from: iris
+to: codex
+type: task_request
+priority: P2
+created_at_utc: "2026-07-10T23:53:00Z"
+subject: "Forty-six minute task"
+body: |
+  ## Task
+  Update one bounded protocol example.
+
+  task_profile:
+    estimated_minutes: 46
+    risk_tier: P2
+    expected_files_touched: 2
+    destructive_ops: false
+    external_side_effects: false
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: false

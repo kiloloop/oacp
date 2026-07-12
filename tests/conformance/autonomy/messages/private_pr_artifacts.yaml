@@ -1,0 +1,25 @@
+id: msg-20260710235400-iris-private-pr
+from: iris
+to: codex
+type: task_request
+priority: P2
+created_at_utc: "2026-07-10T23:54:00Z"
+subject: "Private repository PR artifacts"
+body: |
+  ## Task
+  Update the existing branch, open a pull request, and post the review comment.
+
+  task_profile:
+    estimated_minutes: 30
+    risk_tier: P2
+    expected_files_touched: 3
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: false
+    target_repo: example-org/private-repo
+    creates_or_updates_pr: true
+    comments_on_github: true
+    commits_changes: true
+    sends_oacp_reply_only: false

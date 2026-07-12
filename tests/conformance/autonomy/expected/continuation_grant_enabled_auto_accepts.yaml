@@ -2,6 +2,8 @@ case: continuation_grant_enabled_auto_accepts
 config: configs/auto_review_continuation_enabled.yaml
 message: messages/continuation_grant.yaml
 actuals: actuals/continuation_within.yaml
+audits:
+  - audits/prior_thread_grant_approved.yaml
 expected:
   decision: auto_accepted
   mode: auto_review
@@ -17,6 +19,8 @@ expected:
     - continuation_grant_accepted
   continuation_grant:
     decision: accepted
+    standing_grant_found: true
+    source_message_id: msg-20260526041000-iris-parent
   result:
     final_state: done
     predicted_risk_materialized: false

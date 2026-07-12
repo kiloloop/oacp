@@ -33,10 +33,16 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from _oacp_constants import ALL_RUNTIMES, CANONICAL_CAPABILITIES, utc_now_iso
+from _oacp_constants import (
+    ALL_RUNTIMES,
+    CANONICAL_CAPABILITIES,
+    REPO_SLUG_RE,
+    utc_now_iso,
+)
 from memory_sync import (
     CANONICAL_MEMORY_GITIGNORE,
     MARKER_FILE,
+    Runner as MemorySyncRunner,
     STALE_MEMORY_DAYS,
     MemorySyncError,
     compute_git_state,
@@ -53,7 +59,7 @@ from memory_sync import (
     untracked_files,
 )
 
-Runner = Callable[[Sequence[str]], Tuple[int, str]]
+DoctorRunner = Callable[[Sequence[str]], Tuple[int, str]]
 WhichFn = Callable[[str], Optional[str]]
 
 VALID_RUNTIMES = set(ALL_RUNTIMES)
@@ -72,6 +78,7 @@ AUTONOMY_THRESHOLD_POLICY_KEYS = {
     "git_push_or_deploy",
 }
 AUTONOMY_POLICY_ACTIONS = {"pause"}
+AUTONOMY_EXTERNAL_SIDE_EFFECT_ACTIONS = {"pause", "allow_pr_artifacts", "allow"}
 STALE_STATUS_HOURS = 1
 STALE_INBOX_HOURS = 24
 YAML_EXTENSIONS = {".yaml", ".yml"}
@@ -141,7 +148,7 @@ def run_command(command: Sequence[str]) -> Tuple[int, str]:
     return completed.returncode, combined.strip()
 
 
-def _get_version(tool: str, runner: Runner) -> Optional[str]:
+def _get_version(tool: str, runner: DoctorRunner) -> Optional[str]:
     """Try to get a version string from a tool."""
     rc, output = runner([tool, "--version"])
     if rc != 0:
@@ -164,7 +171,7 @@ def _try_yaml_import() -> Optional[Any]:
 
 
 def check_environment(
-    runner: Runner = run_command,
+    runner: DoctorRunner = run_command,
     which_fn: WhichFn = shutil.which,
 ) -> DoctorCategory:
     """Check required and optional CLI tools."""
@@ -531,9 +538,15 @@ def validate_autonomy_config_data(data: Any) -> List[str]:
             if value is None:
                 errors.append(f"autonomy.auto_review_thresholds.{key} is required")
                 continue
-            if str(value) not in AUTONOMY_POLICY_ACTIONS:
+            allowed = (
+                AUTONOMY_EXTERNAL_SIDE_EFFECT_ACTIONS
+                if key == "external_side_effects"
+                else AUTONOMY_POLICY_ACTIONS
+            )
+            if str(value) not in allowed:
                 errors.append(
-                    f"autonomy.auto_review_thresholds.{key} must be 'pause' in Phase 1"
+                    f"autonomy.auto_review_thresholds.{key} must be one of: "
+                    f"{', '.join(sorted(allowed))}"
                 )
 
     allow_without_profile = autonomy.get("allow_without_task_profile", [])
@@ -558,6 +571,18 @@ def validate_autonomy_config_data(data: Any) -> List[str]:
         errors.append(
             "autonomy.trusted_senders is not supported; sender trust is messenger-bound"
         )
+
+    private_repos = autonomy.get("private_repo_allowlist", [])
+    if private_repos is None:
+        private_repos = []
+    if not isinstance(private_repos, list):
+        errors.append("autonomy.private_repo_allowlist must be a list")
+    else:
+        for repo in private_repos:
+            if not isinstance(repo, str) or not REPO_SLUG_RE.fullmatch(repo):
+                errors.append(
+                    "autonomy.private_repo_allowlist entries must use owner/repo"
+                )
 
     continuation_grants = autonomy.get("continuation_grants", {})
     if continuation_grants is None:
@@ -759,7 +784,7 @@ def _summarize_paths(paths: List[str], *, limit: int = 3) -> str:
 def check_memory_sync(
     oacp_dir: Path,
     *,
-    runner: Runner = run_command,
+    runner: DoctorRunner = run_command,
     now_fn: Optional[Callable[[], dt.datetime]] = None,
 ) -> DoctorCategory:
     """Check OACP_HOME memory sync configuration and git state."""
@@ -767,10 +792,24 @@ def check_memory_sync(
     marker = oacp_dir / MARKER_FILE
 
     if runner is run_command:
-        def git_runner(command: Sequence[str]) -> Tuple[int, str]:
-            return run_git_command(command, cwd=oacp_dir)
+        def default_git_runner(
+            command: Sequence[str],
+            *,
+            timeout: Optional[int] = None,
+        ) -> Tuple[int, str]:
+            return run_git_command(command, cwd=oacp_dir, timeout=timeout)
+
+        git_runner: MemorySyncRunner = default_git_runner
     else:
-        git_runner = runner
+        def custom_git_runner(
+            command: Sequence[str],
+            *,
+            timeout: Optional[int] = None,
+        ) -> Tuple[int, str]:
+            del timeout
+            return runner(command)
+
+        git_runner = custom_git_runner
 
     if not is_configured(oacp_dir):
         cat.results.append(
@@ -1151,7 +1190,7 @@ def run_doctor(
     project: Optional[str] = None,
     oacp_dir: Path,
     include_memory: bool = False,
-    runner: Runner = run_command,
+    runner: DoctorRunner = run_command,
     yaml_loader: Optional[Any] = None,
     which_fn: WhichFn = shutil.which,
     now_fn: Optional[Callable[[], dt.datetime]] = None,

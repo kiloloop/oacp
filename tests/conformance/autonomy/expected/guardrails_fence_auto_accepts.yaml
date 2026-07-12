@@ -1,0 +1,23 @@
+case: guardrails_fence_auto_accepts
+config: configs/auto_review_standard.yaml
+message: messages/guardrails_fence.yaml
+expected:
+  decision: auto_accepted
+  mode: auto_review
+  reason_codes:
+    - message_valid
+    - message_not_expired
+    - message_hash_recorded
+    - task_profile_present
+    - task_type_allowed
+    - risk_threshold_passed
+    - hard_stops_clear
+    - lexical_advisory
+    - workspace_check_required
+  logged_notes:
+    - matched_pattern: oacp-guardrails
+    - matched_pattern: deploy
+    - matched_pattern: publish
+    - matched_pattern: merge
+    - matched_pattern: auth
+    - matched_pattern: secrets
