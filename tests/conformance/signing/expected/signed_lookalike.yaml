@@ -1,0 +1,29 @@
+case: signed_lookalike
+expected:
+  annotation: '[oacp-auth] signed-verified signer=urn:oacp:agent:3f54e34d-9d31-4c8a-a5a7-64766f636170:alice
+    kid=Jh7IAlBx9CkS…'
+  message_auth:
+    alg: EdDSA
+    claimed_sender: alice
+    kid: Jh7IAlBx9CkSDWxLetPWKXl4q7bdaA57unfb0pP1zEk
+    payload_sha256: c2fc9a711fe8f9302813f56f5d1411ddebe3fb57828eb540c87fae4d74fdcc75
+    reason: null
+    scheme: raw-prefix-v1
+    signatures_checked:
+    - agent: urn:oacp:agent:3f54e34d-9d31-4c8a-a5a7-64766f636170:alice
+      kid: Jh7IAlBx9CkSDWxLetPWKXl4q7bdaA57unfb0pP1zEk
+      outcome: verified
+    status: verified
+    trust_source: null
+    verified_instance: urn:uuid:aa11e9c2-0000-4000-8000-666978747572
+    verified_signer: urn:oacp:agent:3f54e34d-9d31-4c8a-a5a7-64766f636170:alice
+  prefix_sha256: c2fc9a711fe8f9302813f56f5d1411ddebe3fb57828eb540c87fae4d74fdcc75
+  raw_sha256: 30d0ec4a21f9a2fc468aca428de52347b0d176f7fdd27de71229eee6d1e84c83
+  signing_input_sha256:
+  - 2a5be6bfb6b570718f56848625dc1197513e9c31540f65de9aa0d4241fc39666
+  trailer_state: ok
+  validate_errors: []
+message: messages/signed_lookalike.yaml
+prefix: messages/signed_lookalike.prefix.yaml
+signers:
+- alice

@@ -14,6 +14,10 @@ expected:
     - hard_stops_clear
     - workspace_check_required
   breached: []
+  co_occurring_reason_codes: []
+  result:
+    final_state: done
+    completion_kind: auto_accepted
   task_profile:
     estimated_minutes: 20
     risk_tier: P3

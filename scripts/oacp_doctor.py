@@ -769,7 +769,64 @@ def check_agent_status(
     return cat
 
 
-# ── Category 6: Memory Sync ──────────────────────────────────────────────
+# ── Category 6: Trust Root ───────────────────────────────────────────────
+
+
+def check_trust(project_dir: Path) -> DoctorCategory:
+    """Check catalog-vs-pins drift for the project's signing trust root.
+
+    Zero-authority semantics: an unpinned catalog
+    identity is the normal resting state; a *pinned* identity missing from
+    the catalog, or an entry whose kid is not the thumbprint of its jwk,
+    is the drift this check reports.
+    """
+    cat = DoctorCategory(name="Trust Root")
+    try:
+        from trust_root import DRIFT_ERROR, DRIFT_WARN, drift_report, has_trust_root
+    except ImportError as exc:  # pragma: no cover - packaging guard
+        cat.results.append(DoctorResult(
+            name="trust-root",
+            severity=Severity.skip,
+            message=f"trust_root module unavailable: {exc}",
+        ))
+        return cat
+
+    if not has_trust_root(project_dir):
+        cat.results.append(DoctorResult(
+            name="trust-root",
+            severity=Severity.skip,
+            message="no trust files — message signing not in use for this project",
+            fix_hint="Opt in with `oacp key gen` + `oacp trust import`",
+        ))
+        return cat
+
+    severity_map = {DRIFT_ERROR: Severity.error, DRIFT_WARN: Severity.warn}
+    for finding in drift_report(project_dir):
+        severity = severity_map.get(finding["severity"], Severity.ok)
+        fix_hint = None
+        if finding["code"] == "pin-not-in-catalog":
+            fix_hint = (
+                "Re-import the stub with `oacp trust import` to record the "
+                "identity, or remove the pin"
+            )
+        elif finding["code"] == "catalog-not-pinned":
+            fix_hint = (
+                "Pin with `oacp trust import <stub> --project <name> "
+                "--agent <receiver>`, or leave unpinned if this receiver "
+                "should not trust that identity"
+            )
+        elif severity is Severity.error:
+            fix_hint = "Inspect with `oacp trust list --project <name>`"
+        cat.results.append(DoctorResult(
+            name=f"trust-{finding['code']}",
+            severity=severity,
+            message=finding["message"],
+            fix_hint=fix_hint,
+        ))
+    return cat
+
+
+# ── Category 7: Memory Sync ──────────────────────────────────────────────
 
 
 def _summarize_paths(paths: List[str], *, limit: int = 3) -> str:
@@ -1219,6 +1276,7 @@ def run_doctor(
             categories.append(check_schemas(project_dir, yaml_loader=yaml_loader))
             categories.append(check_autonomy(project_dir, yaml_loader=yaml_loader))
             categories.append(check_agent_status(project_dir, yaml_loader=yaml_loader, now_fn=now_fn))
+            categories.append(check_trust(project_dir))
 
     if include_memory:
         categories.append(check_memory_sync(oacp_dir, runner=runner, now_fn=now_fn))

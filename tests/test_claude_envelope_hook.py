@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -68,6 +69,22 @@ def _pin_repo_resolution(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         hook, "resolve_current_branch", lambda *a, **k: "feat/widget"
     )
+
+
+@pytest.fixture(autouse=True)
+def _pin_scratchpad_prefixes(monkeypatch: pytest.MonkeyPatch):
+    """Pin the scratchpad roots to a neutral value: pytest's own tmp dirs can
+    live under the runtime scratchpad (sandboxed $TMPDIR), which would exempt
+    every fixture path from the counter and invert the counter tests."""
+    monkeypatch.setattr(hook, "SCRATCHPAD_PREFIXES", ("/scratchpad/",))
+
+
+@pytest.fixture(autouse=True)
+def _clear_ambient_gh_env(monkeypatch: pytest.MonkeyPatch):
+    """Ambient GH_REPO/GH_HOST now feed gh classification — clear them so
+    the developer's or CI runner's environment cannot flip gh tests."""
+    monkeypatch.delenv("GH_REPO", raising=False)
+    monkeypatch.delenv("GH_HOST", raising=False)
 
 
 # ── Bash: destructive tokens ─────────────────────────────────────────────────
@@ -190,14 +207,284 @@ def test_gh_pr_comment_gated_by_comments_flag() -> None:
     assert allowed.action == "allow"
 
 
-def test_gh_pr_merge_always_denied() -> None:
+def test_gh_pr_merge_denied_when_not_declared() -> None:
     decision = bash("gh pr merge 12 --squash")
     assert decision.action == "deny"
-    assert "allow class" in decision.reason
+    assert "merges_pr" in decision.reason
 
 
-def test_gh_issue_create_denied() -> None:
-    assert bash("gh issue create --title x").action == "deny"
+def test_gh_pr_merge_allowed_when_declared() -> None:
+    envelope = make_envelope(merges_pr=True)
+    assert bash("gh pr merge 12 --squash", envelope).action == "allow"
+
+
+def test_gh_pr_merge_declared_still_repo_gated() -> None:
+    envelope = make_envelope(merges_pr=True, target_repo="example-org/other")
+    decision = bash("gh pr merge 12 --squash", envelope)
+    assert decision.action == "deny"
+    assert "target_repo" in decision.reason
+
+
+def test_gh_issue_create_denied_when_not_declared() -> None:
+    decision = bash("gh issue create --title x")
+    assert decision.action == "deny"
+    assert "files_issues" in decision.reason
+
+
+def test_gh_issue_lifecycle_allowed_when_declared() -> None:
+    envelope = make_envelope(files_issues=True)
+    assert bash("gh issue create --title x", envelope).action == "allow"
+    assert bash("gh issue edit 7 --add-label bug", envelope).action == "allow"
+    assert bash("gh issue close 7", envelope).action == "allow"
+    assert bash("gh label create triage", envelope).action == "allow"
+
+
+def test_gh_issue_destructive_verbs_stay_denied_even_declared() -> None:
+    envelope = make_envelope(files_issues=True)
+    assert bash("gh issue delete 7", envelope).action == "deny"
+    assert bash("gh issue transfer 7 example-org/other", envelope).action == "deny"
+    assert bash("gh label delete triage", envelope).action == "deny"
+
+
+def test_gh_merge_and_issue_capabilities_are_independent() -> None:
+    merge_only = make_envelope(merges_pr=True)
+    assert bash("gh issue create --title x", merge_only).action == "deny"
+    issues_only = make_envelope(files_issues=True)
+    assert bash("gh pr merge 12 --squash", issues_only).action == "deny"
+
+
+# The repo gate must judge the repository gh will actually mutate: URL
+# positionals and repeated -R/--repo flags can retarget the command.
+
+
+def test_gh_pr_merge_cross_repo_url_positional_denied() -> None:
+    envelope = make_envelope(merges_pr=True)
+    decision = bash(
+        "gh pr merge https://github.com/other-org/public-repo/pull/7 --squash",
+        envelope,
+    )
+    assert decision.action == "deny"
+    assert "other-org/public-repo" in decision.reason
+
+
+def test_gh_issue_edit_cross_repo_url_positional_denied() -> None:
+    envelope = make_envelope(files_issues=True)
+    decision = bash(
+        "gh issue edit https://github.com/other-org/public-repo/issues/9 "
+        "--title changed",
+        envelope,
+    )
+    assert decision.action == "deny"
+    assert "other-org/public-repo" in decision.reason
+
+
+def test_gh_pr_merge_same_repo_url_positional_allowed() -> None:
+    envelope = make_envelope(merges_pr=True)
+    decision = bash(
+        "gh pr merge https://github.com/example-org/private-repo/pull/7 "
+        "--squash",
+        envelope,
+    )
+    assert decision.action == "allow"
+
+
+def test_gh_pr_merge_duplicated_repo_flags_escalate() -> None:
+    envelope = make_envelope(merges_pr=True)
+    decision = bash(
+        "gh pr merge 7 --repo example-org/private-repo "
+        "--repo other-org/public-repo --squash",
+        envelope,
+    )
+    assert decision.action == "ask"
+    assert "conflicting repository selectors" in decision.reason
+
+
+def test_gh_pr_merge_url_flag_conflict_escalates() -> None:
+    envelope = make_envelope(merges_pr=True)
+    decision = bash(
+        "gh pr merge https://github.com/other-org/public-repo/pull/7 "
+        "-R example-org/private-repo --squash",
+        envelope,
+    )
+    assert decision.action == "ask"
+
+
+def test_gh_pr_merge_non_github_url_escalates() -> None:
+    envelope = make_envelope(merges_pr=True)
+    decision = bash(
+        "gh pr merge https://ghe.example.com/o/r/pull/7 --squash", envelope
+    )
+    assert decision.action == "ask"
+    assert "cannot be resolved" in decision.reason
+
+
+def test_gh_pr_merge_agreeing_selectors_still_repo_gated() -> None:
+    envelope = make_envelope(merges_pr=True)
+    decision = bash(
+        "gh pr merge https://github.com/other-org/public-repo/pull/7 "
+        "-R other-org/public-repo --squash",
+        envelope,
+    )
+    assert decision.action == "deny"
+    assert "other-org/public-repo" in decision.reason
+
+
+def test_gh_pr_comment_cross_repo_url_positional_denied() -> None:
+    envelope = make_envelope(comments_on_github=True)
+    decision = bash(
+        "gh pr comment https://github.com/other-org/public-repo/pull/7 "
+        "--body hi",
+        envelope,
+    )
+    assert decision.action == "deny"
+
+
+def test_gh_pr_merge_branch_positional_uses_cwd_repo() -> None:
+    envelope = make_envelope(merges_pr=True)
+    assert bash("gh pr merge feat/widget --squash", envelope).action == "allow"
+
+
+# GH_REPO/GH_HOST assignments and earlier compound-segment shell state can
+# retarget gh after the cwd-based gate approved it.
+
+
+def test_gh_repo_assignment_cross_repo_denied() -> None:
+    envelope = make_envelope(merges_pr=True)
+    decision = bash(
+        "GH_REPO=other-org/public-repo gh pr merge 7 --squash", envelope
+    )
+    assert decision.action == "deny"
+    assert "other-org/public-repo" in decision.reason
+
+
+def test_gh_repo_assignment_env_wrapper_cross_repo_denied() -> None:
+    envelope = make_envelope(files_issues=True)
+    decision = bash(
+        "env GH_REPO=other-org/public-repo gh issue edit 9 --title changed",
+        envelope,
+    )
+    assert decision.action == "deny"
+    assert "other-org/public-repo" in decision.reason
+
+
+def test_gh_repo_assignment_matching_repo_allowed() -> None:
+    envelope = make_envelope(merges_pr=True)
+    decision = bash(
+        "GH_REPO=example-org/private-repo gh pr merge 7 --squash", envelope
+    )
+    assert decision.action == "allow"
+
+
+def test_gh_repo_assignment_conflicting_flag_escalates() -> None:
+    envelope = make_envelope(merges_pr=True)
+    decision = bash(
+        "GH_REPO=other-org/public-repo gh pr merge 7 "
+        "-R example-org/private-repo --squash",
+        envelope,
+    )
+    assert decision.action == "ask"
+    assert "conflicting repository selectors" in decision.reason
+
+
+def test_gh_repo_assignment_host_prefixed_github_parsed() -> None:
+    envelope = make_envelope(merges_pr=True)
+    decision = bash(
+        "GH_REPO=github.com/example-org/private-repo gh pr merge 7 --squash",
+        envelope,
+    )
+    assert decision.action == "allow"
+
+
+def test_gh_repo_assignment_foreign_host_escalates() -> None:
+    envelope = make_envelope(merges_pr=True)
+    decision = bash(
+        "GH_REPO=ghe.example.com/o/r gh pr merge 7 --squash", envelope
+    )
+    assert decision.action == "ask"
+
+
+def test_gh_host_assignment_escalates() -> None:
+    envelope = make_envelope(merges_pr=True)
+    decision = bash(
+        "GH_HOST=ghe.example.com gh pr merge 7 --squash", envelope
+    )
+    assert decision.action == "ask"
+    assert "GH_HOST" in decision.reason
+
+
+def test_gh_mutation_after_cd_segment_escalates() -> None:
+    envelope = make_envelope(merges_pr=True)
+    decision = bash(
+        "cd /checkout/of/other-org/public-repo && gh pr merge 7 --squash",
+        envelope,
+    )
+    assert decision.action == "ask"
+    assert "compound" in decision.reason
+
+
+def test_gh_mutation_after_export_segment_escalates() -> None:
+    envelope = make_envelope(files_issues=True)
+    decision = bash(
+        "export GH_REPO=other-org/public-repo; gh issue edit 9 --title changed",
+        envelope,
+    )
+    assert decision.action == "ask"
+
+
+def test_gh_readonly_in_compound_still_allowed() -> None:
+    assert bash("git status && gh pr view 12 --json state").action == "allow"
+
+
+# Ambient GH_REPO/GH_HOST inherited by the Bash child retarget gh exactly
+# like inline assignments — the hook must gate the effective environment.
+
+
+def test_ambient_gh_repo_cross_repo_denied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GH_REPO", "other-org/public-repo")
+    envelope = make_envelope(merges_pr=True)
+    decision = bash("gh pr merge 7 --squash", envelope)
+    assert decision.action == "deny"
+    assert "other-org/public-repo" in decision.reason
+
+
+def test_ambient_gh_repo_matching_repo_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GH_REPO", "example-org/private-repo")
+    envelope = make_envelope(merges_pr=True)
+    assert bash("gh pr merge 7 --squash", envelope).action == "allow"
+
+
+def test_ambient_gh_host_escalates(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GH_HOST", "github.com")
+    envelope = make_envelope(merges_pr=True)
+    decision = bash("gh pr merge 7 --squash", envelope)
+    assert decision.action == "ask"
+    assert "GH_HOST" in decision.reason
+
+
+def test_inline_gh_repo_overrides_ambient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Shell precedence: the inline assignment is what the child sees.
+    monkeypatch.setenv("GH_REPO", "other-org/public-repo")
+    envelope = make_envelope(merges_pr=True)
+    decision = bash(
+        "GH_REPO=example-org/private-repo gh pr merge 7 --squash", envelope
+    )
+    assert decision.action == "allow"
+
+
+def test_ambient_gh_repo_unparseable_escalates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GH_REPO", "ghe.example.com/o/r")
+    envelope = make_envelope(files_issues=True)
+    decision = bash("gh issue edit 9 --title changed", envelope)
+    assert decision.action == "ask"
+    assert "GH_REPO" in decision.reason
 
 
 def test_gh_release_denied() -> None:
@@ -659,3 +946,508 @@ def test_main_malformed_stdin_asks(monkeypatch, capsys) -> None:
     assert hook.main([]) == 0
     output = json.loads(capsys.readouterr().out)
     assert output["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+
+# ── Completion clear: audit-sanctioned envelope exit ─────────────────────────
+
+
+CLEAR_CMD = "oacp envelope clear --project test-proj --receiver claude"
+
+
+def _write_audit_record(
+    tmp_path: Path,
+    message_id: str = "msg-1",
+    final_state: str = "done",
+    stamp: str = "20260713T000000Z",
+    receiver: str = "claude",
+    filename_id: Optional[str] = None,
+    body: Optional[str] = None,
+) -> Path:
+    audit_dir = (
+        tmp_path
+        / "home"
+        / "projects"
+        / "test-proj"
+        / "agents"
+        / "claude"
+        / "audit"
+        / "autonomy_decisions"
+    )
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    record = audit_dir / f"{stamp}_{filename_id or message_id}.yaml"
+    if body is None:
+        body = (
+            f"message_id: {message_id}\n"
+            f"receiver: {receiver}\n"
+            f"result:\n  final_state: {final_state}\n"
+        )
+    record.write_text(body, encoding="utf-8")
+    return record
+
+
+def _process_bash(repo: Path, command: str) -> hook.Decision:
+    return hook.process(
+        {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(repo)}
+    )
+
+
+def _process_write(repo: Path, file_path: str) -> hook.Decision:
+    return hook.process(
+        {"tool_name": "Write", "tool_input": {"file_path": file_path}, "cwd": str(repo)}
+    )
+
+
+def test_envelope_clear_denied_without_audit_record(tmp_path: Path) -> None:
+    # Regression: the documented completion step used to be blanket-denied,
+    # stranding the envelope; it must still deny while nothing sanctions it.
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    decision = _process_bash(repo, CLEAR_CMD)
+    assert decision.action == "deny"
+    assert "audit record" in decision.reason
+
+
+def test_envelope_clear_denied_while_audit_pending(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    _write_audit_record(tmp_path, final_state="pending")
+    decision = _process_bash(repo, CLEAR_CMD)
+    assert decision.action == "deny"
+    assert "pending" in decision.reason
+
+
+def test_envelope_clear_denied_while_audit_paused(tmp_path: Path) -> None:
+    # A checkpoint-paused task re-authorizes via compile --extend, not clear.
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    _write_audit_record(tmp_path, final_state="paused")
+    decision = _process_bash(repo, CLEAR_CMD)
+    assert decision.action == "deny"
+    assert "paused" in decision.reason
+
+
+@pytest.mark.parametrize("state", ["done", "error"])
+def test_envelope_clear_allowed_after_terminal_audit(
+    tmp_path: Path, state: str
+) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    _write_audit_record(tmp_path, final_state=state)
+    decision = _process_bash(repo, CLEAR_CMD)
+    assert decision.action == "allow"
+
+
+def test_envelope_clear_uses_newest_audit_record(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    _write_audit_record(tmp_path, final_state="done", stamp="20260713T000000Z")
+    _write_audit_record(tmp_path, final_state="paused", stamp="20260714T000000Z")
+    decision = _process_bash(repo, CLEAR_CMD)
+    assert decision.action == "deny"
+
+
+def test_envelope_clear_other_project_asks(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    _write_audit_record(tmp_path, final_state="done")
+    decision = _process_bash(repo, "oacp envelope clear --project other-proj")
+    assert decision.action == "ask"
+
+
+def test_envelope_clear_other_receiver_asks(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    _write_audit_record(tmp_path, final_state="done")
+    decision = _process_bash(
+        repo, "oacp envelope clear --project test-proj --receiver codex"
+    )
+    assert decision.action == "ask"
+
+
+def test_envelope_clear_matching_oacp_dir_allowed(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    _write_audit_record(tmp_path, final_state="done")
+    home = tmp_path / "home"
+    decision = _process_bash(repo, f"{CLEAR_CMD} --oacp-dir {home}")
+    assert decision.action == "allow"
+
+
+def test_envelope_clear_foreign_oacp_dir_asks(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    _write_audit_record(tmp_path, final_state="done")
+    decision = _process_bash(repo, f"{CLEAR_CMD} --oacp-dir /somewhere/else")
+    assert decision.action == "ask"
+
+
+def test_envelope_clear_corrupt_audit_asks(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    _write_audit_record(tmp_path, body="- not\n- a mapping\n")
+    decision = _process_bash(repo, CLEAR_CMD)
+    assert decision.action == "ask"
+
+
+def test_envelope_compile_still_denied_with_terminal_audit(tmp_path: Path) -> None:
+    # Completion sanctions the exit only; recompilation stays checkpoint-only.
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    _write_audit_record(tmp_path, final_state="done")
+    decision = _process_bash(repo, "oacp envelope compile msg.yaml --extend")
+    assert decision.action == "deny"
+
+
+# ── Bookkeeping surfaces: exempt from the file counter ───────────────────────
+
+
+def _exhausted_envelope() -> Dict[str, Any]:
+    envelope = make_envelope()  # expected_files_touched: 2
+    envelope["counters"]["files_touched"] = ["/repo/a.py", "/repo/b.py"]
+    return envelope
+
+
+def _agent_dir(tmp_path: Path) -> Path:
+    return tmp_path / "home" / "projects" / "test-proj" / "agents" / "claude"
+
+
+def test_audit_write_exempt_from_file_counter(tmp_path: Path) -> None:
+    # Regression (soak shape): tight honest declare, budget already consumed,
+    # then the mandatory completion audit write — must not deny or count.
+    repo = _make_workspace(tmp_path)
+    target = _install_envelope(tmp_path, _exhausted_envelope())
+    audit_path = (
+        _agent_dir(tmp_path) / "audit" / "autonomy_decisions" / "x_msg-1.yaml"
+    )
+    decision = _process_write(repo, str(audit_path))
+    assert decision.action == "allow"
+    stored = load_envelope(target)
+    assert stored["counters"]["files_touched"] == ["/repo/a.py", "/repo/b.py"]
+
+
+def test_scratchpad_write_exempt_from_file_counter(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    target = _install_envelope(tmp_path, _exhausted_envelope())
+    decision = _process_write(repo, "/scratchpad/reply-body.md")
+    assert decision.action == "allow"
+    stored = load_envelope(target)
+    assert stored["counters"]["files_touched"] == ["/repo/a.py", "/repo/b.py"]
+
+
+def test_inbox_outbox_writes_exempt(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    target = _install_envelope(tmp_path, _exhausted_envelope())
+    agent = _agent_dir(tmp_path)
+    for path in (
+        agent / "inbox" / "20260713_iris_task.yaml",
+        agent / "outbox" / "20260713_claude_reply.yaml",
+    ):
+        decision = _process_write(repo, str(path))
+        assert decision.action == "allow", path
+    stored = load_envelope(target)
+    assert stored["counters"]["files_touched"] == ["/repo/a.py", "/repo/b.py"]
+
+
+def test_envelope_state_write_denied_even_with_budget(tmp_path: Path) -> None:
+    # The active envelope is the policy object: direct writes are
+    # self-modification, categorically — not an uncounted bookkeeping write.
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())  # budget NOT exhausted
+    decision = _process_write(
+        repo, str(_agent_dir(tmp_path) / "state" / "active_envelope.json")
+    )
+    assert decision.action == "deny"
+    assert "self-modification" in decision.reason
+
+
+def test_envelope_state_rm_and_mv_denied(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    state_file = _agent_dir(tmp_path) / "state" / "active_envelope.json"
+    assert _process_bash(repo, f"rm {state_file}").action == "deny"
+    assert _process_bash(repo, f"mv {state_file} /tmp/x").action == "deny"
+
+
+def test_trust_root_writes_denied_when_auth_false(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    for path in (
+        _agent_dir(tmp_path) / "trust" / "allowed_signers.yaml",
+        tmp_path / "home" / "projects" / "test-proj" / "trust" / "catalog.yaml",
+    ):
+        decision = _process_write(repo, str(path))
+        assert decision.action == "deny", path
+        assert "trust root" in decision.reason
+
+
+def test_trust_root_write_counted_when_auth_declared(tmp_path: Path) -> None:
+    # With auth declared, trust writes are ordinary task scope: allowed
+    # while budget remains, and they consume the counter.
+    repo = _make_workspace(tmp_path)
+    envelope = make_envelope(touches_auth_config_or_secrets=True)
+    target = _install_envelope(tmp_path, envelope)
+    pins = _agent_dir(tmp_path) / "trust" / "allowed_signers.yaml"
+    decision = _process_write(repo, str(pins))
+    assert decision.action == "allow"
+    stored = load_envelope(target)
+    assert stored["counters"]["files_touched"] != []
+
+
+def test_bash_redirect_to_audit_dir_exempt(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    target = _install_envelope(tmp_path, _exhausted_envelope())
+    audit_path = (
+        _agent_dir(tmp_path) / "audit" / "autonomy_decisions" / "y_msg-1.yaml"
+    )
+    decision = _process_bash(repo, f"echo done > {audit_path}")
+    assert decision.action == "allow"
+    stored = load_envelope(target)
+    assert stored["counters"]["files_touched"] == ["/repo/a.py", "/repo/b.py"]
+
+
+def test_peer_agent_inbox_not_exempt(tmp_path: Path) -> None:
+    # The exemption is receiver-scoped: another agent's inbox is task scope.
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, _exhausted_envelope())
+    peer_inbox = (
+        tmp_path / "home" / "projects" / "test-proj" / "agents" / "iris"
+        / "inbox" / "msg.yaml"
+    )
+    decision = _process_write(repo, str(peer_inbox))
+    assert decision.action == "deny"
+    assert decision.reason.startswith(hook.BLOCKED_OPENER)
+
+
+def test_bookkeeping_exemption_is_not_a_secret_bypass(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, _exhausted_envelope())
+    decision = _process_write(repo, "/scratchpad/.env")
+    assert decision.action == "deny"
+    assert ".env" in decision.reason
+
+
+def test_ordinary_write_still_denied_at_ceiling(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, _exhausted_envelope())
+    decision = _process_write(repo, str(Path(repo) / "c.py"))
+    assert decision.action == "deny"
+    assert decision.reason.startswith(hook.BLOCKED_OPENER)
+    assert "expected 2, now 3" in decision.reason
+
+
+# ── Hardening regressions: exemption and clear-validation bypasses ───────────
+
+
+def test_envelope_clear_wildcard_message_id_denied(tmp_path: Path) -> None:
+    # Sender data must never act as a filesystem glob: a wildcard id must
+    # not adopt an unrelated terminal record.
+    repo = _make_workspace(tmp_path)
+    envelope = make_envelope()
+    envelope["message_id"] = "*"
+    _install_envelope(tmp_path, envelope)
+    _write_audit_record(tmp_path, message_id="msg-other", final_state="done")
+    decision = _process_bash(repo, CLEAR_CMD)
+    assert decision.action == "deny"
+
+
+def test_envelope_clear_filename_content_mismatch_denied(tmp_path: Path) -> None:
+    # Content identity governs, never the filename.
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    _write_audit_record(
+        tmp_path, message_id="msg-other", filename_id="msg-1", final_state="done"
+    )
+    decision = _process_bash(repo, CLEAR_CMD)
+    assert decision.action == "deny"
+
+
+def test_envelope_clear_wrong_receiver_record_denied(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    _write_audit_record(tmp_path, receiver="codex", final_state="done")
+    decision = _process_bash(repo, CLEAR_CMD)
+    assert decision.action == "deny"
+
+
+def test_envelope_clear_env_home_override_asks(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    _write_audit_record(tmp_path, final_state="done")
+    decision = _process_bash(repo, f"OACP_HOME=/tmp/foreign-home {CLEAR_CMD}")
+    assert decision.action == "ask"
+    assert "OACP_HOME" in decision.reason
+
+
+def test_envelope_clear_duplicate_flags_use_effective_value(tmp_path: Path) -> None:
+    # argparse takes the last occurrence; validation must judge that value.
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    _write_audit_record(tmp_path, final_state="done")
+    retargeted = _process_bash(
+        repo, f"{CLEAR_CMD} --project other-proj"
+    )
+    assert retargeted.action == "ask"
+    home = tmp_path / "home"
+    converging = _process_bash(
+        repo, f"{CLEAR_CMD} --oacp-dir /tmp/foreign-home --oacp-dir {home}"
+    )
+    assert converging.action == "allow"
+
+
+def test_envelope_clear_relative_oacp_dir_resolved(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    _write_audit_record(tmp_path, final_state="done")
+    decision = _process_bash(repo, f"{CLEAR_CMD} --oacp-dir ../home")
+    assert decision.action == "allow"
+
+
+def test_scratchpad_symlink_into_task_scope_not_exempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A symlink planted under an exempt root must not smuggle ordinary task
+    # scope past the counter: containment is judged on resolved paths.
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, _exhausted_envelope())
+    scratch = tmp_path / "scratch-claude"
+    scratch.mkdir()
+    (scratch / "alias").symlink_to(repo)
+    monkeypatch.setattr(
+        hook, "SCRATCHPAD_PREFIXES", (str(Path(os.path.realpath(scratch))) + "/",)
+    )
+    decision = _process_write(repo, str(scratch / "alias" / "ordinary.py"))
+    assert decision.action == "deny"
+    assert decision.reason.startswith(hook.BLOCKED_OPENER)
+
+
+def test_audit_dir_symlink_into_task_scope_not_exempt(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, _exhausted_envelope())
+    audit_dir = _agent_dir(tmp_path) / "audit" / "autonomy_decisions"
+    audit_dir.mkdir(parents=True)
+    (audit_dir / "alias").symlink_to(repo)
+    decision = _process_write(repo, str(audit_dir / "alias" / "ordinary.py"))
+    assert decision.action == "deny"
+    assert decision.reason.startswith(hook.BLOCKED_OPENER)
+
+
+def test_envelope_clear_in_compound_command_asks(tmp_path: Path) -> None:
+    # Earlier segments can retarget the clear after validation: a prior
+    # export or cd changes what the CLI resolves, so only a standalone
+    # simple command is sanctioned.
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    _write_audit_record(tmp_path, final_state="done")
+    for command in (
+        f"export OACP_HOME=/tmp/foreign-home; {CLEAR_CMD}",
+        f"cd /tmp; {CLEAR_CMD} --oacp-dir home",
+        f"echo done && {CLEAR_CMD}",
+        f"true; {CLEAR_CMD}",
+    ):
+        decision = _process_bash(repo, command)
+        assert decision.action == "ask", command
+
+
+def test_envelope_state_unlink_and_copy_out_denied(tmp_path: Path) -> None:
+    # Every filesystem-mutator operand under state/ is self-modification —
+    # deletion and exfiltration included, not just write destinations.
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    state_file = _agent_dir(tmp_path) / "state" / "active_envelope.json"
+    for command in (
+        f"unlink {state_file}",
+        f"cp {state_file} /tmp/exported-envelope.json",
+        f"truncate -s 0 {state_file}",
+    ):
+        decision = _process_bash(repo, command)
+        assert decision.action == "deny", command
+        assert "self-modification" in decision.reason
+
+
+def test_trust_root_mutations_denied_when_auth_false(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    pins = _agent_dir(tmp_path) / "trust" / "allowed_signers.yaml"
+    for command in (
+        f"rm {pins}",
+        f"unlink {pins}",
+        f"mv {pins} /tmp/exported-signers.yaml",
+    ):
+        decision = _process_bash(repo, command)
+        assert decision.action == "deny", command
+        assert "trust root" in decision.reason
+
+
+def test_trust_root_mutation_allowed_when_auth_declared(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(
+        tmp_path, make_envelope(touches_auth_config_or_secrets=True)
+    )
+    pins = _agent_dir(tmp_path) / "trust" / "allowed_signers.yaml"
+    decision = _process_bash(repo, f"rm {pins}")
+    assert decision.action == "allow"
+
+
+def test_mutator_expansion_operands_ask(tmp_path: Path) -> None:
+    # The shell expands globs/braces AFTER classification: a pattern operand
+    # can reach a protected path while its literal spelling does not.
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    agent = _agent_dir(tmp_path)
+    for command in (
+        f"unlink {agent}/st*/active_envelope.json",
+        f"rm {agent}/{{state,audit}}/x",
+        "rm build/*.pyc",
+        "rm $STATE/active_envelope.json",
+        "rm $TMPDIR/scratch.txt",
+    ):
+        decision = _process_bash(repo, command)
+        assert decision.action == "ask", command
+        assert "expansion" in decision.reason or "variable" in decision.reason
+
+
+def test_mutator_target_directory_forms_gated(tmp_path: Path) -> None:
+    # GNU target-directory spellings contribute their value as an operand.
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    state = _agent_dir(tmp_path) / "state"
+    trust = _agent_dir(tmp_path) / "trust"
+    for command in (
+        f"cp /tmp/payload --target-directory={state}",
+        f"cp /tmp/payload -t{state}",
+        f"cp /tmp/payload -t {state}",
+    ):
+        decision = _process_bash(repo, command)
+        assert decision.action == "deny", command
+        assert "self-modification" in decision.reason
+    linked = _process_bash(repo, f"ln /tmp/payload --target-directory={trust}")
+    assert linked.action == "deny"
+    assert "trust root" in linked.reason
+
+
+def test_mutator_dashdash_operand_gated(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    state_file = _agent_dir(tmp_path) / "state" / "active_envelope.json"
+    decision = _process_bash(repo, f"rm -- {state_file}")
+    assert decision.action == "deny"
+    assert "self-modification" in decision.reason
+
+
+def test_bash_write_target_expansion_asks(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    agent = _agent_dir(tmp_path)
+    for command in (
+        f"tee {agent}/st*/active_envelope.json",
+        "echo x > out*.txt",
+    ):
+        decision = _process_bash(repo, command)
+        assert decision.action == "ask", command
+        assert "expansion" in decision.reason
+
+
+def test_find_action_predicates_ask() -> None:
+    assert bash("find . -name '*.tmp' -delete").action == "ask"
+    assert bash("find . -name core -exec rm {} +").action == "ask"
+    assert bash("find . -name '*.py' -type f").action == "allow"

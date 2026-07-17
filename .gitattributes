@@ -1,0 +1,11 @@
+# The signing conformance corpus is byte-exact: EOL conversion or any
+# checkout filter would silently break the pinned digests (several vectors
+# are deliberate CRLF / trailing-whitespace artifacts).
+tests/conformance/signing/messages/** -text
+
+# Narrow whitespace-diagnostic exemptions for the three vectors whose test
+# data IS the whitespace violation — keeps `git diff --check` clean without
+# masking the rest of the corpus.
+tests/conformance/signing/messages/tamper_crlf_trailer.yaml whitespace=-trailing-space
+tests/conformance/signing/messages/tamper_trailing_space.yaml whitespace=-trailing-space
+tests/conformance/signing/messages/tamper_trailing_blank_line.yaml whitespace=-blank-at-eof

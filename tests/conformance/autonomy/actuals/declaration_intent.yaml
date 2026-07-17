@@ -1,0 +1,13 @@
+actual_minutes: 1
+actual_files_touched: 0
+predicted_risk_materialized: false
+paused_at_utc: "2026-07-17T06:04:00Z"
+breach_basis: declared_intent
+declared_intent_fields:
+  - task_profile.merges_pr
+side_effects_actual:
+  creates_or_updates_pr: false
+  comments_on_github: false
+  commits_changes: false
+  merges_pr: false
+  files_issues: false

@@ -1,0 +1,12 @@
+{
+  "_comment": "CONFORMANCE TEST VECTOR \u2014 fixture-only Ed25519 key, published deliberately (like RFC 8037 A.3). Grants no authority anywhere; never pin outside this corpus.",
+  "kty": "OKP",
+  "crv": "Ed25519",
+  "x": "dn3CiLKQYONRxzED718FXcDDiKuQzHpRDUR-xQMuVS4",
+  "d": "4ZxmGN7-95msym0SHR22Et1NLdCn16UIWyicmlieBpM",
+  "kid": "Jh7IAlBx9CkSDWxLetPWKXl4q7bdaA57unfb0pP1zEk",
+  "agent": "alice",
+  "trust_domain": "3f54e34d-9d31-4c8a-a5a7-64766f636170",
+  "instance_id": "aa11e9c2-0000-4000-8000-666978747572",
+  "created_at_utc": "2026-07-01T00:00:00Z"
+}

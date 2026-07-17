@@ -24,10 +24,24 @@ constraints and emits a PreToolUse ``permissionDecision``:
   bypass it.
 
 ``oacp send`` is never denied: it is the §E notification pipe. The exemption
-is exactly that wide — other oacp subcommands are classified, and envelope
-self-modification (``oacp envelope compile|clear``) is denied outright.
+is exactly that wide — other oacp subcommands are classified. Envelope
+self-modification is denied: ``oacp envelope compile`` always, and ``oacp
+envelope clear`` until the task's newest audit record shows a terminal
+``result.final_state`` — the protocol's documented completion clear is
+validated against that record instead of blanket-denied, so an enforced
+session can exit its own envelope exactly once the task lifecycle is over.
 Determinable Bash write targets (redirects and common writer programs) pass
 through the same secret/dependency/file-counter gate as Edit/Write calls.
+Protocol bookkeeping surfaces — the receiver's own audit/inbox/outbox
+directories and the runtime scratchpad — are the enforcement layer's
+instrumentation, not task scope: they never consume the
+``expected_files_touched`` budget (the secret and dependency gates still
+apply, and containment is judged on resolved paths so symlinks cannot smuggle
+task scope under an exempt root). The receiver's ``state/`` directory is the
+opposite of exempt: the active envelope lives there, and writing, removing,
+or relocating it from inside the session is denied as self-modification.
+Trust roots (receiver pins and the project catalog) are authority-bearing
+auth config, gated by ``touches_auth_config_or_secrets``.
 """
 
 from __future__ import annotations
@@ -41,12 +55,16 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from autonomy_gate import DESTRUCTIVE_PATTERNS
+from autonomy_gate import DESTRUCTIVE_PATTERNS, load_yaml_file
 from envelope_compiler import envelope_path, load_envelope, write_envelope
 
 BLOCKED_OPENER = "Blocked: autonomy threshold exceeded"
 
 SEGMENT_SPLIT_RE = re.compile(r"[;|&\n]+")
+# Shell expansion syntax the classifier cannot statically resolve: the shell
+# expands globs/braces AFTER classification, so a pattern operand can reach a
+# protected path while its literal spelling does not. Such operands escalate.
+EXPANSION_SYNTAX_RE = re.compile(r"[*?\[\]{}]")
 SUBSTITUTION_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
 REDIRECT_TARGET_RE = re.compile(r">>?\s*([^\s;|&]+)")
 ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -78,9 +96,26 @@ GIT_PUSH_BULK_FLAGS = {
     "--mirror", "--all", "--tags", "--follow-tags", "--delete", "-d", "--prune",
 }
 # oacp subcommands an enveloped session may always run (the send pipe plus
-# read-only surfaces). `envelope compile|clear|--extend` is self-modification
-# of the active constraints and is denied; everything else escalates.
+# read-only surfaces). `envelope compile|--extend` is self-modification of
+# the active constraints and is denied; `envelope clear` is the documented
+# completion step, sanctioned only by a terminal audit record (see
+# _classify_envelope_clear); everything else escalates.
 OACP_ALWAYS_ALLOWED = {"send", "inbox", "validate", "doctor", "watch", "help", ""}
+# `result.final_state` values that mark the task lifecycle over. `paused`
+# is deliberately absent: a checkpoint-paused task keeps its envelope and
+# re-authorizes via the §E flow (recompile with --extend), never via clear.
+TERMINAL_AUDIT_STATES = {"done", "error"}
+# Receiver-workspace directories that are protocol bookkeeping, not task
+# scope: audit records, inbox claims, outbox copies. Deliberately NOT the
+# receiver's state/ (the active envelope is the policy object — direct
+# writes are self-modification and deny) nor trust roots (authority-bearing
+# auth config, gated by touches_auth_config_or_secrets). The receiver's
+# config.yaml sits above all of these and stays fully gated.
+BOOKKEEPING_AGENT_SUBDIRS = ("audit", "inbox", "outbox")
+# Runtime scratchpad roots (reply/body-file composition). Deliberately
+# narrower than the OS temp root: exempting all of /tmp would let arbitrary
+# staging escape the counter, and would swallow test fixtures on CI.
+SCRATCHPAD_PREFIXES = ("/tmp/claude-", "/private/tmp/claude-")
 
 DEPENDENCY_FILENAMES = {
     "pyproject.toml",
@@ -116,15 +151,20 @@ DEPENDENCY_VERBS = {"install", "add", "remove", "uninstall"}
 GH_READONLY_ACTIONS = {"view", "list", "status", "checks", "diff", "download"}
 GH_PR_CLASS = {("pr", "create"), ("pr", "edit"), ("pr", "ready"), ("pr", "update-branch")}
 GH_COMMENT_CLASS = {("pr", "comment"), ("pr", "review"), ("issue", "comment")}
+# Constraint-gated classes for the granular capabilities beyond PR artifacts
+# and comments. `merges_pr` is exactly the merge; `files_issues` is issue
+# lifecycle plus `label create` (issue-adjacent metadata — labels must be
+# creatable before they can be applied). Everything else in the groups stays
+# denied below. These are consulted BEFORE the deny classes: a declared-true
+# capability wins over the group-level deny, a declared-false one denies with
+# the constraint named.
+GH_MERGE_CLASS = {("pr", "merge")}
+GH_ISSUE_CLASS = {("issue", "create"), ("issue", "edit"), ("issue", "close"), ("label", "create")}
 GH_DENY_CLASS = {
-    ("pr", "merge"),
     ("pr", "close"),
     ("pr", "reopen"),
     ("pr", "lock"),
     ("pr", "unlock"),
-    ("issue", "create"),
-    ("issue", "edit"),
-    ("issue", "close"),
     ("issue", "reopen"),
     ("issue", "delete"),
     ("issue", "transfer"),
@@ -158,6 +198,10 @@ GH_VALUE_FLAGS = {
 GH_API_MUTATION_FLAGS = {"-f", "--field", "-F", "--raw-field", "--input"}
 # Bash writer programs whose file targets are determinable from argv.
 BASH_WRITERS = {"touch", "tee", "cp", "mv", "install", "truncate"}
+# Filesystem mutators whose OPERANDS (sources and destinations alike) must
+# honor the state/trust protection: deleting, relocating, copying out, or
+# aliasing protected material is as much a mutation as writing it.
+FS_MUTATORS = {"rm", "unlink", "mv", "cp", "install", "truncate", "shred", "ln"}
 
 
 class Decision:
@@ -183,6 +227,45 @@ def _deny(reason: str) -> Decision:
 
 def _ask(reason: str) -> Decision:
     return Decision("ask", reason)
+
+
+class WorkspaceContext:
+    """Workspace facts resolved by ``process()`` that classification needs
+    beyond the envelope's own constraints: where the receiver's bookkeeping
+    surfaces live, and which audit records can sanction a completion clear.
+    ``None`` (no resolved workspace, e.g. direct ``classify`` calls) keeps
+    every context-dependent decision fail-closed."""
+
+    __slots__ = ("oacp_root", "project", "receiver", "message_id")
+
+    def __init__(
+        self, oacp_root: Path, project: str, receiver: str, message_id: str
+    ) -> None:
+        self.oacp_root = oacp_root
+        self.project = project
+        self.receiver = receiver
+        self.message_id = message_id
+
+    def agent_dir(self) -> Path:
+        return (
+            self.oacp_root / "projects" / self.project / "agents" / self.receiver
+        )
+
+    def audit_dir(self) -> Path:
+        return self.agent_dir() / "audit" / "autonomy_decisions"
+
+    def state_dir(self) -> Path:
+        return self.agent_dir() / "state"
+
+    def trust_roots(self) -> List[Path]:
+        return [
+            self.agent_dir() / "trust",
+            self.oacp_root / "projects" / self.project / "trust",
+        ]
+
+    def bookkeeping_prefixes(self) -> List[str]:
+        agent_dir = self.agent_dir()
+        return [str(agent_dir / name) for name in BOOKKEEPING_AGENT_SUBDIRS]
 
 
 # ── Workspace discovery ───────────────────────────────────────────────────────
@@ -237,6 +320,34 @@ def _normalize_file_path(path: str, cwd: str) -> str:
     if not os.path.isabs(expanded):
         expanded = os.path.join(cwd, expanded)
     return os.path.normpath(expanded)
+
+
+def _within(canonical: str, root: str) -> bool:
+    return canonical == root or canonical.startswith(root + os.sep)
+
+
+def is_bookkeeping_path(
+    normalized: str, context: Optional[WorkspaceContext]
+) -> bool:
+    """True for paths that are enforcement instrumentation, not task scope.
+
+    Covers the runtime scratchpad (reply/body-file composition) and the
+    receiver's own workspace bookkeeping directories. Exempt paths never
+    consume ``expected_files_touched``; the secret and dependency gates run
+    before this predicate and still apply to them. Containment is checked on
+    the resolved filesystem target (realpath on both sides), so a symlink
+    planted under an exempt root that points into ordinary task scope stays
+    counted.
+    """
+    canonical = os.path.realpath(normalized)
+    if canonical.startswith(SCRATCHPAD_PREFIXES):
+        return True
+    if context is None:
+        return False
+    for prefix in context.bookkeeping_prefixes():
+        if _within(canonical, os.path.realpath(prefix)):
+            return True
+    return False
 
 
 # ── Repo resolution ───────────────────────────────────────────────────────────
@@ -315,18 +426,23 @@ def _repo_gate(
 # ── Bash classification ───────────────────────────────────────────────────────
 
 
-def _strip_wrappers(tokens: List[str]) -> Tuple[List[str], bool]:
-    """Return (remaining tokens, needs_ask).
+def _strip_wrappers(tokens: List[str]) -> Tuple[List[str], bool, List[str]]:
+    """Return (remaining tokens, needs_ask, stripped env assignments).
 
     needs_ask is True when a wrapper carries its own flags (`env -i gh ...`):
     flag/value consumption differs per wrapper, so the real program cannot be
-    identified reliably — escalate instead of guessing (F-002).
+    identified reliably — escalate instead of guessing (F-002). The stripped
+    assignments are preserved because they change the wrapped program's
+    behavior (`OACP_HOME=… oacp envelope clear` retargets the clear) and the
+    classifier must be able to see that.
     """
     index = 0
     saw_wrapper = False
+    assignments: List[str] = []
     while index < len(tokens):
         token = tokens[index]
         if ENV_ASSIGNMENT_RE.match(token):
+            assignments.append(token)
             index += 1
             continue
         if token in WRAPPER_COMMANDS:
@@ -334,9 +450,9 @@ def _strip_wrappers(tokens: List[str]) -> Tuple[List[str], bool]:
             index += 1
             continue
         if saw_wrapper and token.startswith("-"):
-            return tokens[index:], True
+            return tokens[index:], True, assignments
         break
-    return tokens[index:], False
+    return tokens[index:], False, assignments
 
 
 def _flag_value(tokens: List[str], *flags: str) -> Optional[str]:
@@ -355,6 +471,73 @@ def _flag_value(tokens: List[str], *flags: str) -> Optional[str]:
             ):
                 return token[2:]
     return None
+
+
+GH_URL_REPO_RE = re.compile(
+    r"^(?:https?://)?(?:www\.)?github\.com/([\w.-]+)/([\w.-]+?)(?:\.git)?(?:[/#?].*)?$",
+    re.IGNORECASE,
+)
+
+
+def _gh_repo_selectors(
+    tokens: List[str],
+    positionals: List[str],
+) -> Tuple[List[str], Optional[str]]:
+    """Every explicit repository selector on a gh mutation command.
+
+    gh lets a positional URL (`gh pr merge https://github.com/o/r/pull/7`)
+    or a later `-R/--repo` occurrence retarget the mutation away from the
+    first flag value and the cwd repo, so the repo gate must judge the same
+    repository gh will actually mutate: every flag occurrence and every
+    URL-shaped positional is collected, and the caller escalates unless
+    they agree on a single repository. Returns (selectors, unresolved)
+    where unresolved carries a URL-shaped positional whose repository
+    could not be parsed (e.g. a non-github host).
+    """
+    selectors: List[str] = []
+    unresolved: Optional[str] = None
+    for index, token in enumerate(tokens):
+        if token in ("-R", "--repo"):
+            if index + 1 < len(tokens):
+                selectors.append(tokens[index + 1])
+            continue
+        if token.startswith("--repo="):
+            selectors.append(token.split("=", 1)[1])
+            continue
+        if token.startswith("-R") and not token.startswith("--") and len(token) > 2:
+            selectors.append(token[2:])
+            continue
+    for word in positionals:
+        url_shaped = "://" in word or GH_URL_REPO_RE.match(word)
+        if not url_shaped:
+            continue
+        match = GH_URL_REPO_RE.match(word)
+        if match:
+            selectors.append(f"{match.group(1)}/{match.group(2)}")
+        else:
+            unresolved = word
+    return selectors, unresolved
+
+
+def _last_flag_value(tokens: List[str], flag: str) -> Optional[str]:
+    """Last-occurrence flag value — argparse semantics.
+
+    The completion-clear validation must judge the same effective value the
+    CLI will use; first-occurrence parsing lets a duplicated flag validate
+    one target and clear another.
+    """
+    value: Optional[str] = None
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == flag and index + 1 < len(tokens):
+            value = tokens[index + 1]
+            index += 2
+            continue
+        if token.startswith(flag + "="):
+            value = token.split("=", 1)[1]
+        index += 1
+    return value
 
 
 def _git_subcommand(tokens: List[str]) -> Tuple[Optional[str], List[str], Optional[str]]:
@@ -479,7 +662,60 @@ def _gh_positionals(tokens: List[str]) -> Tuple[List[str], bool]:
     return words, api_mutation
 
 
-def _classify_gh(tokens: List[str], cwd: str, constraints: Dict[str, Any]) -> Decision:
+def _gh_env_repo_selector(
+    env_assignments: List[str],
+    ambient: Optional[Dict[str, str]] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Repository selector carried by the effective GH_REPO / GH_HOST.
+
+    `gh help environment`: GH_REPO selects the repository for commands
+    that would otherwise use the local one, and GH_HOST retargets the
+    hostname entirely — both retarget a mutation after the cwd-based
+    gate approved it. The effective environment is what the Bash child
+    inherits: ambient hook-process values seeded first, inline
+    assignments applied over them with shell precedence. Returns
+    (selector, escalate_reason); any effective GH_HOST, or a GH_REPO
+    value that does not resolve to a github.com owner/repo, cannot be
+    validated here and escalates.
+    """
+    if ambient is None:
+        ambient = {
+            key: os.environ[key]
+            for key in ("GH_REPO", "GH_HOST")
+            if key in os.environ
+        }
+    effective: Dict[str, str] = dict(ambient)
+    origin = {key: "ambient" for key in effective}
+    for assignment in env_assignments:
+        name, _, value = assignment.partition("=")
+        if name in ("GH_REPO", "GH_HOST"):
+            effective[name] = value
+            origin[name] = "inline"
+    if "GH_HOST" in effective:
+        return None, (
+            f"an {origin['GH_HOST']} GH_HOST value "
+            f"{effective['GH_HOST']!r}"
+        )
+    value = effective.get("GH_REPO")
+    if value is None:
+        return None, None
+    # GH_REPO accepts [HOST/]OWNER/REPO.
+    parts = value.split("/")
+    if len(parts) == 2 and all(parts):
+        return value, None
+    if len(parts) == 3 and parts[0].lower() in ("github.com", "www.github.com"):
+        return f"{parts[1]}/{parts[2]}", None
+    return None, f"an {origin['GH_REPO']} GH_REPO value {value!r}"
+
+
+def _classify_gh(
+    tokens: List[str],
+    cwd: str,
+    constraints: Dict[str, Any],
+    *,
+    env_assignments: Optional[List[str]] = None,
+    standalone: bool = False,
+) -> Decision:
     words, api_mutation = _gh_positionals(tokens)
     group = words[0] if words else ""
     action = words[1] if len(words) > 1 else ""
@@ -507,39 +743,191 @@ def _classify_gh(tokens: List[str], cwd: str, constraints: Dict[str, Any]) -> De
         return ALLOW
 
     key = (group, action)
-    if key in GH_DENY_CLASS or group in GH_DENY_GROUPS or key in GH_WORKFLOW_MUTATIONS:
-        return _deny(
-            f"{label} is outside every envelope allow class "
-            "(PR create/update and GitHub comments only)"
-        )
-
-    if key in GH_PR_CLASS or key in GH_COMMENT_CLASS:
+    constraint_classes = (
+        (GH_PR_CLASS, "creates_or_updates_pr"),
+        (GH_COMMENT_CLASS, "comments_on_github"),
+        (GH_MERGE_CLASS, "merges_pr"),
+        (GH_ISSUE_CLASS, "files_issues"),
+    )
+    for class_keys, required in constraint_classes:
+        if key not in class_keys:
+            continue
         if not constraints.get("external_side_effects"):
             return _deny(
                 f"{label} is an external side effect the envelope declares false"
             )
-        required = (
-            "creates_or_updates_pr" if key in GH_PR_CLASS else "comments_on_github"
-        )
         if not constraints.get(required):
             return _deny(f"{label} requires {required} in the envelope")
-        repo = _flag_value(tokens, "-R", "--repo") or resolve_cwd_repo(cwd)
+        # The gate must judge the repository gh will actually mutate: a
+        # positional URL, a repeated -R/--repo, a GH_REPO/GH_HOST
+        # assignment, or shell state mutated by an earlier compound
+        # segment (cd, export — including builtin-prefixed spellings this
+        # classifier cannot enumerate) can all retarget the command after
+        # the cwd-based gate approved it. Only a standalone simple command
+        # is judged, and every selector it carries must agree.
+        if not standalone:
+            return _ask(
+                f"{label} inside a compound command cannot be validated "
+                "(earlier segments may retarget it); run it as a "
+                "standalone command"
+            )
+        env_selector, env_escalate = _gh_env_repo_selector(env_assignments or [])
+        if env_escalate is not None:
+            return _ask(
+                f"{label} carries {env_escalate}, which retargets gh away "
+                "from the validated repository; escalating for review"
+            )
+        selectors, unresolved = _gh_repo_selectors(tokens, words[2:])
+        if env_selector is not None:
+            selectors.append(env_selector)
+        if unresolved is not None:
+            return _ask(
+                f"{label} references {unresolved!r}, whose repository "
+                "cannot be resolved; escalating for review"
+            )
+        distinct = sorted(set(selectors))
+        if len(distinct) > 1:
+            return _ask(
+                f"{label} carries conflicting repository selectors "
+                f"({', '.join(distinct)}); escalating for review"
+            )
+        repo = distinct[0] if distinct else resolve_cwd_repo(cwd)
         gate = _repo_gate(repo, constraints, label)
         if gate is not None:
             return gate
         return ALLOW
+
+    if key in GH_DENY_CLASS or group in GH_DENY_GROUPS or key in GH_WORKFLOW_MUTATIONS:
+        return _deny(
+            f"{label} is outside every envelope allow class "
+            "(PR create/update, comments, declared merges, and declared "
+            "issue filing only)"
+        )
 
     # Fail closed: gh verbs outside the known read-only and mutation classes
     # escalate rather than pass (F-003 — e.g. `gh run delete`).
     return _ask(f"cannot classify {label} under an active envelope")
 
 
-def _classify_oacp(tokens: List[str]) -> Decision:
+def _classify_envelope_clear(
+    tokens: List[str],
+    context: Optional[WorkspaceContext],
+    cwd: str,
+    env_assignments: Optional[List[str]] = None,
+    standalone: bool = False,
+) -> Decision:
+    """Sanction the documented completion clear against the audit record.
+
+    The clear is allowed exactly when the newest audit record whose CONTENT
+    identity (``message_id`` + ``receiver``) matches the active envelope
+    shows a terminal ``result.final_state``: the task lifecycle is over and
+    the enforcement window may close from inside the session. ``pending``
+    and ``paused`` keep the envelope active — a paused task re-authorizes
+    via the §E checkpoint, never via clear.
+
+    The validation judges the same effective target the CLI will use: the
+    clear must be a standalone simple command (compound commands escalate —
+    an earlier ``export`` or ``cd`` segment could retarget it), flag values
+    use last-occurrence (argparse) semantics, relative ``--oacp-dir``
+    resolves against the call's cwd, and an ``OACP_HOME=`` assignment on the
+    command escalates outright (it retargets the CLI's home resolution). A
+    clear aimed at a different project/receiver/home than the active
+    envelope, or an unreadable audit record, cannot be validated here and
+    escalates. Filenames are never trusted and sender data never reaches a
+    filesystem glob.
+    """
+    if context is None or not context.message_id:
+        return _deny(
+            "oacp envelope clear cannot be validated without a resolved "
+            "workspace; the completion clear is sanctioned by the task's "
+            "audit record"
+        )
+    if not standalone:
+        # Earlier segments of a compound command can mutate cwd or the
+        # environment (`export OACP_HOME=…;`, `cd …;`) and retarget the
+        # clear after this validation runs — only a standalone simple
+        # command is judged, everything else escalates.
+        return _ask(
+            "oacp envelope clear inside a compound command cannot be "
+            "validated (earlier segments may retarget it); run the clear "
+            "as a standalone command"
+        )
+    for assignment in env_assignments or []:
+        if assignment.startswith("OACP_HOME="):
+            return _ask(
+                "OACP_HOME override on an envelope clear retargets the CLI's "
+                "home resolution and cannot be validated in-session; "
+                "escalating for review"
+            )
+    target_project = _last_flag_value(tokens, "--project") or context.project
+    target_receiver = _last_flag_value(tokens, "--receiver") or "claude"
+    if target_project != context.project or target_receiver != context.receiver:
+        return _ask(
+            f"oacp envelope clear targets {target_project}/{target_receiver}, "
+            f"not the active envelope ({context.project}/{context.receiver}); "
+            "escalating for review"
+        )
+    oacp_dir = _last_flag_value(tokens, "--oacp-dir")
+    if oacp_dir is not None:
+        declared = os.path.realpath(_normalize_file_path(oacp_dir, cwd))
+        if declared != os.path.realpath(str(context.oacp_root)):
+            return _ask(
+                "oacp envelope clear targets a different OACP home than the "
+                "active envelope; escalating for review"
+            )
+    audit_dir = context.audit_dir()
+    candidates = sorted(audit_dir.glob("*.yaml")) if audit_dir.is_dir() else []
+    matches: List[Tuple[str, Dict[str, Any]]] = []
+    for candidate in candidates:
+        try:
+            record = load_yaml_file(candidate)
+        except Exception as exc:
+            # Any unreadable record could be the authoritative newest one —
+            # fail closed on the whole directory rather than guess.
+            return _ask(
+                f"unreadable audit record {candidate.name!r} while "
+                f"validating envelope clear: {exc}"
+            )
+        if (
+            str(record.get("message_id") or "") == context.message_id
+            and str(record.get("receiver") or "") == context.receiver
+        ):
+            matches.append((candidate.name, record))
+    if not matches:
+        return _deny(
+            "oacp envelope clear before any audit record matches "
+            f"message_id {context.message_id!r} and receiver "
+            f"{context.receiver!r}; the completion clear is sanctioned once "
+            "the record's result.final_state is terminal (done/error)"
+        )
+    record = max(matches, key=lambda item: item[0])[1]
+    result = record.get("result")
+    state = result.get("final_state") if isinstance(result, dict) else None
+    if state in TERMINAL_AUDIT_STATES:
+        return ALLOW
+    return _deny(
+        f"oacp envelope clear while the audit record for "
+        f"{context.message_id} shows result.final_state {state!r}; the "
+        "envelope stays active until the task completes (done/error) — a "
+        "paused task re-authorizes via the §E checkpoint, and completion "
+        "requires the audit record update first"
+    )
+
+
+def _classify_oacp(
+    tokens: List[str],
+    context: Optional[WorkspaceContext] = None,
+    cwd: str = "",
+    env_assignments: Optional[List[str]] = None,
+    standalone: bool = False,
+) -> Decision:
     """Scope the oacp exemption to what the protocol actually promises.
 
     Only `oacp send` (the §E notification pipe) plus read-only surfaces are
-    exempt. `oacp envelope compile|clear` from inside an enveloped session is
-    self-modification of the active constraints (F-001); other mutating
+    exempt. `oacp envelope compile` from inside an enveloped session is
+    self-modification of the active constraints (F-001); `oacp envelope
+    clear` is the documented completion step and is sanctioned exactly when
+    the task's audit record shows a terminal outcome; other mutating
     subcommands escalate.
     """
     words = [token for token in tokens[1:] if not token.startswith("-")]
@@ -551,6 +939,10 @@ def _classify_oacp(tokens: List[str]) -> Decision:
     if sub == "envelope":
         if action == "show":
             return ALLOW
+        if action == "clear":
+            return _classify_envelope_clear(
+                tokens, context, cwd, env_assignments, standalone
+            )
         return _deny(
             f"oacp envelope {action} modifies the active envelope from inside "
             "the enveloped session; re-authorization goes through the §E "
@@ -593,6 +985,46 @@ def _classify_dependency_command(
     return None
 
 
+def _mutator_operands(tokens: List[str]) -> List[str]:
+    """Effective path operands of a filesystem-mutator invocation.
+
+    Judged the way the utility parses argv, not by dash-prefix alone: `--`
+    ends option processing (everything after is an operand even if it starts
+    with a dash), and the GNU target-directory spellings (`-t DIR`, `-tDIR`,
+    `--target-directory DIR`, `--target-directory=DIR`) contribute their
+    directory value. Capturing `-t` generically across the mutator set is a
+    conservative superset — a value misread from a tool that lacks the flag
+    only adds a checked operand, never removes one.
+    """
+    operands: List[str] = []
+    options_ended = False
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if options_ended or not token.startswith("-"):
+            operands.append(token)
+            index += 1
+            continue
+        if token == "--":
+            options_ended = True
+            index += 1
+            continue
+        if token in ("-t", "--target-directory") and index + 1 < len(tokens):
+            operands.append(tokens[index + 1])
+            index += 2
+            continue
+        if token.startswith("--target-directory="):
+            operands.append(token.split("=", 1)[1])
+            index += 1
+            continue
+        if token.startswith("-t") and not token.startswith("--") and len(token) > 2:
+            operands.append(token[2:])
+            index += 1
+            continue
+        index += 1
+    return operands
+
+
 def _segment_write_targets(tokens: List[str], segment: str) -> List[str]:
     """Determinable file-write targets of one shell segment (F-004).
 
@@ -630,10 +1062,14 @@ def _gate_write_paths(
     constraints: Dict[str, Any],
     counters: Dict[str, Any],
     verb: str,
+    context: Optional[WorkspaceContext] = None,
 ) -> Decision:
     """Shared secret/dependency/file-counter gate for file tools and Bash
     writes. Counts distinct paths cumulatively so a single call cannot jump
-    the `expected_files_touched` ceiling (F-004: `touch a b c`)."""
+    the `expected_files_touched` ceiling (F-004: `touch a b c`). Bookkeeping
+    surfaces pass the secret/dependency gates but never reach the counter:
+    completion instrumentation must not compete with the task's declared
+    file budget."""
     touched = list(counters.get("files_touched") or [])
     expected = int(constraints.get("expected_files_touched") or 0)
     new_files: List[str] = []
@@ -655,6 +1091,24 @@ def _gate_write_paths(
                 f"{verb} of dependency manifest {normalized!r} is outside the "
                 "envelope (touches_dependencies: false)"
             )
+        if context is not None:
+            canonical = os.path.realpath(normalized)
+            if _within(canonical, os.path.realpath(str(context.state_dir()))):
+                return _deny(
+                    f"{verb} of envelope state {normalized!r} from inside the "
+                    "enveloped session is envelope self-modification; the "
+                    "active envelope is never written directly"
+                )
+            if not constraints.get("touches_auth_config_or_secrets"):
+                for root in context.trust_roots():
+                    if _within(canonical, os.path.realpath(str(root))):
+                        return _deny(
+                            f"{verb} of trust root {normalized!r} is outside "
+                            "the envelope (authority-bearing auth config; "
+                            "touches_auth_config_or_secrets: false)"
+                        )
+        if is_bookkeeping_path(normalized, context):
+            continue
         if normalized in touched or normalized in new_files:
             continue
         if len(touched) + len(new_files) >= expected:
@@ -688,18 +1142,24 @@ def _classify_segment(
     cwd: str,
     constraints: Dict[str, Any],
     write_targets: List[str],
+    context: Optional[WorkspaceContext] = None,
     depth: int = 0,
+    env_assignments: Optional[List[str]] = None,
+    standalone: bool = False,
 ) -> Optional[Decision]:
     """Classify one segment's tokens; return a non-allow Decision or None.
 
     Write targets are collected BEFORE program dispatch so a redirect on a
     recognized program (`gh pr view > .env`) still reaches the shared write
     gate (F-005). Known runners recurse into their nested command (F-007).
+    Env assignments stripped from the segment (or inherited from an outer
+    runner) accumulate so target-sensitive classification can inspect them.
     """
     if depth > 3:
         return _ask(f"cannot classify deeply nested command: {segment!r}")
 
-    tokens, wrapper_needs_ask = _strip_wrappers(tokens)
+    tokens, wrapper_needs_ask, stripped = _strip_wrappers(tokens)
+    env_assignments = list(env_assignments or []) + stripped
     if wrapper_needs_ask:
         return _ask(f"cannot classify wrapper invocation: {segment!r}")
     if not tokens:
@@ -733,11 +1193,21 @@ def _classify_segment(
         if not nested or nested[0].startswith("-"):
             return _ask(f"cannot classify runner invocation: {segment!r}")
         return _classify_segment(
-            nested, segment, cwd, constraints, write_targets, depth + 1
+            nested,
+            segment,
+            cwd,
+            constraints,
+            write_targets,
+            context,
+            depth + 1,
+            env_assignments,
+            standalone,
         )
 
     if prog == "oacp":
-        decision = _classify_oacp(tokens)
+        decision = _classify_oacp(
+            tokens, context, cwd, env_assignments, standalone
+        )
         if decision.action != "allow":
             return decision
         return None
@@ -751,6 +1221,43 @@ def _classify_segment(
                     f"command touching secret-class path {arg!r} is outside "
                     "the envelope (touches_auth_config_or_secrets: false)"
                 )
+    if prog in FS_MUTATORS and context is not None:
+        # Operand gate, role-agnostic: deleting, relocating, copying out, or
+        # aliasing envelope state is self-modification just as much as
+        # writing it, and the same for trust-root material under the auth
+        # gate — the write-target gate alone sees only destinations. The
+        # operands judged must be the ones the utility will actually use:
+        # GNU target-directory spellings are parsed, `--` ends option
+        # processing, and expansion syntax escalates (the shell expands it
+        # after classification, so its literal spelling proves nothing).
+        state_root = os.path.realpath(str(context.state_dir()))
+        trust_roots = [os.path.realpath(str(r)) for r in context.trust_roots()]
+        for operand in _mutator_operands(tokens):
+            if EXPANSION_SYNTAX_RE.search(operand) or "$" in operand:
+                return _ask(
+                    f"{prog} operand {operand!r} contains shell expansion or "
+                    "variable syntax that cannot be statically resolved; use "
+                    "explicit literal paths"
+                )
+            canonical = os.path.realpath(_normalize_file_path(operand, cwd))
+            if _within(canonical, state_root):
+                return _deny(
+                    f"{prog} touching envelope state {operand!r} from inside "
+                    "the enveloped session is envelope self-modification"
+                )
+            if not constraints.get("touches_auth_config_or_secrets"):
+                for root in trust_roots:
+                    if _within(canonical, root):
+                        return _deny(
+                            f"{prog} touching trust root {operand!r} is "
+                            "outside the envelope (authority-bearing auth "
+                            "config; touches_auth_config_or_secrets: false)"
+                        )
+    if prog == "find" and any(
+        token in ("-exec", "-execdir", "-ok", "-okdir", "-delete")
+        for token in tokens[1:]
+    ):
+        return _ask(f"cannot classify find with action predicates: {segment!r}")
     if prog == "git":
         subcommand, args, git_dir = _git_subcommand(tokens)
         base_dir = git_dir or cwd
@@ -768,7 +1275,13 @@ def _classify_segment(
                 )
         return None
     if prog == "gh":
-        decision = _classify_gh(tokens, cwd, constraints)
+        decision = _classify_gh(
+            tokens,
+            cwd,
+            constraints,
+            env_assignments=env_assignments,
+            standalone=standalone,
+        )
         if decision.action != "allow":
             return decision
         return None
@@ -784,6 +1297,7 @@ def classify_bash(
     cwd: str,
     constraints: Dict[str, Any],
     counters: Dict[str, Any],
+    context: Optional[WorkspaceContext] = None,
 ) -> Decision:
     if not constraints.get("destructive_ops"):
         for label, pattern in DESTRUCTIVE_PATTERNS:
@@ -794,16 +1308,41 @@ def classify_bash(
                 )
 
     write_targets: List[str] = []
-    for segment in _segments_of(command):
+    segments = _segments_of(command)
+    # A command with exactly one segment has no earlier shell state (cd,
+    # export) that could retarget a target-sensitive subcommand after
+    # validation — the completion clear is sanctioned only in that form.
+    standalone = len(segments) == 1
+    for segment in segments:
         try:
             tokens = shlex.split(segment, posix=True)
         except ValueError:
             return _ask(f"cannot classify shell segment: {segment!r}")
-        decision = _classify_segment(tokens, segment, cwd, constraints, write_targets)
+        decision = _classify_segment(
+            tokens,
+            segment,
+            cwd,
+            constraints,
+            write_targets,
+            context,
+            standalone=standalone,
+        )
         if decision is not None:
             return decision
 
-    return _gate_write_paths(write_targets, cwd, constraints, counters, "write")
+    for target in write_targets:
+        # Bash-derived targets are shell-expanded after classification —
+        # a pattern can reach a path its literal spelling does not. File-tool
+        # paths (Edit/Write) never pass here and may contain literal brackets.
+        if EXPANSION_SYNTAX_RE.search(target):
+            return _ask(
+                f"write target {target!r} contains shell expansion syntax "
+                "that cannot be statically resolved; use explicit literal "
+                "paths"
+            )
+    return _gate_write_paths(
+        write_targets, cwd, constraints, counters, "write", context
+    )
 
 
 # ── File-tool classification ──────────────────────────────────────────────────
@@ -814,8 +1353,11 @@ def classify_file_write(
     cwd: str,
     constraints: Dict[str, Any],
     counters: Dict[str, Any],
+    context: Optional[WorkspaceContext] = None,
 ) -> Decision:
-    return _gate_write_paths([file_path], cwd, constraints, counters, "edit")
+    return _gate_write_paths(
+        [file_path], cwd, constraints, counters, "edit", context
+    )
 
 
 # ── Dispatch + I/O ────────────────────────────────────────────────────────────
@@ -826,24 +1368,25 @@ def classify(
     tool_input: Dict[str, Any],
     cwd: str,
     envelope: Dict[str, Any],
+    context: Optional[WorkspaceContext] = None,
 ) -> Decision:
     constraints = envelope.get("constraints") or {}
     counters = envelope.get("counters") or {}
 
     if tool_name == "Bash":
         return classify_bash(
-            str(tool_input.get("command") or ""), cwd, constraints, counters
+            str(tool_input.get("command") or ""), cwd, constraints, counters, context
         )
     if tool_name in ("Edit", "Write"):
         file_path = str(tool_input.get("file_path") or "")
         if not file_path:
             return ALLOW
-        return classify_file_write(file_path, cwd, constraints, counters)
+        return classify_file_write(file_path, cwd, constraints, counters, context)
     if tool_name == "NotebookEdit":
         notebook = str(tool_input.get("notebook_path") or "")
         if not notebook:
             return ALLOW
-        return classify_file_write(notebook, cwd, constraints, counters)
+        return classify_file_write(notebook, cwd, constraints, counters, context)
     return ALLOW
 
 
@@ -883,11 +1426,18 @@ def process(payload: Dict[str, Any], receiver: str = "claude") -> Decision:
         envelope = load_envelope(target)
         if envelope is None:
             return ALLOW
+        context = WorkspaceContext(
+            oacp_root=oacp_root,
+            project=str(envelope.get("project") or project),
+            receiver=str(envelope.get("receiver") or receiver),
+            message_id=str(envelope.get("message_id") or ""),
+        )
         decision = classify(
             str(payload.get("tool_name") or ""),
             payload.get("tool_input") or {},
             cwd,
             envelope,
+            context,
         )
         if decision.action == "allow" and decision.new_files:
             counters = envelope.setdefault("counters", {})

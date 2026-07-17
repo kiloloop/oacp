@@ -1,0 +1,27 @@
+case: tamper_auth_alias
+expected:
+  annotation: '[oacp-auth] signed-INVALID reason: auth framing: auth value is not
+    the canonical base64url encoding of its bytes — non-zero unused pad bits give
+    the same bytes a second spelling'
+  message_auth:
+    alg: EdDSA
+    claimed_sender: null
+    kid: null
+    payload_sha256: e0971fdd640bf748db47a73d90b972caab3935d9aac87a274698f0a9e38fa22f
+    reason: 'auth framing: auth value is not the canonical base64url encoding of its
+      bytes — non-zero unused pad bits give the same bytes a second spelling'
+    scheme: raw-prefix-v1
+    signatures_checked: []
+    status: invalid
+    trust_source: null
+    verified_instance: null
+    verified_signer: null
+  prefix_sha256: e0971fdd640bf748db47a73d90b972caab3935d9aac87a274698f0a9e38fa22f
+  raw_sha256: 3c44def5b96519c72c1e88c0d8677837d3cc3dfd5d67f6e9d1f44d70eb29becb
+  signing_input_sha256:
+  - fd27a93deb334854a8ae957f96c6998728f3cf1ee5a66f8568e38d3578d1ceb8
+  trailer_state: ok
+  validate_errors:
+  - 'field ''auth'': auth value is not the canonical base64url encoding of its bytes
+    — non-zero unused pad bits give the same bytes a second spelling'
+message: messages/tamper_auth_alias.yaml

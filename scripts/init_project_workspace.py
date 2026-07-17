@@ -12,7 +12,7 @@ from pathlib import Path
 import sys
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from _oacp_constants import AGENT_RE, _template_path, _write_if_missing
+from _oacp_constants import AGENT_RE, SPEC_VERSION, _template_path, _write_if_missing
 
 DEFAULT_AGENTS = ("claude", "codex", "cursor")
 
@@ -127,24 +127,16 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
             'Pass "" for none.'
         ),
     )
+    parser.add_argument(
+        "--oacp-dir",
+        default=None,
+        help="Override OACP home directory (default: $OACP_HOME or ~/oacp)",
+    )
     return parser.parse_args(list(argv))
 
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
-
-
-def _standards_version() -> str:
-    candidates = (
-        Path(__file__).resolve().parent / "VERSION",
-        _repo_root() / "VERSION",
-    )
-    for path in candidates:
-        try:
-            return path.read_text(encoding="utf-8").splitlines()[0].strip()
-        except (FileNotFoundError, IndexError):
-            continue
-    return "0.1.0"
 
 
 def _project_facts_template() -> str:
@@ -206,12 +198,16 @@ def initialize_workspace(
 
     workspace_path = project_root / "workspace.json"
     now = dt.datetime.now(dt.timezone.utc).isoformat()
+    # spec_version names the protocol contract the workspace was initialized
+    # against. Workspaces created before this field carry an orphaned
+    # standards_version (a retired VERSION-file stamp); readers should
+    # prefer spec_version and tolerate either field's absence.
     workspace = {
         "project_name": project_name,
         "repo_path": str(repo_dir) if repo_dir else None,
         "created_at": now,
         "updated_at": now,
-        "standards_version": _standards_version(),
+        "spec_version": SPEC_VERSION,
     }
     workspace_path.write_text(json.dumps(workspace, indent=2) + "\n", encoding="utf-8")
 
@@ -246,7 +242,7 @@ def initialize_workspace(
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     from _oacp_env import resolve_oacp_home
-    oacp_root = resolve_oacp_home()
+    oacp_root = resolve_oacp_home(explicit=args.oacp_dir)
     repo_dir = Path(args.repo).expanduser().resolve() if args.repo else None
 
     agents_list: Sequence[str] = (

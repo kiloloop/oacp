@@ -1,0 +1,8 @@
+id: msg-20260701000000-carol-a004
+from: carol
+to: dave
+type: notification
+priority: P2
+created_at_utc: "2026-07-01T00:00:00Z"
+subject: Revoked-pin conformance golden
+body: Signed by a key the receiver has revoked.

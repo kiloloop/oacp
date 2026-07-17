@@ -2,6 +2,7 @@ actual_minutes: 8
 actual_files_touched: 1
 predicted_risk_materialized: true
 completed_at_utc: "2026-07-10T23:58:00Z"
+paused_at_utc: "2026-07-10T23:58:00Z"
 side_effects_actual:
   creates_or_updates_pr: true
   comments_on_github: false

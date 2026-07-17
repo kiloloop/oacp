@@ -1,0 +1,31 @@
+# Receiver pins for the signing conformance corpus (fixture keys
+# only — see README.md). Format v1 per message_signing.md.
+version: 1
+signers:
+  - agent: alice
+    domain: 3f54e34d-9d31-4c8a-a5a7-64766f636170
+    instance: aa11e9c2-0000-4000-8000-666978747572
+    kid: Jh7IAlBx9CkSDWxLetPWKXl4q7bdaA57unfb0pP1zEk
+    jwk:
+      kty: OKP
+      crv: Ed25519
+      x: dn3CiLKQYONRxzED718FXcDDiKuQzHpRDUR-xQMuVS4
+    status: active
+  - agent: bob
+    domain: 3f54e34d-9d31-4c8a-a5a7-64766f636170
+    instance: bb22e9c2-0000-4000-8000-666978747572
+    kid: _zFbQNe0KIluKcXb2hHL-LKPPKHCOsGYuqushFWhyFA
+    jwk:
+      kty: OKP
+      crv: Ed25519
+      x: lPWFR7eY7cxjWnQ1BYUcXCUvDdf-YEBYWdH5s_tU7GQ
+    status: active
+  - agent: carol
+    domain: 3f54e34d-9d31-4c8a-a5a7-64766f636170
+    instance: cc33e9c2-0000-4000-8000-666978747572
+    kid: XLoBTTdmkh5piKNrxah4RmktTT3HlI3JPem3291de8U
+    jwk:
+      kty: OKP
+      crv: Ed25519
+      x: xnlrEPUOR7FttK7YRs9DPNlUnoqjoO5ukzCDuc1REiw
+    status: revoked

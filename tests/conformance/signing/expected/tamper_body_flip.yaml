@@ -1,0 +1,25 @@
+case: tamper_body_flip
+expected:
+  annotation: '[oacp-auth] signed-INVALID reason: signature present but failed verification'
+  message_auth:
+    alg: EdDSA
+    claimed_sender: null
+    kid: null
+    payload_sha256: 32849df93b2e297489dea4111a48fdc54065b4f60be56f802f2c22d31b0a3216
+    reason: signature present but failed verification
+    scheme: raw-prefix-v1
+    signatures_checked:
+    - agent: urn:oacp:agent:3f54e34d-9d31-4c8a-a5a7-64766f636170:alice
+      kid: Jh7IAlBx9CkSDWxLetPWKXl4q7bdaA57unfb0pP1zEk
+      outcome: bad_signature
+    status: invalid
+    trust_source: null
+    verified_instance: null
+    verified_signer: null
+  prefix_sha256: 32849df93b2e297489dea4111a48fdc54065b4f60be56f802f2c22d31b0a3216
+  raw_sha256: 8d59ca9c97f6ddf14133f9c07a25b73cd84b8d74aa00fee229b2f16cf6246f55
+  signing_input_sha256:
+  - 74caa8809bc500292ced5bce32ae0dc9b96309040e705be220bf118cb697dc6a
+  trailer_state: ok
+  validate_errors: []
+message: messages/tamper_body_flip.yaml

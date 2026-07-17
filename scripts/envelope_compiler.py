@@ -23,13 +23,14 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional, Sequence
 
-from _oacp_constants import utc_now_iso
+from _oacp_constants import SPEC_VERSION, utc_now_iso
 from autonomy_gate import (
     AutonomyConfigError,
     TaskProfileError,
@@ -41,9 +42,14 @@ from autonomy_gate import (
 )
 
 ENVELOPE_VERSION = 1
-ENVELOPE_SPEC_VERSION = "0.3.5"
+ENVELOPE_SPEC_VERSION = SPEC_VERSION
 ENVELOPE_FILENAME = "active_envelope.json"
 ENVELOPE_COMPILE_ERROR = "envelope_compile_error"
+
+# Safe-ID grammar for the message id embedded in the envelope. The runtime
+# adapter compares this id against audit-record content, and it must never
+# be able to act as a glob/path metacharacter anywhere downstream.
+MESSAGE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 # Constraint keys enforced by runtime adapters. ``estimated_minutes`` and
 # ``risk_tier`` are recorded for the §E self-check but carry no hook
@@ -58,6 +64,8 @@ CONSTRAINT_KEYS = (
     "creates_or_updates_pr",
     "comments_on_github",
     "commits_changes",
+    "merges_pr",
+    "files_issues",
     "sends_oacp_reply_only",
     "touches_auth_config_or_secrets",
     "touches_dependencies",
@@ -111,6 +119,10 @@ def build_envelope(
     message_id = str(message.get("id") or "")
     if not message_id:
         raise EnvelopeCompileError("message has no id")
+    if not MESSAGE_ID_RE.match(message_id):
+        raise EnvelopeCompileError(
+            f"message id {message_id!r} is outside the safe-id grammar"
+        )
 
     return {
         "envelope_version": ENVELOPE_VERSION,

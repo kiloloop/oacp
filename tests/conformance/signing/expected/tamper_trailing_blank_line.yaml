@@ -1,0 +1,25 @@
+case: tamper_trailing_blank_line
+expected:
+  annotation: '[oacp-auth] signed-INVALID reason: auth framing: final line is auth-like
+    but violates exact framing (auth: "<base64url>" + exactly one LF, bounded size)'
+  message_auth:
+    alg: null
+    claimed_sender: null
+    kid: null
+    payload_sha256: 44c14c6cce931f820d5757d11b06f11ef35b6884bb22f8e903aed69ba5dc51e9
+    reason: 'auth framing: final line is auth-like but violates exact framing (auth:
+      "<base64url>" + exactly one LF, bounded size)'
+    scheme: null
+    signatures_checked: []
+    status: invalid
+    trust_source: null
+    verified_instance: null
+    verified_signer: null
+  prefix_sha256: 44c14c6cce931f820d5757d11b06f11ef35b6884bb22f8e903aed69ba5dc51e9
+  raw_sha256: 44c14c6cce931f820d5757d11b06f11ef35b6884bb22f8e903aed69ba5dc51e9
+  signing_input_sha256: []
+  trailer_state: malformed
+  validate_errors:
+  - 'field ''auth'' must be the final physical line of the file: auth: "<base64url>"
+    followed by exactly one LF (no CRLF)'
+message: messages/tamper_trailing_blank_line.yaml

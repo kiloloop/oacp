@@ -1,0 +1,25 @@
+case: tamper_crlf_trailer
+expected:
+  annotation: '[oacp-auth] signed-INVALID reason: auth framing: final line is auth-like
+    but violates exact framing (auth: "<base64url>" + exactly one LF, bounded size)'
+  message_auth:
+    alg: null
+    claimed_sender: null
+    kid: null
+    payload_sha256: 0b72e70963c25365f0940eaaad9358b65012e3e0a0e84f5fa30b39d82cea823d
+    reason: 'auth framing: final line is auth-like but violates exact framing (auth:
+      "<base64url>" + exactly one LF, bounded size)'
+    scheme: null
+    signatures_checked: []
+    status: invalid
+    trust_source: null
+    verified_instance: null
+    verified_signer: null
+  prefix_sha256: 0b72e70963c25365f0940eaaad9358b65012e3e0a0e84f5fa30b39d82cea823d
+  raw_sha256: 0b72e70963c25365f0940eaaad9358b65012e3e0a0e84f5fa30b39d82cea823d
+  signing_input_sha256: []
+  trailer_state: malformed
+  validate_errors:
+  - 'field ''auth'' must be the final physical line of the file: auth: "<base64url>"
+    followed by exactly one LF (no CRLF)'
+message: messages/tamper_crlf_trailer.yaml

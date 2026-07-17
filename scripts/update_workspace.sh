@@ -321,12 +321,16 @@ else
 fi
 
 # ── Phase 5: workspace.json ──────────────────────────────────────────────
-VERSION_FILE="$SCRIPT_DIR/../VERSION"
-if [[ -f "$VERSION_FILE" ]]; then
-  STANDARDS_VERSION="$(head -1 "$VERSION_FILE" | tr -d '[:space:]')"
-else
-  STANDARDS_VERSION="0.5.0"
-fi
+# spec_version names the protocol contract the workspace was written
+# against (single source: _oacp_constants.SPEC_VERSION). The retired
+# standards_version field (an old VERSION-file stamp) is no longer written;
+# an existing value is left untouched for readers that have not migrated.
+SPEC_VERSION="$(python3 -c "
+import sys
+sys.path.insert(0, sys.argv[1])
+from _oacp_constants import SPEC_VERSION
+print(SPEC_VERSION)
+" "$SCRIPT_DIR")"
 
 WORKSPACE_JSON="$PROJECT_ROOT/workspace.json"
 if [[ -f "$WORKSPACE_JSON" ]]; then
@@ -340,11 +344,11 @@ version = sys.argv[2]
 with open(path) as f:
     data = json.load(f)
 data['updated_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-data['standards_version'] = version
+data['spec_version'] = version
 with open(path, 'w') as f:
     json.dump(data, f, indent=2)
     f.write('\n')
-" "$WORKSPACE_JSON" "$STANDARDS_VERSION"
+" "$WORKSPACE_JSON" "$SPEC_VERSION"
     log_action "~" "file workspace.json (updated timestamps)"
   fi
   ((UNCHANGED+=1))
@@ -359,12 +363,12 @@ data = {
     'repo_path': None,
     'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
     'updated_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    'standards_version': sys.argv[2]
+    'spec_version': sys.argv[2]
 }
 with open(sys.argv[3], 'w') as f:
     json.dump(data, f, indent=2)
     f.write('\n')
-" "$PROJECT_NAME" "$STANDARDS_VERSION" "$WORKSPACE_JSON"
+" "$PROJECT_NAME" "$SPEC_VERSION" "$WORKSPACE_JSON"
     log_action "+" "file workspace.json"
   fi
   ((CREATED+=1))

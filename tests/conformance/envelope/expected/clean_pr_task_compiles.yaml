@@ -19,6 +19,8 @@ expected:
       creates_or_updates_pr: true
       comments_on_github: false
       commits_changes: true
+      merges_pr: false
+      files_issues: false
       sends_oacp_reply_only: false
       touches_auth_config_or_secrets: false
       touches_dependencies: false

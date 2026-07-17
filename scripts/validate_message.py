@@ -19,6 +19,10 @@ from handoff_schema import (  # noqa: E402
     validate_handoff_complete_text,
     validate_handoff_packet_text,
 )
+from message_signing import (  # noqa: E402
+    auth_structure_errors,
+    split_signed_message,
+)
 
 REQUIRED_FIELDS = (
     "id",
@@ -45,6 +49,10 @@ OPTIONAL_FIELDS = (
     "output_tokens",
     "wall_time_s",
     "est_cost_usd",
+    # Signed-message auth trailer (v0.4.0 message signing).
+    # Strict all-or-none: when present it must be a structurally complete
+    # detached-JWS container and the final physical line of the file.
+    "auth",
 )
 ALLOWED_FIELDS = set(REQUIRED_FIELDS + OPTIONAL_FIELDS)
 ALLOWED_TYPES = {
@@ -396,6 +404,13 @@ def validate_message_dict(data: Dict[str, Any]) -> List[str]:
         for err in validate_handoff_complete_text(body):
             errors.append(f"handoff_complete body: {err}")
 
+    # Signed-message auth trailer: strict structural validation (framing +
+    # locked JOSE profile), no crypto — verification is receiver-side.
+    if "auth" in data:
+        auth_value = data.get("auth")
+        if not isinstance(auth_value, (dict, list)):
+            errors.extend(auth_structure_errors(str(auth_value or "")))
+
     return errors
 
 
@@ -403,7 +418,11 @@ def validate_message_file(path: Path) -> List[str]:
     if not path.is_file():
         return [f"message file does not exist: {path}"]
     try:
-        raw = path.read_text(encoding="utf-8")
+        # Bytes, not read_text(): text mode applies universal-newline
+        # normalization, which would hide CRLF byte differences from the
+        # signed-message framing checks (byte covenant).
+        raw_bytes = path.read_bytes()
+        raw = raw_bytes.decode("utf-8")
     except Exception as exc:
         return [f"failed to read file: {exc}"]
 
@@ -412,7 +431,24 @@ def validate_message_file(path: Path) -> List[str]:
     except MessageValidationError as exc:
         return [str(exc)]
 
-    return validate_message_dict(data)
+    errors = validate_message_dict(data)
+
+    # Raw-position rule for signed messages, checked against the exact
+    # on-disk bytes: the auth trailer must be the final physical line,
+    # followed by exactly one LF. CRLF or any other byte variation fails.
+    if "auth" in data:
+        _, trailer_value = split_signed_message(raw_bytes)
+        if trailer_value is None:
+            errors.append(
+                "field 'auth' must be the final physical line of the file: "
+                'auth: "<base64url>" followed by exactly one LF (no CRLF)'
+            )
+        elif str(data.get("auth")) != trailer_value:
+            errors.append(
+                "field 'auth' parsed value does not match the raw trailer line"
+            )
+
+    return errors
 
 
 def main() -> int:

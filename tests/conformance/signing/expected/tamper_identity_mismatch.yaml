@@ -1,0 +1,29 @@
+case: tamper_identity_mismatch
+expected:
+  annotation: '[oacp-auth] signed-INVALID reason: signer identity mismatch: verified
+    alice, message claims ''bob'''
+  message_auth:
+    alg: EdDSA
+    claimed_sender: bob
+    kid: null
+    payload_sha256: f0f11a176ad2653c122914aa2ef5852cf569e0221127f9519b87034ea23eb6fc
+    reason: 'signer identity mismatch: verified alice, message claims ''bob'''
+    scheme: raw-prefix-v1
+    signatures_checked:
+    - agent: urn:oacp:agent:3f54e34d-9d31-4c8a-a5a7-64766f636170:alice
+      kid: Jh7IAlBx9CkSDWxLetPWKXl4q7bdaA57unfb0pP1zEk
+      outcome: identity_mismatch
+    status: invalid
+    trust_source: null
+    verified_instance: null
+    verified_signer: null
+  prefix_sha256: f0f11a176ad2653c122914aa2ef5852cf569e0221127f9519b87034ea23eb6fc
+  raw_sha256: 6384aea840ca294c10e72931c09d35580ecd39e44ceceef1235e800b811e8ee2
+  signing_input_sha256:
+  - 216fc06823ebcaa91a0e4354680f02c6405bf3595e3356966395c8c65218562e
+  trailer_state: ok
+  validate_errors: []
+message: messages/tamper_identity_mismatch.yaml
+prefix: messages/tamper_identity_mismatch.prefix.yaml
+signers:
+- alice

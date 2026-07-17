@@ -7,3 +7,6 @@ expected:
   reason_codes:
     - hard_stop_destructive_command
   matched_pattern: "rm -rf"
+  result:
+    final_state: paused
+    completion_kind: admission_paused

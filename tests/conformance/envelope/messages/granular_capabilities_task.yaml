@@ -1,0 +1,28 @@
+id: msg-20260717060500-alice-env2
+from: alice
+to: claude
+type: task_request
+priority: P2
+created_at_utc: "2026-07-17T06:05:00Z"
+subject: "Fix round: land the PR and file follow-up issues"
+body: |
+  ## Task
+  Open a pull request with the fixes, land it once approved, and file the
+  residual findings as issues.
+
+  task_profile:
+    estimated_minutes: 35
+    expected_files_touched: 4
+    risk_tier: P2
+    target_repo: example-org/private-repo
+    destructive_ops: false
+    external_side_effects: true
+    creates_or_updates_pr: true
+    comments_on_github: true
+    commits_changes: true
+    merges_pr: true
+    files_issues: true
+    sends_oacp_reply_only: false
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: false

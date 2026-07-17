@@ -34,6 +34,8 @@ CANONICAL_MEMORY_GITIGNORE = """\
 !org-memory/**
 !projects/*/memory/**
 projects/*/memory/.cache/
+# never sync private key material — explicit deny, wins over any future allowlist widening
+keys/
 """
 
 STALE_MEMORY_DAYS = 7

@@ -26,6 +26,8 @@ Options:
     --context-keys <text>       Context keys (inline)
     --context-keys-file <path>  Read context keys from file
     --autonomy-hint <value>     Advisory receiver autonomy hint (valid: auto_proceed)
+    --sign                      Sign the message (detached-JWS auth trailer);
+                                default follows signing.sign_messages config
     --suffix <text>             Filename disambiguator suffix
     --oacp-dir <path>           Override OACP home directory (default: $OACP_HOME or ~/oacp)
     --dry-run                   Print YAML to stdout, don't write files
@@ -58,6 +60,7 @@ from _oacp_constants import utc_now_iso
 _scripts_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(_scripts_dir))
 
+from message_signing import SigningUnavailableError  # noqa: E402
 from validate_message import (  # noqa: E402
     ALLOWED_AUTONOMY_HINTS,
     ALLOWED_PRIORITIES,
@@ -360,7 +363,20 @@ def render_yaml(data: Dict[str, Any]) -> str:
     Uses block scalars (|) for multi-line body and context_keys fields.
     Supports list values for 'to' field (broadcast).
     Stdlib-only — no PyYAML dependency.
+
+    Refuses authentication fields: a signed message is produced by rendering
+    the unsigned payload once and appending the auth trailer to those exact
+    bytes (message_signing.append_auth_trailer). Re-rendering signed content
+    would silently strip or corrupt the signature, so it fails loudly here.
     """
+    auth_keys = sorted(k for k in data if k == "auth" or k.startswith("sig_"))
+    if auth_keys:
+        raise ValueError(
+            "render_yaml() cannot render authentication field(s) "
+            f"{', '.join(auth_keys)} — sign by appending to the rendered "
+            "bytes (see scripts/message_signing.py), never re-render"
+        )
+
     lines: List[str] = []
 
     for key in FIELD_ORDER:
@@ -445,11 +461,16 @@ def write_broadcast_files(
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
-    """Write content via a same-directory temp file, then atomically replace."""
+    """Write content via a same-directory temp file, then atomically replace.
+
+    Writes in binary mode: signed messages are byte artifacts, and text-mode
+    newline translation (e.g. LF -> CRLF on Windows) after the signature was
+    computed would invalidate it (byte covenant).
+    """
     temp_name = f".{path.name}.tmp-{os.getpid()}-{secrets.token_hex(3)}"
     temp_path = path.with_name(temp_name)
     try:
-        temp_path.write_text(content, encoding="utf-8")
+        temp_path.write_bytes(content.encode("utf-8"))
         os.replace(temp_path, path)
     finally:
         try:
@@ -507,6 +528,70 @@ def _check_recipient_status(project_dir: Path, recipient: str, priority: str) ->
     return None
 
 
+def _load_signing_config(project_dir: Path, sender: str) -> Dict[str, Any]:
+    """Read the sender's `signing:` config block from agents/<sender>/config.yaml.
+
+    Returns {} when the config file or the block is absent — senders without
+    the knob behave exactly as before (sign_messages defaults off). A config
+    that EXISTS but cannot be read/parsed, or a signing block with wrong
+    types, fails loudly: signing intent must never silently downgrade to
+    unsigned, and a stray quoted "false" must never enable signing.
+    """
+    config_path = project_dir / "agents" / sender / "config.yaml"
+    if not config_path.is_file():
+        return {}
+    try:
+        import yaml  # type: ignore
+    except ImportError:  # pragma: no cover - PyYAML is an install dependency
+        return {}
+    try:
+        loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(
+            f"cannot read sender config {config_path}: {exc} — refusing to "
+            "guess signing intent"
+        ) from exc
+    if loaded is None:
+        return {}
+    if not isinstance(loaded, dict):
+        raise ValueError(f"sender config {config_path} must be a YAML mapping")
+    signing = loaded.get("signing")
+    if signing is None:
+        return {}
+    if not isinstance(signing, dict):
+        raise ValueError(f"{config_path}: signing block must be a mapping")
+    sign_messages = signing.get("sign_messages", False)
+    if not isinstance(sign_messages, bool):
+        raise ValueError(
+            f"{config_path}: signing.sign_messages must be a boolean, "
+            f"got {sign_messages!r}"
+        )
+    kid = signing.get("kid")
+    if kid is not None and (not isinstance(kid, str) or not kid):
+        raise ValueError(
+            f"{config_path}: signing.kid must be a non-empty string, got {kid!r}"
+        )
+    return signing
+
+
+def _sign_rendered_message(
+    yaml_content: str, sender: str, oacp_dir: Path, kid: Optional[str] = None
+) -> Tuple[str, List[str]]:
+    """Sign the exact rendered bytes and return (signed_content, kids).
+
+    Render-unsigned once → append the auth trailer once → the caller performs
+    the same atomic write as unsigned messages. Raises on missing keys or a
+    missing crypto backend — a send that requested signing never silently
+    falls back to unsigned.
+    """
+    from message_signing import load_signers, sign_and_append
+
+    signers = load_signers(sender, oacp_dir, kid=kid)
+    payload = yaml_content.encode("utf-8")
+    signed = sign_and_append(payload, signers)
+    return signed.decode("utf-8"), [s.kid for s in signers]
+
+
 def send_message(
     project: str,
     sender: str,
@@ -527,12 +612,17 @@ def send_message(
     channel: Optional[str] = None,
     in_reply_to: Optional[str] = None,
     autonomy_hint: Optional[str] = None,
+    sign: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Orchestrate message building, validation, rendering, and writing.
 
     recipient can be a single name or comma-separated list for broadcast.
     Returns a report dict with message details and file paths (or dry-run info).
     Raises ValueError for validation errors.
+
+    sign=None defers to the sender's `signing.sign_messages` config knob
+    (default off — v0.4.0 ships sender signing config-gated until the trust
+    root lands); sign=True forces signing for this send.
     """
     if oacp_dir is None:
         from _oacp_env import resolve_oacp_home
@@ -604,6 +694,18 @@ def send_message(
     # Render YAML
     yaml_content = render_yaml(msg)
 
+    # Sign-on-send: render-unsigned once → append auth trailer once → the
+    # atomic write below ships those exact bytes (byte covenant).
+    signing_cfg = _load_signing_config(project_dir, sender)
+    sign_enabled = (
+        signing_cfg.get("sign_messages", False) if sign is None else sign
+    )
+    signed_kids: List[str] = []
+    if sign_enabled:
+        yaml_content, signed_kids = _sign_rendered_message(
+            yaml_content, sender, oacp_dir, kid=signing_cfg.get("kid")
+        )
+
     # Check recipient status for P0 warnings
     for r in recipients_list:
         status_warning = _check_recipient_status(project_dir, r, priority)
@@ -620,6 +722,9 @@ def send_message(
         "created_at_utc": msg["created_at_utc"],
         "dry_run": dry_run,
     }
+    if signed_kids:
+        report["signed"] = True
+        report["kids"] = signed_kids
     if warnings:
         report["warnings"] = warnings
 
@@ -745,6 +850,16 @@ def main() -> int:
             f"(valid: {', '.join(sorted(ALLOWED_AUTONOMY_HINTS))})"
         ),
     )
+    parser.add_argument(
+        "--sign",
+        action="store_true",
+        default=None,
+        help=(
+            "Sign this message (detached-JWS auth trailer). Default follows the "
+            "sender's signing.sign_messages config knob (off). Requires a key "
+            "from `oacp key gen` and the 'oacp-cli[crypto]' extra."
+        ),
+    )
     parser.add_argument("--suffix", default=None, help="Filename disambiguator suffix")
     parser.add_argument(
         "--oacp-dir",
@@ -819,8 +934,9 @@ def main() -> int:
             channel=args.channel,
             in_reply_to=args.in_reply_to,
             autonomy_hint=args.autonomy_hint,
+            sign=args.sign,
         )
-    except ValueError as exc:
+    except (ValueError, SigningUnavailableError) as exc:
         _emit_error(str(exc), json_output=args.json_output)
         return 1
 

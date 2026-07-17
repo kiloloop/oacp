@@ -145,6 +145,10 @@ class TestOacpCli(unittest.TestCase):
         self.assertIn("setup", stdout)
         self.assertIn("autonomy-outcome", stdout)
         self.assertIn("envelope", stdout)
+        self.assertIn("key", stdout)
+        self.assertIn("verify", stdout)
+        self.assertIn("trust", stdout)
+        self.assertEqual(cli.SCRIPT_NAMES["trust"], "trust_cli.py")
 
     def test_run_script_restores_sys_path_after_nested_mutation(self) -> None:
         script_path = "/tmp/send_inbox_message.py"

@@ -12,10 +12,29 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from init_project_workspace import initialize_workspace  # noqa: E402
+from _oacp_constants import SPEC_VERSION  # noqa: E402
+from init_project_workspace import initialize_workspace, main  # noqa: E402
 
 
 class TestInitializeWorkspace(unittest.TestCase):
+    def test_workspace_json_stamps_spec_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = initialize_workspace("demo", oacp_root=Path(tmpdir))
+            workspace = json.loads(
+                Path(result["workspace_path"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(workspace["spec_version"], SPEC_VERSION)
+            self.assertNotIn("standards_version", workspace)
+
+    def test_cli_oacp_dir_targets_explicit_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "scratch_home"
+            code = main(["demo", "--agents", "claude", "--oacp-dir", str(home)])
+            self.assertEqual(code, 0)
+            self.assertTrue(
+                (home / "projects" / "demo" / "workspace.json").is_file()
+            )
+
     def test_creates_workspace_structure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             hub_root = Path(tmpdir)

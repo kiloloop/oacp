@@ -1,0 +1,25 @@
+case: tamper_header_reencode
+expected:
+  annotation: '[oacp-auth] signed-INVALID reason: signature present but failed verification'
+  message_auth:
+    alg: EdDSA
+    claimed_sender: null
+    kid: null
+    payload_sha256: e0971fdd640bf748db47a73d90b972caab3935d9aac87a274698f0a9e38fa22f
+    reason: signature present but failed verification
+    scheme: raw-prefix-v1
+    signatures_checked:
+    - agent: urn:oacp:agent:3f54e34d-9d31-4c8a-a5a7-64766f636170:bob
+      kid: _zFbQNe0KIluKcXb2hHL-LKPPKHCOsGYuqushFWhyFA
+      outcome: bad_signature
+    status: invalid
+    trust_source: null
+    verified_instance: null
+    verified_signer: null
+  prefix_sha256: e0971fdd640bf748db47a73d90b972caab3935d9aac87a274698f0a9e38fa22f
+  raw_sha256: 78d47b41cfbf80f9a07ae12ab11ef4c3f2dbe903b0333552a0c605a1941c80c1
+  signing_input_sha256:
+  - a6fc08ba57ae130cd6e0ae11a813357a344ed95859de31ed09e105400cdbbcb4
+  trailer_state: ok
+  validate_errors: []
+message: messages/tamper_header_reencode.yaml

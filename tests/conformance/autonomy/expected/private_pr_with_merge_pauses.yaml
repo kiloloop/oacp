@@ -1,0 +1,13 @@
+case: private_pr_with_merge_pauses
+config: configs/auto_review_standard.yaml
+message: messages/private_pr_with_merge.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - merges_pr_pause
+  result:
+    final_state: paused
+    completion_kind: admission_paused
+  task_profile:
+    merges_pr: true

@@ -30,6 +30,7 @@ from oacp_doctor import (  # noqa: E402
     check_inbox_health,
     check_memory_sync,
     check_schemas,
+    check_trust,
     check_workspace,
     has_errors,
     print_json,
@@ -575,8 +576,9 @@ class TestRunDoctor(unittest.TestCase):
                 runner=runner,
                 which_fn=which,
             )
-            # Environment + Workspace + Inbox Health + Schemas + Autonomy + Agent Status = 6
-            self.assertEqual(len(cats), 6)
+            # Environment + Workspace + Inbox Health + Schemas + Autonomy
+            # + Agent Status + Trust Root = 7
+            self.assertEqual(len(cats), 7)
             cat_names = [c.name for c in cats]
             self.assertIn("Environment", cat_names)
             self.assertIn("Workspace", cat_names)
@@ -584,6 +586,7 @@ class TestRunDoctor(unittest.TestCase):
             self.assertIn("Schemas", cat_names)
             self.assertIn("Autonomy", cat_names)
             self.assertIn("Agent Status", cat_names)
+            self.assertIn("Trust Root", cat_names)
 
     def test_include_memory_adds_memory_sync_category(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -601,6 +604,75 @@ class TestRunDoctor(unittest.TestCase):
 
             self.assertEqual(cats[-1].name, "Memory Sync")
             self.assertEqual(cats[-1].results[0].severity, Severity.skip)
+
+
+class TestCheckTrust(unittest.TestCase):
+    KID = "a" * 43
+    GOLDEN_X = "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+
+    def _pins(self, project_dir: Path, agent: str, kid: str, x: str) -> None:
+        pins = project_dir / "agents" / agent / "trust" / "allowed_signers.yaml"
+        pins.parent.mkdir(parents=True, exist_ok=True)
+        pins.write_text(
+            "version: 1\nsigners:\n"
+            f"  - {{agent: iris, kid: {kid}, status: active, "
+            f"jwk: {{kty: OKP, crv: Ed25519, x: {x}}}}}\n",
+            encoding="utf-8",
+        )
+
+    def test_skips_when_no_trust_files(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_dir = Path(td)
+            (project_dir / "agents" / "claude").mkdir(parents=True)
+            cat = check_trust(project_dir)
+            self.assertEqual(cat.name, "Trust Root")
+            self.assertEqual(cat.results[0].severity, Severity.skip)
+
+    def test_clean_import_reports_ok(self) -> None:
+        from message_signing import jwk_thumbprint
+        from trust_root import import_public_stub
+
+        with tempfile.TemporaryDirectory() as td:
+            project_dir = Path(td) / "proj"
+            (project_dir / "agents" / "claude").mkdir(parents=True)
+            jwk = {"kty": "OKP", "crv": "Ed25519", "x": self.GOLDEN_X}
+            stub = {
+                "kid": jwk_thumbprint(jwk),
+                "jwk": jwk,
+                "agent": "iris",
+                "agent_urn": (
+                    "urn:oacp:agent:123e4567-e89b-42d3-a456-426614174000:iris"
+                ),
+                "instance_urn": "urn:uuid:123e4567-e89b-42d3-a456-426614174111",
+            }
+            stub_path = Path(td) / "k.pub.json"
+            stub_path.write_text(json.dumps(stub), encoding="utf-8")
+            import_public_stub(stub_path, project_dir, receiver="claude")
+
+            cat = check_trust(project_dir)
+            self.assertEqual(cat.worst_severity, Severity.ok)
+
+    def test_pinned_but_not_cataloged_warns(self) -> None:
+        from message_signing import jwk_thumbprint
+
+        with tempfile.TemporaryDirectory() as td:
+            project_dir = Path(td)
+            jwk = {"kty": "OKP", "crv": "Ed25519", "x": self.GOLDEN_X}
+            self._pins(project_dir, "claude", jwk_thumbprint(jwk), self.GOLDEN_X)
+            cat = check_trust(project_dir)
+            names = [r.name for r in cat.results if r.severity == Severity.warn]
+            self.assertIn("trust-pin-not-in-catalog", names)
+
+    def test_integrity_failure_is_error(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_dir = Path(td)
+            self._pins(project_dir, "claude", self.KID, self.GOLDEN_X)
+            cat = check_trust(project_dir)
+            self.assertEqual(cat.worst_severity, Severity.error)
+            names = [r.name for r in cat.results if r.severity == Severity.error]
+            # the reader enforces integrity, so the bad kid surfaces as an
+            # unreadable pins file carrying the thumbprint detail
+            self.assertIn("trust-pins-unreadable", names)
 
 
 class TestCheckMemorySync(unittest.TestCase):

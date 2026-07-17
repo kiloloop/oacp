@@ -1,0 +1,34 @@
+case: declaration_intent_checkpoint_pauses
+config: configs/auto_review_standard.yaml
+message: messages/clean_task.yaml
+actuals: actuals/declaration_intent.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - declaration_error
+  breached:
+    - task_profile.merges_pr
+  result:
+    final_state: paused
+    completion_kind: checkpoint_paused
+    actual_minutes: 1
+    actual_files_touched: 0
+    predicted_risk_materialized: false
+    threshold_checkpoint:
+      evaluated: true
+      breached: true
+      breached_fields:
+        - task_profile.merges_pr
+      declaration_errors:
+        - task_profile.merges_pr
+      breach_basis: declared_intent
+      paused_at_utc: "2026-07-17T06:04:00Z"
+      side_effects_actual:
+        creates_or_updates_pr: false
+        comments_on_github: false
+        commits_changes: false
+        merges_pr: false
+        files_issues: false
+      action: paused_for_reauthorization
+      completed_at_utc: null

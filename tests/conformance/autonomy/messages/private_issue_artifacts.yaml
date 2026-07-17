@@ -1,0 +1,27 @@
+id: msg-20260717060200-alice-issues1
+from: alice
+to: codex
+type: task_request
+priority: P2
+created_at_utc: "2026-07-17T06:02:00Z"
+subject: "File the review findings as issues"
+body: |
+  ## Task
+  Record each confirmed finding from the review packet as a GitHub issue
+  with the agreed labels.
+
+  task_profile:
+    estimated_minutes: 25
+    risk_tier: P2
+    expected_files_touched: 1
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: false
+    target_repo: example-org/private-repo
+    creates_or_updates_pr: false
+    comments_on_github: false
+    commits_changes: false
+    files_issues: true
+    sends_oacp_reply_only: false

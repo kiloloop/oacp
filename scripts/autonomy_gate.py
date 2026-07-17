@@ -17,11 +17,11 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 import yaml
 
-from _oacp_constants import REPO_SLUG_RE
+from _oacp_constants import REPO_SLUG_RE, SPEC_VERSION, utc_now_iso
 from validate_message import validate_message_dict
 
 
@@ -49,12 +49,20 @@ SIDE_EFFECT_BOOL_FIELDS = (
     "creates_or_updates_pr",
     "comments_on_github",
     "commits_changes",
+    "merges_pr",
+    "files_issues",
     "sends_oacp_reply_only",
 )
+# Declarable granular side-effect capabilities. This tuple is the single
+# vocabulary for three surfaces at once — sender declarations, continuation
+# grant scopes, and the checkpoint's `side_effects_actual` keys — so the
+# declarable set and the observable set can never diverge.
 COVERABLE_CONTINUATION_FIELDS = (
     "creates_or_updates_pr",
     "comments_on_github",
     "commits_changes",
+    "merges_pr",
+    "files_issues",
 )
 COMPLETE_PROFILE_FIELDS = (
     "estimated_minutes",
@@ -64,6 +72,23 @@ COMPLETE_PROFILE_FIELDS = (
 )
 
 FINAL_STATES = {"done", "paused", "blocked", "superseded", "error"}
+# `result.completion_kind` names the terminal shape of the EVALUATION only —
+# one axis, enumerated. The pause cause lives in `reason_codes` (already
+# pinned), the run state in `result.final_state`, and human decisions in
+# `result.human_outcome`. Receiver-composed values outside this enum are
+# non-conforming; receivers must copy the evaluator's kind verbatim and
+# never overwrite it at terminal update time.
+PINNED_COMPLETION_KINDS = frozenset({
+    "auto_accepted",
+    "admission_paused",
+    "checkpoint_paused",
+    "config_malformed",
+})
+# Checkpoint breach basis: `realized` when the actuals record work that
+# already happened; `declared_intent` when the checkpoint fired
+# prospectively — the undeclared action was caught before it materialized
+# (§E: mandatory before performing ANY newly discovered outward action).
+BREACH_BASES = ("declared_intent", "realized")
 PINNED_REASON_CODES = frozenset({
     "auth_config_or_secrets_pause",
     "comments_on_github_invalid",
@@ -89,6 +114,8 @@ PINNED_REASON_CODES = frozenset({
     "external_side_effects_not_pr_artifact",
     "external_side_effects_pause",
     "file_scope_ambiguous",
+    "files_issues_invalid",
+    "files_issues_pause",
     "hard_stop_content_sensitivity",
     "hard_stop_destructive_command",
     "hard_stop_external_side_effect",
@@ -97,6 +124,8 @@ PINNED_REASON_CODES = frozenset({
     "lexical_advisory",
     "max_actual_files_touched_invalid",
     "max_actual_minutes_invalid",
+    "merges_pr_invalid",
+    "merges_pr_pause",
     "message_expired",
     "message_hash_recorded",
     "message_invalid",
@@ -443,13 +472,14 @@ def _first_effective_match(
     notes: List[Dict[str, str]],
     *,
     demote_declared: bool = False,
+    demote_labels: FrozenSet[str] = frozenset(),
 ) -> Optional[str]:
     for label, pattern in patterns:
         for match in pattern.finditer(body):
             if _match_is_negated(body, match):
                 _record_lexical_note(notes, "lexical_advisory_negated", label)
                 continue
-            if demote_declared:
+            if demote_declared or label in demote_labels:
                 _record_lexical_note(notes, "lexical_advisory_declared", label)
                 continue
             return label
@@ -484,6 +514,64 @@ def message_sha256(
         return hashlib.sha256(message_path.read_bytes()).hexdigest()
     serialized = yaml.safe_dump(message, sort_keys=True, allow_unicode=False).encode("utf-8")
     return hashlib.sha256(serialized).hexdigest()
+
+
+_EVALUATOR_SOURCE = "scripts/autonomy_gate.py"
+_evaluator_provenance_cache: Optional[Dict[str, Any]] = None
+
+
+def _git_sha_if_committed(path: Path) -> Optional[str]:
+    """HEAD short SHA, only when this file's bytes match the committed blob.
+
+    A SHA naming a commit whose gate code is NOT what ran (dirty tree,
+    local-ahead checkout, untracked copy under someone's repo) is worse
+    than no SHA — `content_sha256` remains the load-bearing identity.
+    """
+    import subprocess
+
+    try:
+        directory = str(path.parent)
+        tracked = subprocess.run(
+            ["git", "-C", directory, "ls-files", "--error-unmatch", str(path)],
+            capture_output=True, timeout=5,
+        )
+        if tracked.returncode != 0:
+            return None
+        unchanged = subprocess.run(
+            ["git", "-C", directory, "diff", "--quiet", "HEAD", "--", str(path)],
+            capture_output=True, timeout=5,
+        )
+        if unchanged.returncode != 0:
+            return None
+        head = subprocess.run(
+            ["git", "-C", directory, "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if head.returncode != 0:
+            return None
+        return head.stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def evaluator_provenance() -> Dict[str, Any]:
+    """Self-stamped identity of the gate code producing a decision.
+
+    Receivers copy this block verbatim into the audit record instead of
+    composing an `evaluator` field by hand. Hand evaluation (no executed
+    gate) is the only case a receiver authors itself: `executed: false`
+    with no hash.
+    """
+    global _evaluator_provenance_cache
+    if _evaluator_provenance_cache is None:
+        path = Path(__file__).resolve()
+        _evaluator_provenance_cache = {
+            "source": _EVALUATOR_SOURCE,
+            "content_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "git_sha": _git_sha_if_committed(path),
+            "executed": True,
+        }
+    return dict(_evaluator_provenance_cache)
 
 
 def message_expired(
@@ -795,15 +883,22 @@ def _side_effect_reasons(
             envelope["external_side_effects"]
             and not envelope["public_visibility"]
             and envelope["target_repo"] in private_repo_allowlist
-            and (envelope["creates_or_updates_pr"] or envelope["comments_on_github"])
+            and (
+                envelope["creates_or_updates_pr"]
+                or envelope["comments_on_github"]
+                or envelope["files_issues"]
+            )
         )
-        if is_private_pr_artifact:
-            return reasons
-        if (
+        # merges_pr never rides the artifact class: merge authority always
+        # passes a human at least once (admission pause), unless a prior
+        # human-approved continuation grant covers it explicitly.
+        if "merges_pr" in uncovered_fields:
+            reasons.append("merges_pr_pause")
+        if not is_private_pr_artifact and (
             (envelope["external_side_effects"] and not grant_covers_side_effect)
             or uncovered_fields
         ):
-            return ["external_side_effects_not_pr_artifact"]
+            reasons.append("external_side_effects_not_pr_artifact")
         return reasons
 
     if envelope["external_side_effects"] and not grant_covers_side_effect:
@@ -855,17 +950,61 @@ def _actual_nonnegative_int(actuals: Dict[str, Any], key: str) -> int:
     return value
 
 
-def _completed_at_utc(actuals: Dict[str, Any]) -> Optional[str]:
-    value = str(actuals.get("completed_at_utc") or "")
+def _actual_utc_text(actuals: Dict[str, Any], key: str) -> Optional[str]:
+    value = str(actuals.get(key) or "")
     if not value:
         return None
     try:
         dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
     except ValueError as exc:
-        raise ValueError(
-            "actuals.completed_at_utc must use YYYY-MM-DDTHH:MM:SSZ"
-        ) from exc
+        raise ValueError(f"actuals.{key} must use YYYY-MM-DDTHH:MM:SSZ") from exc
     return value
+
+
+def _breach_basis(actuals: Dict[str, Any]) -> Optional[str]:
+    value = actuals.get("breach_basis")
+    if value is None:
+        return None
+    if value not in BREACH_BASES:
+        choices = " or ".join(BREACH_BASES)
+        raise ValueError(f"actuals.breach_basis must be {choices}")
+    return str(value)
+
+
+def _declared_intent_fields(actuals: Dict[str, Any]) -> List[str]:
+    """Validated prospective-breach input.
+
+    A declaration correction caught before anything materialized cannot be
+    expressed through realized effects — marking a side effect true would
+    assert an outward action that never happened. The receiver instead
+    names the declared-profile fields the correction invalidated
+    (``task_profile.<risk capability field>``); each drives the checkpoint
+    breach directly while every realized effect stays false. The
+    vocabulary is the monotone risky capability booleans only —
+    ``sends_oacp_reply_only`` is reverse-polarity (restrictive), so a
+    false-to-true flip on it cannot represent a risky correction and is
+    refused.
+    """
+    value = actuals.get("declared_intent_fields")
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(
+            "actuals.declared_intent_fields must be a list of "
+            "task_profile field paths"
+        )
+    valid_keys = LEGACY_PROFILE_BOOL_FIELDS + COVERABLE_CONTINUATION_FIELDS
+    fields: List[str] = []
+    for item in value:
+        prefix, _, key = item.partition(".")
+        if prefix != "task_profile" or key not in valid_keys:
+            raise ValueError(
+                f"actuals.declared_intent_fields entry {item!r} is not a "
+                "task_profile risk-capability field path"
+            )
+        if item not in fields:
+            fields.append(item)
+    return fields
 
 
 def evaluate_threshold_checkpoint(
@@ -881,6 +1020,8 @@ def evaluate_threshold_checkpoint(
         "breached": False,
         "breached_fields": [],
         "declaration_errors": [],
+        "breach_basis": None,
+        "paused_at_utc": None,
         "action": "not_evaluated",
         "predicted_risk_materialized": False,
         "completed_at_utc": None,
@@ -899,6 +1040,8 @@ def evaluate_threshold_checkpoint(
         max_minutes = grant_scope["max_actual_minutes"]
         max_files = grant_scope["max_actual_files_touched"]
 
+    intent_fields = _declared_intent_fields(actuals)
+
     breached_fields: List[str] = []
     declaration_errors: List[str] = []
     if actual_minutes > max_minutes:
@@ -915,6 +1058,43 @@ def evaluate_threshold_checkpoint(
         field = f"side_effects_actual.{key}"
         breached_fields.append(field)
         declaration_errors.append(field)
+    if intent_fields:
+        # The prospective shape is all-or-nothing: a checkpoint labeled
+        # declared_intent must not silently contain realized breach
+        # sources, and a "correction" for a capability the envelope
+        # already declares corrects nothing. Mixed inputs are rejected
+        # before an ambiguous audit record can be written — record the
+        # realized breach on its own, then re-evaluate the correction.
+        if breached_fields:
+            raise ValueError(
+                "actuals.declared_intent_fields cannot combine with "
+                f"realized breach sources ({', '.join(breached_fields)})"
+            )
+        realized_true = sorted(
+            key for key, value in side_effects.items() if value
+        )
+        if realized_true:
+            raise ValueError(
+                "actuals.declared_intent_fields requires all-false "
+                f"side_effects_actual (true: {', '.join(realized_true)})"
+            )
+        for field in intent_fields:
+            key = field.partition(".")[2]
+            already_authorized = envelope.get(key) is True or (
+                isinstance(grant_scope, dict) and grant_scope.get(key) is True
+            )
+            if already_authorized:
+                raise ValueError(
+                    f"actuals.declared_intent_fields entry {field!r} is "
+                    "already declared true in the envelope or covered by "
+                    "an accepted continuation grant — nothing to correct "
+                    "prospectively"
+                )
+        # Prospective corrections breach on the declared field itself —
+        # the realized effects stay all-false (nothing materialized).
+        for field in intent_fields:
+            breached_fields.append(field)
+            declaration_errors.append(field)
 
     breached = bool(breached_fields)
 
@@ -924,6 +1104,47 @@ def evaluate_threshold_checkpoint(
     elif isinstance(grant_scope, dict):
         action = "continued_with_grant"
 
+    # The pause moment and the breach basis are only meaningful on a breach.
+    # `paused_at_utc` is what human-decision latency measures from: the
+    # receiver passes the moment the checkpoint actually fired (e.g. the
+    # sender-notification timestamp) and the evaluator stamps "now" only as
+    # the fallback. `breach_basis` follows the breach source: realized work
+    # by default, `declared_intent` exactly when declared_intent_fields
+    # drive the breach — a mismatched explicit basis is rejected rather
+    # than recorded (the two shapes must stay distinguishable).
+    explicit_basis = _breach_basis(actuals)
+    if intent_fields and explicit_basis == "realized":
+        raise ValueError(
+            "actuals.breach_basis realized is inconsistent with "
+            "declared_intent_fields"
+        )
+    if not intent_fields and explicit_basis == "declared_intent":
+        raise ValueError(
+            "actuals.breach_basis declared_intent requires "
+            "declared_intent_fields"
+        )
+    paused_at = None
+    basis = None
+    if breached:
+        paused_at = _actual_utc_text(actuals, "paused_at_utc") or utc_now_iso()
+        basis = "declared_intent" if intent_fields else "realized"
+
+    # A declared_intent breach is by definition caught BEFORE the risk
+    # materialized — its materialization metric is pinned false and an
+    # explicit true is rejected as self-contradictory. Realized breaches
+    # keep the breach-derived default.
+    predicted = actuals.get("predicted_risk_materialized")
+    if intent_fields:
+        if predicted is True:
+            raise ValueError(
+                "actuals.predicted_risk_materialized cannot be true on a "
+                "declared_intent checkpoint — the correction was caught "
+                "before the risk materialized"
+            )
+        predicted_value = False
+    else:
+        predicted_value = predicted if isinstance(predicted, bool) else breached
+
     checkpoint.update({
         "evaluated": True,
         "actual_minutes": actual_minutes,
@@ -932,13 +1153,11 @@ def evaluate_threshold_checkpoint(
         "breached": breached,
         "breached_fields": breached_fields,
         "declaration_errors": declaration_errors,
+        "breach_basis": basis,
+        "paused_at_utc": paused_at,
         "action": action,
-        "predicted_risk_materialized": (
-            actuals["predicted_risk_materialized"]
-            if isinstance(actuals.get("predicted_risk_materialized"), bool)
-            else breached
-        ),
-        "completed_at_utc": _completed_at_utc(actuals),
+        "predicted_risk_materialized": predicted_value,
+        "completed_at_utc": _actual_utc_text(actuals, "completed_at_utc"),
     })
     return checkpoint
 
@@ -950,6 +1169,8 @@ def _base_result(
 ) -> Dict[str, Any]:
     if final_state not in FINAL_STATES:
         raise ValueError(f"invalid final_state: {final_state}")
+    if completion_kind not in PINNED_COMPLETION_KINDS:
+        raise ValueError(f"unpinned completion_kind: {completion_kind}")
     return {
         "final_state": final_state,
         "completion_kind": completion_kind,
@@ -999,13 +1220,17 @@ def evaluate_autonomy(
 
     def finish(decision: Dict[str, Any]) -> Dict[str, Any]:
         reason_codes = list(decision.get("reason_codes") or [])
-        unknown_codes = sorted(set(reason_codes) - PINNED_REASON_CODES)
+        co_occurring = list(decision.get("co_occurring_reason_codes") or [])
+        unknown_codes = sorted(
+            (set(reason_codes) | set(co_occurring)) - PINNED_REASON_CODES
+        )
         if unknown_codes:
             raise ValueError(f"unpinned autonomy reason code(s): {', '.join(unknown_codes)}")
         decision["message_sha256"] = msg_hash
         decision["policy_sha256"] = policy_hash
         decision["schema_version"] = AUTONOMY_AUDIT_SCHEMA_VERSION
-        decision["spec_version"] = "0.3.5"
+        decision["spec_version"] = SPEC_VERSION
+        decision["evaluator"] = evaluator_provenance()
         decision["receiver"] = receiver
         decision["sender"] = message.get("from")
         decision["message_id"] = message.get("id")
@@ -1017,12 +1242,13 @@ def evaluate_autonomy(
             "breached",
             reason_codes if decision.get("decision") == "paused" else [],
         )
+        decision.setdefault("co_occurring_reason_codes", [])
         return decision
 
     def paused(
         mode: str,
         reason_codes: List[str],
-        completion_kind: str,
+        completion_kind: str = "admission_paused",
         *,
         envelope: Optional[Dict[str, Any]] = None,
         grant_result: Optional[Dict[str, Any]] = None,
@@ -1030,6 +1256,7 @@ def evaluate_autonomy(
         validation_errors: Optional[List[str]] = None,
         checkpoint: Optional[Dict[str, Any]] = None,
         breached: Optional[List[str]] = None,
+        co_occurring: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         grant = grant_result or {"present": False, "enabled": False}
         resolved_checkpoint = checkpoint or evaluate_threshold_checkpoint(
@@ -1052,6 +1279,13 @@ def evaluate_autonomy(
             decision["message_validation_errors"] = validation_errors
         if breached is not None:
             decision["breached"] = breached
+        if co_occurring:
+            # Reasons that also held but did not drive the verdict: an
+            # early-out must not make "not evaluated" indistinguishable
+            # from "passed" in the record (threshold analytics read these).
+            decision["co_occurring_reason_codes"] = sorted(
+                set(co_occurring) - set(reason_codes)
+            )
         return finish(decision)
 
     try:
@@ -1060,22 +1294,21 @@ def evaluate_autonomy(
         return paused("always_pause", ["config_malformed"], "config_malformed")
 
     if mode == "always_pause":
-        return paused(mode, ["mode_always_pause"], "always_pause")
+        return paused(mode, ["mode_always_pause"])
 
     message_errors = validate_message_dict(message)
     if message_errors:
         return paused(
             mode,
             ["message_invalid"],
-            "message_invalid",
             validation_errors=message_errors,
         )
 
     if message_expired(message, now_utc):
-        return paused(mode, ["message_expired"], "message_expired")
+        return paused(mode, ["message_expired"])
 
     if prior_auto_accept_exists(str(message.get("id") or ""), receiver, audit_dir):
-        return paused(mode, ["message_replayed"], "message_replayed")
+        return paused(mode, ["message_replayed"])
 
     body = str(message.get("body") or "")
     msg_type = str(message.get("type") or "")
@@ -1084,11 +1317,11 @@ def evaluate_autonomy(
     profile, profile_error = extract_task_profile(body)
     profile_snapshot = profile
     if profile_error:
-        return paused(mode, [profile_error], profile_error)
+        return paused(mode, [profile_error])
 
     if profile is None and not allow_without_profile:
         reason = "risk_obvious_no_profile" if obvious_no_profile_risk(body) else "task_profile_missing"
-        return paused(mode, [reason], reason)
+        return paused(mode, [reason])
 
     envelope: Optional[Dict[str, Any]] = None
     profile_required_reason = "task_profile_present"
@@ -1099,22 +1332,25 @@ def evaluate_autonomy(
         try:
             envelope = normalize_scope_envelope(profile)
         except TaskProfileError:
-            return paused(
-                mode,
-                ["task_profile_unparsable"],
-                "task_profile_unparsable",
-            )
+            return paused(mode, ["task_profile_unparsable"])
 
     gate3_body = _gate3_body(body, logged_notes)
+
+    # Gate-2 numeric thresholds are evaluated before any Gate-3 early-out so
+    # a lexical hard stop cannot leave a co-occurring breach unevaluated:
+    # record silence must mean "passed", never "not evaluated".
+    masked_threshold_reasons: List[str] = []
+    if envelope is not None:
+        masked_threshold_reasons = _threshold_reasons(envelope, policy["thresholds"])
 
     matched = first_match(DESTRUCTIVE_PATTERNS, body)
     if matched:
         return paused(
             mode,
             ["hard_stop_destructive_command"],
-            "hard_stop",
             envelope=envelope,
             matched_pattern=matched,
+            co_occurring=masked_threshold_reasons,
         )
 
     external_policy = str(policy["thresholds"]["external_side_effects"])
@@ -1128,19 +1364,33 @@ def evaluate_autonomy(
             and envelope is not None
             and envelope["external_side_effects"]
         )
+        # An explicitly declared merge must reach the granular policy path
+        # (merges_pr_pause on first admission; a human-approved continuation
+        # grant covering merges_pr can admit the follow-up) — otherwise the
+        # documented one-human-pass flow is unreachable whenever the task
+        # uses the literal word "merge". Undeclared merge wording stays a
+        # lexical hard stop.
+        demote_labels: FrozenSet[str] = frozenset()
+        if (
+            _profile_is_complete(profile)
+            and envelope is not None
+            and envelope["merges_pr"]
+        ):
+            demote_labels = frozenset({"merge"})
         matched = _first_effective_match(
             SIDE_EFFECT_VERB_PATTERNS,
             gate3_body,
             logged_notes,
             demote_declared=demote_side_effect,
+            demote_labels=demote_labels,
         )
         if matched:
             return paused(
                 mode,
                 ["hard_stop_external_side_effect"],
-                "hard_stop",
                 envelope=envelope,
                 matched_pattern=matched,
+                co_occurring=masked_threshold_reasons,
             )
 
     git_push_or_deploy_policy = str(policy["thresholds"]["git_push_or_deploy"])
@@ -1151,9 +1401,9 @@ def evaluate_autonomy(
         return paused(
             mode,
             ["hard_stop_external_side_effect"],
-            "hard_stop",
             envelope=envelope,
             matched_pattern=matched,
+            co_occurring=masked_threshold_reasons,
         )
 
     matched = _first_sensitive_match(gate3_body, logged_notes, profile, envelope)
@@ -1161,9 +1411,9 @@ def evaluate_autonomy(
         return paused(
             mode,
             ["hard_stop_sensitive_scope"],
-            "hard_stop",
             envelope=envelope,
             matched_pattern=matched,
+            co_occurring=masked_threshold_reasons,
         )
 
     matched = first_match(CONTENT_SENSITIVITY_PATTERNS, body)
@@ -1171,9 +1421,9 @@ def evaluate_autonomy(
         return paused(
             mode,
             ["hard_stop_content_sensitivity"],
-            "content_sensitivity",
             envelope=envelope,
             matched_pattern=matched,
+            co_occurring=masked_threshold_reasons,
         )
 
     matched = first_match(NON_DEMOTABLE_SENSITIVE_PATTERNS, body)
@@ -1181,9 +1431,9 @@ def evaluate_autonomy(
         return paused(
             mode,
             ["hard_stop_sensitive_scope"],
-            "hard_stop",
             envelope=envelope,
             matched_pattern=matched,
+            co_occurring=masked_threshold_reasons,
         )
 
     matched = _first_effective_match(
@@ -1195,9 +1445,9 @@ def evaluate_autonomy(
         return paused(
             mode,
             ["file_scope_ambiguous"],
-            "ambiguous_scope",
             envelope=envelope,
             matched_pattern=matched,
+            co_occurring=masked_threshold_reasons,
         )
 
     grant_result: Dict[str, Any] = {"present": False, "enabled": False}
@@ -1214,10 +1464,10 @@ def evaluate_autonomy(
             return paused(
                 mode,
                 ["declaration_error"],
-                "declaration_error",
                 envelope=envelope,
                 grant_result=grant_result,
                 breached=declaration_breaches,
+                co_occurring=masked_threshold_reasons,
             )
 
         grant_breaches = continuation_scope_breaches(envelope, grant_result)
@@ -1225,10 +1475,10 @@ def evaluate_autonomy(
             return paused(
                 mode,
                 ["continuation_grant_scope_exceeded"],
-                "continuation_grant_scope_exceeded",
                 envelope=envelope,
                 grant_result=grant_result,
                 breached=grant_breaches,
+                co_occurring=masked_threshold_reasons,
             )
 
         hard_profile_reasons = []
@@ -1241,12 +1491,15 @@ def evaluate_autonomy(
         if envelope["public_visibility"]:
             hard_profile_reasons.append("public_visibility_pause")
         if hard_profile_reasons:
+            # Declared-risk-flag pauses are admission pauses, not lexical
+            # hard stops: the cause is already named by the per-knob reason
+            # codes.
             return paused(
                 mode,
                 hard_profile_reasons,
-                "hard_stop",
                 envelope=envelope,
                 grant_result=grant_result,
+                co_occurring=masked_threshold_reasons,
             )
 
         reasons = []
@@ -1264,7 +1517,6 @@ def evaluate_autonomy(
             return paused(
                 mode,
                 reasons,
-                "auto_review_paused",
                 envelope=envelope,
                 grant_result=grant_result,
             )
@@ -1273,11 +1525,10 @@ def evaluate_autonomy(
     if checkpoint["evaluated"] and checkpoint["breached"]:
         has_declaration_error = bool(checkpoint["declaration_errors"])
         reason = "declaration_error" if has_declaration_error else "threshold_checkpoint_breached"
-        completion = "declaration_error" if has_declaration_error else reason
         return paused(
             mode,
             [reason],
-            completion,
+            "checkpoint_paused",
             envelope=envelope,
             grant_result=grant_result,
             checkpoint=checkpoint,

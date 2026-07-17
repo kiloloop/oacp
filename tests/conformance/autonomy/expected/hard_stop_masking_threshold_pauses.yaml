@@ -1,0 +1,14 @@
+case: hard_stop_masking_threshold_pauses
+config: configs/auto_review_standard.yaml
+message: messages/hard_stop_masking_threshold.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - hard_stop_external_side_effect
+  matched_pattern: "deploy"
+  co_occurring_reason_codes:
+    - expected_files_touched_exceeds_threshold
+  result:
+    final_state: paused
+    completion_kind: admission_paused

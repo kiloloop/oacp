@@ -160,6 +160,24 @@ def test_build_envelope_missing_message_id_fails_closed() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "bad_id",
+    ["*", "msg-*", "../msg-1", "msg 1", "msg?[1]", ".hidden", "m" * 129],
+)
+def test_build_envelope_unsafe_message_id_fails_closed(bad_id: str) -> None:
+    # The id is compared against audit-record content downstream and must
+    # never be able to act as a glob or path metacharacter.
+    message = make_message()
+    message["id"] = bad_id
+    with pytest.raises(EnvelopeCompileError):
+        build_envelope(
+            message,
+            RECEIVER_CONFIG,
+            receiver="claude",
+            project="test-proj",
+        )
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 
