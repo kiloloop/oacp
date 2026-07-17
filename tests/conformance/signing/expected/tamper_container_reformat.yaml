@@ -1,0 +1,27 @@
+case: tamper_container_reformat
+expected:
+  annotation: '[oacp-auth] signed-INVALID reason: auth framing: auth container is
+    not the signer''s canonical compact JSON emit — formatting variants give one signed
+    message a second wire spelling'
+  message_auth:
+    alg: EdDSA
+    claimed_sender: null
+    kid: null
+    payload_sha256: e0971fdd640bf748db47a73d90b972caab3935d9aac87a274698f0a9e38fa22f
+    reason: 'auth framing: auth container is not the signer''s canonical compact JSON
+      emit — formatting variants give one signed message a second wire spelling'
+    scheme: raw-prefix-v1
+    signatures_checked: []
+    status: invalid
+    trust_source: null
+    verified_instance: null
+    verified_signer: null
+  prefix_sha256: e0971fdd640bf748db47a73d90b972caab3935d9aac87a274698f0a9e38fa22f
+  raw_sha256: e40180783692c9dc35a4561d701e90afaaaf2290a80ea0d8703c7c5889fcd3d4
+  signing_input_sha256:
+  - fd27a93deb334854a8ae957f96c6998728f3cf1ee5a66f8568e38d3578d1ceb8
+  trailer_state: ok
+  validate_errors:
+  - 'field ''auth'': auth container is not the signer''s canonical compact JSON emit
+    — formatting variants give one signed message a second wire spelling'
+message: messages/tamper_container_reformat.yaml

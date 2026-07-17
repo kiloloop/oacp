@@ -1,0 +1,20 @@
+id: msg-20260717060100-alice-mask1
+from: alice
+to: codex
+type: task_request
+priority: P2
+created_at_utc: "2026-07-17T06:01:00Z"
+subject: "Deploy the staging build"
+body: |
+  ## Task
+  Deploy the staging build after the fixes land.
+
+  task_profile:
+    estimated_minutes: 30
+    risk_tier: P2
+    expected_files_touched: 7
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: false

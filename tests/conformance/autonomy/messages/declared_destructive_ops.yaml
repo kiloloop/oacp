@@ -1,0 +1,21 @@
+id: msg-20260717060000-alice-knob1
+from: alice
+to: codex
+type: task_request
+priority: P2
+created_at_utc: "2026-07-17T06:00:00Z"
+subject: "Clean up generated build output"
+body: |
+  ## Task
+  Remove the stale generated files under the build output directory and
+  regenerate them from the current sources.
+
+  task_profile:
+    estimated_minutes: 10
+    risk_tier: P2
+    expected_files_touched: 2
+    destructive_ops: true
+    external_side_effects: false
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: false

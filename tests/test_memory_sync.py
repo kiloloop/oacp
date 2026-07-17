@@ -272,3 +272,31 @@ def test_push_memory_refuses_diverged_repo(tmp_path: Path) -> None:
 
     assert code == 1
     assert any("diverged" in line for line in lines)
+
+
+def test_keystore_paths_are_never_allowed_memory_paths() -> None:
+    # Regression guard for the keystore sync guard:
+    # nothing under keys/ may ever be pushable, structurally.
+    from memory_sync import is_allowed_memory_path
+
+    denied = [
+        "keys/",
+        "keys/00000000-0000-4000-8000-000000000000/claude/"
+        "00000000-0000-4000-8000-000000000001/kid.json",
+        "keys/domain/claude/instance/kid.pub.json",
+        "keys/.trust_domain",
+    ]
+    for path in denied:
+        assert not is_allowed_memory_path(path), path
+    # No false positive: memory files that merely mention keys stay allowed.
+    assert is_allowed_memory_path("projects/demo/memory/keys.md")
+
+
+def test_canonical_gitignore_denies_keystore_last() -> None:
+    lines = CANONICAL_MEMORY_GITIGNORE.splitlines()
+    assert "keys/" in lines
+    # The deny must come after every allowlist line so it wins for keys/
+    # even if a future edit widens the allowlist above it.
+    assert lines.index("keys/") > max(
+        i for i, line in enumerate(lines) if line.startswith("!")
+    )

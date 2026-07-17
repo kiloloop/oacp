@@ -1,0 +1,25 @@
+case: tamper_kid_cross_agent
+expected:
+  annotation: '[oacp-auth] signed-INVALID reason: signature present but failed verification'
+  message_auth:
+    alg: EdDSA
+    claimed_sender: null
+    kid: null
+    payload_sha256: e0971fdd640bf748db47a73d90b972caab3935d9aac87a274698f0a9e38fa22f
+    reason: signature present but failed verification
+    scheme: raw-prefix-v1
+    signatures_checked:
+    - agent: urn:oacp:agent:3f54e34d-9d31-4c8a-a5a7-64766f636170:alice
+      kid: _zFbQNe0KIluKcXb2hHL-LKPPKHCOsGYuqushFWhyFA
+      outcome: pin_agent_mismatch
+    status: invalid
+    trust_source: null
+    verified_instance: null
+    verified_signer: null
+  prefix_sha256: e0971fdd640bf748db47a73d90b972caab3935d9aac87a274698f0a9e38fa22f
+  raw_sha256: b3e8b2cfa58522737c3d33222e2dbacf177d09e43b6d2020edd8b5d90bd0376f
+  signing_input_sha256:
+  - 2a0f2036a2e7d69b46192d73b62f107f8c1d39dfabe578171aa95ad92a4c4456
+  trailer_state: ok
+  validate_errors: []
+message: messages/tamper_kid_cross_agent.yaml

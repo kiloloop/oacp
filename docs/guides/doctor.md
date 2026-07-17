@@ -62,7 +62,23 @@ Validates each agent's receiver-autonomy setup (see `docs/protocol/autonomy.md`)
 - **audit directory** — warns if `agents/<agent>/audit/autonomy_decisions/` is missing
 - **orphaned policy refs** — warns when an audit event's `policy_path` points at a config file that no longer exists
 
-### 6. Agent Status
+### 6. Trust Root
+
+Checks the message-signing trust root (`docs/protocol/message_signing.md`)
+when the project has any trust files; skips otherwise.
+
+- **pin-not-in-catalog** (warn) — a receiver pins an identity the project
+  catalog never recorded
+- **catalog-not-pinned** (advisory) — a cataloged identity a receiver does
+  not pin; escalates to warn when the identity is live (another receiver
+  pins it, or the receiver's inbox holds traffic from that agent). The
+  field signature of this gap: live messages annotating
+  `signed-unknown-kid` while the trust root otherwise reports clean.
+- **unreadable files** (error) — a pins file or catalog that fails its own
+  reader's integrity checks (wrong thumbprint, non-canonical encodings,
+  private key material) is reported whole-file, not per-entry
+
+### 7. Agent Status
 
 Checks each agent's `status.yaml` for presence and freshness.
 

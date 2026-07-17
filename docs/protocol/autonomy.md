@@ -49,17 +49,20 @@ causes a pause and should be surfaced by `oacp doctor`.
 | Action | Behavior |
 |---|---|
 | `pause` | Pause every declared external side effect. |
-| `allow_pr_artifacts` | Allow PR creation/update, review comments, and issue comments only when `target_repo` appears in the receiver-controlled `private_repo_allowlist`; direct main pushes, merges, deploys, and publishes still pause. |
+| `allow_pr_artifacts` | Allow PR creation/update, review comments, issue comments, and declared issue filing (`files_issues`) only when `target_repo` appears in the receiver-controlled `private_repo_allowlist`; direct main pushes, deploys, and publishes still pause, and a declared `merges_pr` always pauses at admission (`merges_pr_pause`) so merge authority passes a human at least once. |
 | `allow` | Allow declared ordinary external side effects; non-demotable hard stops still pause. |
 
 All other policy actions remain `pause`. A private PR-artifact profile must set
 `target_repo: owner/repo`, `public_visibility: false`,
-`external_side_effects: true`, and at least one of `creates_or_updates_pr` or
-`comments_on_github` to `true`. The sender declaration is necessary but not
-sufficient: `target_repo` must also match the receiver's independent
-`private_repo_allowlist`. Branch commits and pushes needed to create that
-artifact are folded into `external_side_effects`; direct pushes to `main` are
-not.
+`external_side_effects: true`, and at least one of `creates_or_updates_pr`,
+`comments_on_github`, or `files_issues` to `true`. The sender declaration is
+necessary but not sufficient: `target_repo` must also match the receiver's
+independent `private_repo_allowlist`. Branch commits and pushes needed to
+create that artifact are folded into `external_side_effects`; direct pushes to
+`main` are not. `merges_pr` deliberately never joins the auto-accept class: a
+dispatch that declares it is otherwise admissible, but the merge declaration
+itself pauses for human approval (a prior human-approved continuation grant
+covering `merges_pr` satisfies that requirement).
 
 The legacy `git_push_or_deploy: pause` policy is enforced at Gate 3 for direct
 main pushes and other non-demotable action phrases. There is intentionally no
@@ -89,6 +92,8 @@ task_profile:
   creates_or_updates_pr: false
   comments_on_github: false
   commits_changes: false
+  merges_pr: false
+  files_issues: false
   sends_oacp_reply_only: true
   continuation_grants: {}
 ```
@@ -101,8 +106,15 @@ as `brainstorm_request`, may auto-accept without the block.
 The core declaration is complete only when it includes the two numeric fields,
 `risk_tier`, and all five legacy risk booleans shown above. Granular side-effect
 booleans are optional but must agree with `external_side_effects`; a profile
-that declares a PR/comment/commit while declaring no external side effects
-pauses with `declaration_error`.
+that declares a PR/comment/commit/merge/issue capability while declaring no
+external side effects pauses with `declaration_error`.
+
+The granular vocabulary is `creates_or_updates_pr`, `comments_on_github`,
+`commits_changes`, `merges_pr` (landing a PR), and `files_issues` (issue
+create/edit/close plus label creation — issue-adjacent metadata). The
+declarable set, the continuation-grant coverable set, and the checkpoint's
+`side_effects_actual` keys are the same set by construction: everything a
+checkpoint can observe, a sender can declare and a grant can cover.
 
 ### Sender-marked guardrails
 
@@ -140,15 +152,23 @@ If any required gate is missing or uncertain, the receiver pauses.
      `expected_files_touched` (5-file standard cap), destructive scope,
      sensitive scope, and side-effect scope against receiver policy.
    - Applies `allow_pr_artifacts` only to the declared private-repository
-     artifact class when `target_repo` also appears in the receiver-controlled
-     allowlist; public or unlisted repository artifacts and every other
-     external side-effect class pause.
+     artifact class (`creates_or_updates_pr`, `comments_on_github`,
+     `files_issues`) when `target_repo` also appears in the
+     receiver-controlled allowlist; public or unlisted repository artifacts
+     and every other external side-effect class pause, and a declared
+     `merges_pr` pauses at admission regardless.
    - Pauses contradictory profile fields with `declaration_error`.
 3. **Receiver classification**
    - Pause unconditionally on destructive command tokens: `rm -rf`, `--force`,
      `--no-verify`, `--dangerously-skip-permissions`.
    - For task-like messages, pause when the body asks for deploy, push to main,
      merge, publish, credential rotation, or dependency install.
+   - When a complete profile explicitly declares `merges_pr: true`, the
+     lexical `merge` match alone is demoted to a `lexical_advisory_declared`
+     note so the declared merge reaches the granular Gate-2 path — it still
+     pauses there with `merges_pr_pause` on first admission, and only a
+     human-approved continuation grant covering `merges_pr` admits the
+     follow-up. Merge wording without the declaration stays a hard stop.
    - For types listed in `allow_without_task_profile`, side-effect verbs such
      as deploy/publish/merge are logged as notes instead of hard stops.
      Destructive tokens still pause.
@@ -202,7 +222,7 @@ Every autonomy decision writes one YAML file:
 
 ```yaml
 schema_version: 2
-spec_version: "0.3.5"
+spec_version: "0.4.0"
 created_at_utc: "2026-05-12T13:23:25Z"
 receiver: codex
 sender: iris
@@ -236,12 +256,20 @@ task_profile:
   creates_or_updates_pr: false
   comments_on_github: false
   commits_changes: false
+  merges_pr: false
+  files_issues: false
   sends_oacp_reply_only: true
   continuation_grants: {}
 breached: []
+co_occurring_reason_codes: []
 runtime:
   agent: codex
   model: gpt-5
+evaluator:
+  source: scripts/autonomy_gate.py
+  content_sha256: "<sha256 of the evaluator file bytes>"
+  git_sha: 0e382a1        # best-effort; null outside a clean checkout
+  executed: true
 result:
   final_state: done
   completion_kind: auto_accepted
@@ -258,6 +286,8 @@ result:
     breached: false
     breached_fields: []
     declaration_errors: []
+    breach_basis: null
+    paused_at_utc: null
     action: not_evaluated
     predicted_risk_materialized: false
     completed_at_utc: null
@@ -283,12 +313,23 @@ missing or malformed config. `sender` is normally traceability metadata and
 also binds an enabled standing grant to the sender that received approval.
 `policy_sha256` is the SHA-256 of a canonical, key-sorted serialization of the
 parsed policy, so comments and YAML formatting do not produce false drift.
-`spec_version: "0.3.5"` pins Gate 1 integrity enforcement plus the recalibrated
+`spec_version: "0.4.0"` pins Gate 1 integrity enforcement plus the recalibrated
 Gate 2/3 policy, full task-profile capture, explicit `breached` list, and the
 outcome block shown above. Audit `schema_version: 2` adds thread identity and
 the structured `result.human_outcome` block. Recorders may upgrade a v1 audit
 to v2 when the first human outcome is written; standing grants trust only v2
 records.
+
+`evaluator` is **gate-emitted, not receiver-composed**: the evaluator
+self-stamps its provenance into every decision it returns, and receivers
+copy the block verbatim into the audit record. `content_sha256` (the hash
+of the evaluator file bytes) is the load-bearing identity — it survives
+wheel installs and identifies local-ahead code that no commit names.
+`git_sha` is best-effort convenience, present only when the file matches
+the committed blob at HEAD; a dirty tree, an untracked copy, or a
+non-checkout install all record `null` rather than a SHA that names code
+which did not run. The only evaluator block a receiver ever authors by
+hand is the no-executed-gate case: `executed: false` with no hashes.
 
 `breached` is always an ordered list, but its entries intentionally reflect the
 evaluation phase. Admission-time pauses record pinned gate reason codes (for
@@ -298,6 +339,38 @@ record the concrete declared/actual field paths that exceeded the envelope
 distinguishes those two phases; `reason_codes` remains the canonical taxonomy
 for the decision itself.
 
+`co_occurring_reason_codes` records pinned reason codes that also held but did
+not drive the verdict. Numeric Gate-2 thresholds are evaluated before any
+early-out, so a pause taken for another reason (most commonly a lexical hard
+stop) still records a co-occurring `estimated_minutes_exceeds_threshold` or
+`expected_files_touched_exceeds_threshold`: silence in a pause record means
+the thresholds passed, never that they went unevaluated. The list is sorted,
+deduplicated against `reason_codes`, and empty on auto-accepted decisions.
+Threshold-calibration analytics should read `reason_codes` and
+`co_occurring_reason_codes` together.
+
+### Pinned completion_kind taxonomy
+
+`result.completion_kind` names the terminal shape of the **evaluation** only —
+one axis, enumerated and conformance-pinned like the reason codes:
+
+| Kind | Meaning |
+|---|---|
+| `auto_accepted` | Every gate passed; work may begin. |
+| `admission_paused` | Paused at admission (mode, integrity, profile, lexical, declared-risk, or threshold cause — the cause lives in `reason_codes`). |
+| `checkpoint_paused` | Paused at a post-accept §E threshold/declaration checkpoint. |
+| `config_malformed` | Receiver config could not be resolved; no gates ran. |
+
+The pause *cause* belongs to `reason_codes`, the run state to
+`result.final_state`, and human decisions to `result.human_outcome`.
+Receivers copy the evaluator's `completion_kind` verbatim and never overwrite
+it at terminal update time — a paused-then-approved task keeps
+`admission_paused` while `final_state` moves to `done` and `human_outcome`
+records the approval. Receiver-composed values outside this enum are
+non-conforming. Records written before this pin carry mixed
+cause/event/state values (`hard_stop`, bare `paused`, fused decision+state
+kinds) and cannot be bucketed against the pinned enum.
+
 ### Human approval and decline outcomes
 
 When a paused task is approved, modified, or declined, record the decision in
@@ -306,13 +379,47 @@ the same audit file:
 ```bash
 oacp autonomy-outcome <audit.yaml> \
   --decision approved \
-  --decided-at 2026-05-12T13:25:00Z
+  --decided-at 2026-05-12T13:25:00Z \
+  --actor alice
 ```
 
 The recorder copies the pause reason codes, computes decision latency from the
-audit's `created_at_utc`, and locks the full read-modify-write sequence before
-an atomic replacement. It refuses to overwrite a recorded outcome unless
-`--replace` is explicit. `decision` is `approved`, `modified`, or `declined`.
+pause moment, and locks the full read-modify-write sequence before an atomic
+replacement. It refuses to overwrite a recorded outcome unless `--replace` is
+explicit. `decision` is `approved`, `modified`, or `declined`.
+
+The recorder is state-aware about where the pause moment lives:
+
+- **Admission pauses** (`completion_kind: admission_paused`): the record was
+  created at the pause, so latency measures from `created_at_utc` — even
+  when actuals attached to the evaluation happen to breach the checkpoint
+  (the pause the human decided on is still the admission pause).
+- **Checkpoint pauses** (an auto-accepted admission whose
+  `threshold_checkpoint.breached` is true, or a paused decision whose
+  `completion_kind` is `checkpoint_paused`): the record predates the pause,
+  so latency measures from `threshold_checkpoint.paused_at_utc` and
+  `pause_reason_codes` reflects the checkpoint (`threshold_checkpoint_breached`
+  or `declaration_error`). A checkpoint record without `paused_at_utc` is
+  refused rather than silently measured from admission time.
+
+For records that genuinely predate the pinned `completion_kind` enum
+(schema version 1 with no pinned kind), the recorder falls back to the
+checkpoint reason codes to classify the pause phase. A current-schema
+record whose kind is missing or out of vocabulary is refused loudly —
+it is malformed, not legacy — and the breached in-place auto-accepted
+shape must itself carry `checkpoint_paused` (the checkpoint
+re-evaluation is what updated the result block; any other kind there is
+refused as inconsistent).
+
+Latency values on checkpoint records written before `paused_at_utc` existed
+measure from admission and are not comparable with post-fix records.
+
+`actor` is the deciding human's stable handle: one canonical, whitespace-free
+identifier per person, fleet-wide (for example `alice` — not a machine
+username, not the generic `human`), so outcomes join across receivers. The
+value is free-form but must be non-null whenever a human decided; the
+recorder warns when the anonymous default `human` ships.
+
 Grant handling is separate so task approval never silently creates a standing
 grant:
 
@@ -427,7 +534,7 @@ The audit result records:
 ```yaml
 result:
   final_state: paused
-  completion_kind: threshold_checkpoint_breached
+  completion_kind: checkpoint_paused
   actual_minutes: 25
   actual_files_touched: 4
   predicted_risk_materialized: true
@@ -443,6 +550,8 @@ result:
     breached: true
     breached_fields:
       - actual_files_touched
+    breach_basis: realized
+    paused_at_utc: "2026-05-12T13:48:25Z"
     action: paused_for_reauthorization
 ```
 
@@ -450,6 +559,52 @@ If an undeclared side effect materializes, the receiver pauses with
 `declaration_error`; `threshold_checkpoint.declaration_errors` identifies the
 actual side-effect field. This checkpoint is mandatory before performing any
 newly discovered capability or outward action.
+
+A breached checkpoint stamps two fields beyond the breach itself:
+
+- `paused_at_utc` — when the checkpoint fired. Receivers pass the actual
+  pause moment (for example the sender-notification timestamp) in the
+  checkpoint actuals; the evaluator stamps the evaluation time only as a
+  fallback. This is the timestamp human-decision latency measures from.
+- `breach_basis` — `realized` when the actuals record work that already
+  happened (the default), `declared_intent` when the checkpoint fired
+  prospectively: the undeclared action was caught **before** it
+  materialized, per the mandatory pre-action rule above. A
+  `declared_intent` record legitimately combines `breached: true` with
+  all-false realized effects and low actual counts — the sender's
+  under-declaration was caught, not an executed drift.
+
+A prospective correction is expressed through its own checkpoint input,
+never by marking a realized effect true (that would assert an outward
+action that never happened). The receiver passes the declared-profile
+field paths the correction invalidated:
+
+```yaml
+actuals:
+  actual_minutes: 1
+  actual_files_touched: 0
+  declared_intent_fields:
+    - task_profile.merges_pr
+  paused_at_utc: "2026-05-12T13:48:25Z"
+```
+
+Each entry must name a monotone risky capability boolean
+(`task_profile.<field>`); the restrictive `sends_oacp_reply_only` is
+excluded — a false-to-true flip on it cannot represent a risky
+correction. The listed paths land in `breached_fields` and
+`declaration_errors` directly, `breached` becomes true with every
+`side_effects_actual` key still false, `breach_basis` is stamped
+`declared_intent`, and `predicted_risk_materialized` is pinned false
+(caught before materialization by definition — an explicit true is
+rejected). The two shapes are mutually exclusive by validation, on
+derived sources as well as the explicit basis: `declared_intent_fields`
+combined with a realized breach source (a numeric overrun or an
+undeclared realized effect), with any true `side_effects_actual` key, or
+naming a capability already authorized (declared true in the envelope,
+or covered by an accepted continuation grant) is rejected — as is an
+explicit `breach_basis` inconsistent with the input (`realized` alongside
+intent fields, `declared_intent` without them). A mixed situation records
+the realized breach on its own, then re-evaluates the correction.
 
 ## Envelope Compilation (Phase 2)
 
@@ -468,7 +623,7 @@ The envelope is written to
 ```json
 {
   "envelope_version": 1,
-  "spec_version": "0.3.5",
+  "spec_version": "0.4.0",
   "compiler": "envelope_compiler.py",
   "compiled_at_utc": "2026-07-12T02:00:00Z",
   "project": "my-project",
@@ -485,6 +640,8 @@ The envelope is written to
     "creates_or_updates_pr": true,
     "comments_on_github": false,
     "commits_changes": true,
+    "merges_pr": false,
+    "files_issues": false,
     "sends_oacp_reply_only": false,
     "touches_auth_config_or_secrets": false,
     "touches_dependencies": false,
@@ -516,24 +673,46 @@ adapter is a PreToolUse hook (`oacp-envelope-hook`, matcher
 Per-task constraints live only in the compiled envelope file — no per-task
 settings mutation, effective mid-session, and a strict no-op while no
 envelope is active. The receiver compiles the envelope at task pickup and
-clears it (`oacp envelope clear`) at completion.
+clears it (`oacp envelope clear`) at completion; the adapter sanctions that
+completion clear against the task's audit record (see below), so the
+enforcement window can be exited from inside the session exactly once the
+task lifecycle is over.
 
 Runtime decisions:
 
 - **deny** — the call breaches a declared-false capability (destructive
-  tokens, undeclared commits/pushes/PR mutations, secret-class or
-  dependency-manifest writes — including determinable Bash write targets
-  such as redirects and common writer programs), targets a repo outside the
-  embedded allowlist or pinned `target_repo`, pushes to a protected branch
-  or with bulk-ref flags (`--mirror`, `--all`, `--delete`), is a GitHub
-  mutation outside every allow class (merges, releases, issue creation), or
-  attempts envelope self-modification (`oacp envelope compile|clear` from
-  inside the enveloped session).
+  tokens, undeclared commits/pushes/PR mutations, undeclared merges or
+  issue filing, secret-class or dependency-manifest writes — including
+  determinable Bash write targets such as redirects and common writer
+  programs), targets a repo outside the embedded allowlist or pinned
+  `target_repo`, pushes to a protected branch or with bulk-ref flags
+  (`--mirror`, `--all`, `--delete`), is a GitHub mutation outside every
+  allow class (releases, repo/gist/secret mutations, non-create label
+  management), or attempts envelope self-modification (`oacp envelope
+  compile` from inside the enveloped session — always; `oacp envelope
+  clear` until the task's audit record shows a terminal outcome).
+  The GitHub allow classes mirror the granulars: `gh pr merge` requires a
+  declared `merges_pr`; `gh issue create/edit/close` and `gh label create`
+  require a declared `files_issues`; both remain subject to the repo
+  allowlist/visibility gate. That gate judges the repository gh will
+  actually mutate: every repository selector on the command — each
+  `-R/--repo` occurrence, any URL-shaped positional, and a `GH_REPO`
+  environment assignment — must agree on a single repository before it is
+  gated, so a positional URL, a repeated flag, or an inline assignment
+  cannot retarget an approved command at another repository. `GH_REPO` is
+  judged as the *effective* environment the Bash child inherits — ambient
+  hook-process values seeded first, inline assignments applied over them
+  with shell precedence — so a selector exported before the session
+  started is gated too. Any effective `GH_HOST` escalates outright, and
+  the allow classes are judged only as standalone simple commands —
+  inside a compound command an earlier segment (`cd`, `export`, an
+  assignment) could retarget the mutation after validation, so those
+  escalate.
 - **ask** — the adapter cannot confidently classify the call (shell
   indirection like `bash -c`, wrapper flags, unknown GitHub or oacp
-  mutations, implicit `gh api` writes, unresolvable repository). The exact
-  command is escalated for just-in-time review; unenforceable never
-  silently degrades to allowed.
+  mutations, implicit `gh api` writes, unresolvable or conflicting
+  repository selectors). The exact command is escalated for just-in-time
+  review; unenforceable never silently degrades to allowed.
 - **allow** — emitted as *no output*: the envelope can only narrow the
   harness's own permission surface, never widen or bypass it.
 - `oacp send` is never denied; it is the checkpoint notification pipe. The
@@ -542,6 +721,65 @@ Runtime decisions:
 - Determinable Bash write targets feed the same distinct-file counter as
   Edit/Write calls (`/dev/*` excluded), so shell writes cannot bypass
   `expected_files_touched`.
+- Protocol bookkeeping never consumes the file budget. The receiver's own
+  `audit/`, `inbox/`, and `outbox/` directories and the runtime scratchpad
+  (reply/body-file composition) are the enforcement layer's instrumentation
+  surfaces, not task scope: writes there skip the counter entirely. The
+  exemption is receiver-scoped (a peer agent's directories are task scope),
+  containment is judged on resolved filesystem targets (a symlink planted
+  under an exempt root that points into ordinary task scope stays counted),
+  and it applies only to the counter — the secret-class and
+  dependency-manifest gates still fire on exempt paths, and the receiver's
+  `config.yaml` sits outside the exempt directories. Without this class, a
+  tightly declared task is guaranteed to trip the ceiling at close-out on
+  its own mandatory audit write.
+- Two receiver surfaces are the opposite of exempt. The receiver's `state/`
+  directory holds the active envelope itself: writing, removing,
+  relocating, or copying anything under it from inside the session is
+  denied as envelope self-modification, categorically — filesystem-mutator
+  operands (`rm`, `unlink`, `mv`, `cp`, …) are gated by resolved path
+  regardless of source/destination role, not just write targets. Operands
+  are judged as the utility parses them (GNU target-directory spellings and
+  `--` included), and mutator operands or Bash write targets bearing shell
+  expansion syntax escalate to **ask** — the shell expands patterns after
+  classification, so a literal spelling proves nothing about the effective
+  target. Trust
+  roots (the receiver's `trust/` pins and the project trust catalog) are
+  authority-bearing auth configuration: writes and mutations are denied
+  unless the envelope declares `touches_auth_config_or_secrets`, and even
+  then they count as ordinary task scope. CLI-mediated updates
+  (`oacp trust import`) are classified as commands and escalate for review
+  rather than touching the counter.
+
+### Completion clear
+
+The documented completion step — `oacp envelope clear` — is validated, not
+blanket-denied. The adapter scans the receiver's `audit/autonomy_decisions/`
+directory and selects the newest record whose **content** identity matches
+the active envelope — `message_id` and `receiver` fields in the record
+itself; filenames are never trusted, and the envelope's message id (pinned
+to a safe-id grammar at compile time) never reaches a filesystem glob:
+
+- `result.final_state: done | error` — the lifecycle is over; the clear is
+  allowed and the enforcement window closes from inside the session.
+- `pending` or `paused` (or no matching record at all) — the clear is
+  denied: an open task keeps its envelope, and a checkpoint-paused task
+  re-authorizes via `oacp envelope compile --extend` after human review,
+  never by clearing its own constraints.
+- The validation judges the same effective target the CLI will use: the
+  clear must be a **standalone simple command** (a compound command's
+  earlier segments — `export …;`, `cd …;` — could retarget the clear after
+  validation, so any compound form escalates), flag values use
+  last-occurrence (argparse) semantics, and relative `--oacp-dir` resolves
+  against the call's working directory. A clear that targets a different
+  project, receiver, or OACP home than the active envelope, carries an
+  `OACP_HOME=` override on the command, or trips over an unreadable audit
+  record cannot be validated in-session and escalates to **ask**.
+
+The ordering this creates is deliberate: finish the task, update the audit
+record's `result` block (a bookkeeping write, exempt from the counter),
+then clear. `oacp envelope compile` from inside the session stays denied
+unconditionally — completion sanctions the exit, never recompilation.
 
 ### Envelope drift
 
@@ -642,8 +880,9 @@ Audit `result.final_state` is limited to:
 - `superseded`
 - `error`
 
-Detailed terminal meaning belongs in `result.completion_kind`. Missing-profile
-messages that obviously request PR/GitHub/commit/push/public work pause with
+`result.completion_kind` is separately pinned to the evaluation-shape enum
+above (see "Pinned completion_kind taxonomy"). Missing-profile messages that
+obviously request PR/GitHub/commit/push/public work pause with
 `risk_obvious_no_profile`, not the generic `task_profile_missing`.
 
 The canonical fixture set lives in `tests/conformance/autonomy/`.

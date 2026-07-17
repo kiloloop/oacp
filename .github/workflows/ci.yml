@@ -30,7 +30,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e . build pytest ruff
+          python -m pip install -e ".[crypto]" build pytest ruff
 
       - name: Run quality gate
         run: make preflight ARGS="--full"

@@ -1,0 +1,11 @@
+case: declared_destructive_ops_pauses
+config: configs/auto_review_standard.yaml
+message: messages/declared_destructive_ops.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - destructive_ops_pause
+  result:
+    final_state: paused
+    completion_kind: admission_paused

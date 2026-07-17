@@ -387,17 +387,17 @@ class TestWriteMessageFiles(unittest.TestCase):
             project_dir = Path(tmpdir)
             yaml_content = "id: test\nbody: complete\n"
             test_case = self
-            original_write_text = Path.write_text
+            original_write_bytes = Path.write_bytes
             write_paths = []
 
-            def spy_write_text(path, content, *args, **kwargs):
-                if content == yaml_content:
+            def spy_write_bytes(path, content, *args, **kwargs):
+                if content == yaml_content.encode("utf-8"):
                     write_paths.append(path)
                     test_case.assertNotEqual(path.suffix, ".yaml")
                     test_case.assertIn(".tmp-", path.name)
-                return original_write_text(path, content, *args, **kwargs)
+                return original_write_bytes(path, content, *args, **kwargs)
 
-            with mock.patch.object(Path, "write_text", spy_write_text):
+            with mock.patch.object(Path, "write_bytes", spy_write_bytes):
                 inbox_path, outbox_path = write_message_files(
                     project_dir=project_dir,
                     sender="claude",
@@ -416,17 +416,17 @@ class TestWriteMessageFiles(unittest.TestCase):
             project_dir = Path(tmpdir)
             yaml_content = "id: test\nbody: complete\n"
             test_case = self
-            original_write_text = Path.write_text
+            original_write_bytes = Path.write_bytes
             write_paths = []
 
-            def spy_write_text(path, content, *args, **kwargs):
-                if content == yaml_content:
+            def spy_write_bytes(path, content, *args, **kwargs):
+                if content == yaml_content.encode("utf-8"):
                     write_paths.append(path)
                     test_case.assertNotEqual(path.suffix, ".yaml")
                     test_case.assertIn(".tmp-", path.name)
-                return original_write_text(path, content, *args, **kwargs)
+                return original_write_bytes(path, content, *args, **kwargs)
 
-            with mock.patch.object(Path, "write_text", spy_write_text):
+            with mock.patch.object(Path, "write_bytes", spy_write_bytes):
                 inbox_paths, outbox_path = write_broadcast_files(
                     project_dir=project_dir,
                     sender="claude",

@@ -6,3 +6,6 @@ expected:
   mode: always_pause
   reason_codes:
     - config_malformed
+  result:
+    final_state: paused
+    completion_kind: config_malformed

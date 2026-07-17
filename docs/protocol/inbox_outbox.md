@@ -53,6 +53,33 @@ body: |
     continuation_grants: {}
 ```
 
+### Signed messages (`auth` trailer)
+
+A signed message is the ordinary rendered message followed by exactly one
+final physical line, followed by exactly one LF, with no content after it:
+
+```yaml
+auth: "<base64url of a detached General JWS JSON: {signatures: [{protected, signature} x 1-8]}>"
+```
+
+The signature covers the exact raw prefix bytes of the file (everything
+before the `auth` line) — byte-different means different message; there is no
+canonicalization, and transports must preserve or wrap the bytes, never
+re-emit them. Trailer encodings are canonical-only: the `auth` value and
+each `signatures[].signature` member must be the canonical unpadded
+base64url spelling of their bytes, and the container JSON the signer's
+compact sorted-key emit — encoding aliases and formatting variants fail
+verification, so one signed message has exactly one wire spelling.
+JOSE profile: `EdDSA` (Ed25519) only, `crit: ["oacp"]`, keys
+named by `kid` (RFC 7638 thumbprint) and never carried in the message.
+Sender signing is config-gated off by default (`signing.sign_messages`);
+receivers without a `verify_mode` knob treat the trailer as an ordinary
+optional field.
+Receiver verification runs in warn mode (identity recorded, no authority
+granted); the trust root — receiver pins, the zero-authority project
+catalog, `oacp trust import`, and key management — is documented in
+[`message_signing.md`](message_signing.md).
+
 ## Message Types
 
 | Type | Purpose | Expected Response |
@@ -197,7 +224,8 @@ auto-accept without the block, and side-effect verbs are logged as notes instead
 of hard stops for those profileless types.
 
 The scope envelope may also include side-effect booleans
-(`creates_or_updates_pr`, `comments_on_github`, `commits_changes`) and
+(`creates_or_updates_pr`, `comments_on_github`, `commits_changes`,
+`merges_pr`, `files_issues`) and
 default-off `continuation_grants.approved_thread_continuation` data for
 same-thread continuations. That sender-provided data is a request, not proof of
 approval. Receivers ignore it unless `autonomy.continuation_grants.enabled:

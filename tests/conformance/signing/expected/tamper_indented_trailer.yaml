@@ -1,0 +1,21 @@
+case: tamper_indented_trailer
+expected:
+  annotation: '[oacp-auth] unsigned'
+  message_auth:
+    alg: null
+    claimed_sender: null
+    kid: null
+    payload_sha256: a073ec8288b186e46760b87291b4e75c9d1d27e5b5b377a077a305a605fa5854
+    reason: null
+    scheme: null
+    signatures_checked: []
+    status: unsigned
+    trust_source: null
+    verified_instance: null
+    verified_signer: null
+  prefix_sha256: a073ec8288b186e46760b87291b4e75c9d1d27e5b5b377a077a305a605fa5854
+  raw_sha256: a073ec8288b186e46760b87291b4e75c9d1d27e5b5b377a077a305a605fa5854
+  signing_input_sha256: []
+  trailer_state: absent
+  validate_errors: []
+message: messages/tamper_indented_trailer.yaml

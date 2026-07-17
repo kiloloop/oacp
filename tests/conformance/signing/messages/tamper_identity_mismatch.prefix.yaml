@@ -1,0 +1,8 @@
+id: msg-20260701000000-bob-a006
+from: bob
+to: dave
+type: notification
+priority: P2
+created_at_utc: "2026-07-01T00:00:00Z"
+subject: Identity mismatch vector
+body: "Payload claims bob; the only signature is alice's."

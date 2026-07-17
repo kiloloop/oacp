@@ -6,3 +6,6 @@ expected:
   mode: always_pause
   reason_codes:
     - mode_always_pause
+  result:
+    final_state: paused
+    completion_kind: admission_paused

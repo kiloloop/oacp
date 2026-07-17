@@ -1,0 +1,21 @@
+case: unsigned_notification
+expected:
+  annotation: '[oacp-auth] unsigned'
+  message_auth:
+    alg: null
+    claimed_sender: null
+    kid: null
+    payload_sha256: 5125e24ca98d063c597683f7cf86c6fed93e34d791a3901061e6036b95df8f41
+    reason: null
+    scheme: null
+    signatures_checked: []
+    status: unsigned
+    trust_source: null
+    verified_instance: null
+    verified_signer: null
+  prefix_sha256: 5125e24ca98d063c597683f7cf86c6fed93e34d791a3901061e6036b95df8f41
+  raw_sha256: 5125e24ca98d063c597683f7cf86c6fed93e34d791a3901061e6036b95df8f41
+  signing_input_sha256: []
+  trailer_state: absent
+  validate_errors: []
+message: messages/unsigned_notification.yaml

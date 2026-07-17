@@ -69,7 +69,7 @@ class TestInitCreatesWorkspaceJson(unittest.TestCase):
             ws_json = os.path.join(tmp, "hub", "projects", "myproj", "workspace.json")
             with open(ws_json) as f:
                 data = json.load(f)
-            expected_keys = {"project_name", "repo_path", "created_at", "updated_at", "standards_version"}
+            expected_keys = {"project_name", "repo_path", "created_at", "updated_at", "spec_version"}
             self.assertEqual(set(data.keys()), expected_keys)
 
     def test_workspace_json_project_name(self):
@@ -108,15 +108,16 @@ class TestInitCreatesWorkspaceJson(unittest.TestCase):
             self.assertIn("T", data["created_at"])
             self.assertIn("T", data["updated_at"])
 
-    def test_workspace_json_standards_version(self):
+    def test_workspace_json_spec_version(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_init(tmp, "myproj")
             ws_json = os.path.join(tmp, "hub", "projects", "myproj", "workspace.json")
             with open(ws_json) as f:
                 data = json.load(f)
-            # Should be a non-empty version string
-            self.assertIsInstance(data["standards_version"], str)
-            self.assertRegex(data["standards_version"], r"^\d+\.\d+\.\d+$")
+            # Should be the protocol spec version the tooling implements
+            self.assertIsInstance(data["spec_version"], str)
+            self.assertRegex(data["spec_version"], r"^\d+\.\d+\.\d+$")
+            self.assertNotIn("standards_version", data)
 
     def test_workspace_json_is_valid_json(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -214,7 +215,7 @@ class TestUpdateBumpsWorkspaceJson(unittest.TestCase):
                 updated = json.load(f)
             self.assertEqual(updated["repo_path"], "/my/repo")
 
-    def test_updates_standards_version(self):
+    def test_update_stamps_spec_version_and_preserves_orphan(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = make_workspace(tmp)
             initial = {
@@ -230,9 +231,10 @@ class TestUpdateBumpsWorkspaceJson(unittest.TestCase):
             run_update(root)
             with open(ws_json) as f:
                 updated = json.load(f)
-            # Should match current VERSION file
-            self.assertRegex(updated["standards_version"], r"^\d+\.\d+\.\d+$")
-            self.assertNotEqual(updated["standards_version"], "0.4.0")
+            self.assertRegex(updated["spec_version"], r"^\d+\.\d+\.\d+$")
+            # The retired field is no longer re-stamped, but an existing
+            # value is left in place for readers that have not migrated.
+            self.assertEqual(updated["standards_version"], "0.4.0")
 
 
 class TestUpdateCreatesWorkspaceJsonIfMissing(unittest.TestCase):
@@ -253,7 +255,7 @@ class TestUpdateCreatesWorkspaceJsonIfMissing(unittest.TestCase):
             ws_json = os.path.join(root, "workspace.json")
             with open(ws_json) as f:
                 data = json.load(f)
-            expected_keys = {"project_name", "repo_path", "created_at", "updated_at", "standards_version"}
+            expected_keys = {"project_name", "repo_path", "created_at", "updated_at", "spec_version"}
             self.assertEqual(set(data.keys()), expected_keys)
 
     def test_created_workspace_json_project_name(self):

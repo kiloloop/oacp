@@ -1,0 +1,26 @@
+case: tamper_padded_b64
+expected:
+  annotation: '[oacp-auth] signed-INVALID reason: auth framing: final line is auth-like
+    but violates exact framing (auth: "<base64url>" + exactly one LF, bounded size)'
+  message_auth:
+    alg: null
+    claimed_sender: null
+    kid: null
+    payload_sha256: a2f00b105eb04d158e66e2aaf4ba2660e3b4496e015d2f004633c691e25d4703
+    reason: 'auth framing: final line is auth-like but violates exact framing (auth:
+      "<base64url>" + exactly one LF, bounded size)'
+    scheme: null
+    signatures_checked: []
+    status: invalid
+    trust_source: null
+    verified_instance: null
+    verified_signer: null
+  prefix_sha256: a2f00b105eb04d158e66e2aaf4ba2660e3b4496e015d2f004633c691e25d4703
+  raw_sha256: a2f00b105eb04d158e66e2aaf4ba2660e3b4496e015d2f004633c691e25d4703
+  signing_input_sha256: []
+  trailer_state: malformed
+  validate_errors:
+  - 'field ''auth'': invalid base64url value'
+  - 'field ''auth'' must be the final physical line of the file: auth: "<base64url>"
+    followed by exactly one LF (no CRLF)'
+message: messages/tamper_padded_b64.yaml
