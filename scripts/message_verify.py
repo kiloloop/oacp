@@ -23,7 +23,8 @@ Implements the receiver half of the v0.4.0 message-signing design
 - **Warn mode records identity and grants no authority**: every outcome —
   unsigned / signed-unknown-kid / signed-verified / signed-INVALID — produces
   an annotation and a ``message_auth`` audit block, never a rejection.
-  Enforce/quarantine-as-rejection is v0.4.1; the seams exist, none activate.
+  Enforce/quarantine-as-rejection lands in a later release; the seams
+  exist, none activate.
 - **No-clobber quarantine**: byte-tamper cases (a present signature that
   fails verification) write an evidence copy aside into ``dead_letter/``
   with exclusive-create semantics. The original message file is never
@@ -75,7 +76,7 @@ if CRYPTO_AVAILABLE:  # pragma: no cover - trivial import guard
     from cryptography.hazmat.primitives.asymmetric import ed25519
 
 # Pinned message_auth status enum (v0.4.0 warn subset; replayed/id_collision
-# join with the v0.4.1 receipt ledger).
+# join with the future receipt ledger).
 STATUS_UNSIGNED = "unsigned"
 STATUS_VERIFIED = "verified"
 STATUS_INVALID = "invalid"

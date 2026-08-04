@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-08-04
+
+### Fixed
+
+- Receiver configs that omit the `autonomy` block, such as signing-only
+  configs, now preserve the same conservative `always_pause` behavior as an
+  absent config file. Doctor reports the config as valid, and the autonomy
+  evaluator records the normal `admission_paused` / `mode_always_pause`
+  fingerprint instead of treating the config as malformed.
+- The Claude envelope hook now splits compound Bash commands only at shell
+  operators outside quoted arguments and command substitutions, so read-only
+  patterns containing literal pipes and backslash-newline continuations no
+  longer produce false escalation while later mutating segments remain gated.
+  Its conservative parser fallback recognizes only a small, redirect-free
+  read-only command set. Every emitted ask or deny reason now starts with the
+  stable `[oacp-envelope]` source tag and includes the active task message id
+  when available, making hook prompts distinguishable from harness prompts.
+- Envelope enforcement is now session-scoped. The compiled envelope
+  records the harness session that compiled it (via a hook-observed
+  session claim consumed by the compiler), and the Claude adapter
+  no-ops for tool calls from any other session — a concurrent
+  interactive session in the same repository no longer inherits a
+  dispatched task's constraints or consumes its `files_touched`
+  budget. Envelopes compiled without a resolvable session (un-hooked
+  runtimes, or callers the harness gave no session id) stay unbound
+  and keep the historical whole-workspace enforcement scope, and
+  same-task recompiles — including a post-re-authorization
+  `--extend` from outside the bound session — inherit the existing
+  binding.
+- The autonomy gate evaluator now persists complete, lock-serialized
+  audit records to the `--audit-dir` destination; previously an
+  evaluation could finish without writing the durable record.
+- `oacp doctor` now reports trust-pin completeness per receiver and
+  gates enforce-mode signing readiness on it: every catalog identity
+  must carry an active pin before a receiver flips to enforce, with
+  gaps broken down per receiver in doctor output.
+
 ## [0.4.0] - 2026-07-17
 
 ### Added

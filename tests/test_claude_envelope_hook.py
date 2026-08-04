@@ -17,7 +17,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import claude_envelope_hook as hook  # noqa: E402
-from envelope_compiler import envelope_path, load_envelope, write_envelope  # noqa: E402
+from envelope_compiler import (  # noqa: E402
+    envelope_path,
+    load_envelope,
+    session_claim_path,
+    write_envelope,
+)
 
 
 CONSTRAINTS: Dict[str, Any] = {
@@ -620,6 +625,72 @@ def test_background_separated_mutation_denied() -> None:
     assert bash("true & gh pr merge 162 --squash").action == "deny"
 
 
+def test_quoted_pipe_pattern_stays_in_readonly_segment() -> None:
+    command = (
+        "oacp envelope show --project test-proj --receiver claude 2>&1 "
+        '| head -25 && command grep -n "expires\\|ttl\\|estimated_minutes" '
+        "config.yaml | head -8"
+    )
+
+    assert bash(command).action == "allow"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'rg -n "foo|bar" README.md',
+        "awk '{print $1 \"|\" $2}' data.txt",
+        "git log --oneline \\\n  --max-count=5",
+    ],
+)
+def test_quoted_separators_and_line_continuations_stay_in_segment(
+    command: str,
+) -> None:
+    assert bash(command).action == "allow"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'grep -n "safe|pattern" file | tee .env',
+        'grep -n "safe|pattern" file && gh pr merge 12 --squash',
+        'command grep -n "safe|pattern" file > pyproject.toml',
+        'grep "$(gh pr merge 12 --squash)" file',
+    ],
+)
+def test_quoted_readonly_head_does_not_hide_mutation(command: str) -> None:
+    assert bash(command).action == "deny"
+
+
+def test_nested_command_substitution_fails_closed() -> None:
+    command = 'echo "$(printf \'(safe)\'; gh pr merge 12 --squash)"'
+
+    assert bash(command).action == "ask"
+
+
+def test_readonly_head_fallback_is_narrow_when_argument_parser_degrades(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_split = hook.shlex.split
+
+    def degraded_split(command: str, *args: Any, **kwargs: Any):
+        if command.startswith(("grep ", "command grep ", "rg ")):
+            raise ValueError("simulated parser degradation")
+        return original_split(command, *args, **kwargs)
+
+    monkeypatch.setattr(hook.shlex, "split", degraded_split)
+
+    assert bash('grep -n "safe pattern" file').action == "allow"
+    assert bash('command grep -n "safe pattern" file').action == "allow"
+    assert bash('grep -n "safe pattern" file > .env').action == "ask"
+    assert bash("grep *.txt file").action == "ask"
+    assert bash("rg --pre='rm -f .env' needle file").action == "ask"
+
+
+def test_natural_readonly_fallback_allows_trailing_backslash() -> None:
+    assert bash("cat safe-file\\").action == "allow"
+
+
 def test_shell_indirection_asks() -> None:
     assert bash("bash -c 'gh pr merge 162 --squash'").action == "ask"
     assert bash("xargs -I{} sh -c '{}'").action == "ask"
@@ -898,6 +969,448 @@ def test_process_enforces_and_persists_counters(tmp_path: Path) -> None:
     assert stored["counters"]["files_touched"] == [str(Path(repo) / "a.py")]
 
 
+def test_process_foreign_session_noop_and_no_budget_pool(tmp_path: Path) -> None:
+    """The two-process scenario: a concurrent session must get pre-envelope
+    behavior under another session's envelope, and its writes must not
+    consume the dispatched task's files_touched budget."""
+    repo = _make_workspace(tmp_path)
+    envelope = make_envelope()
+    envelope["session_id"] = "sess-a"
+    target = _install_envelope(tmp_path, envelope)
+
+    foreign_merge = hook.process(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr merge 1"},
+            "cwd": str(repo),
+            "session_id": "sess-b",
+        }
+    )
+    assert foreign_merge.action == "allow"
+
+    foreign_write = hook.process(
+        {
+            "tool_name": "Write",
+            "tool_input": {"file_path": "b.py"},
+            "cwd": str(repo),
+            "session_id": "sess-b",
+        }
+    )
+    assert foreign_write.action == "allow"
+    assert load_envelope(target)["counters"]["files_touched"] == []
+
+    owner_merge = hook.process(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr merge 1"},
+            "cwd": str(repo),
+            "session_id": "sess-a",
+        }
+    )
+    assert owner_merge.action == "deny"
+
+    owner_write = hook.process(
+        {
+            "tool_name": "Write",
+            "tool_input": {"file_path": "a.py"},
+            "cwd": str(repo),
+            "session_id": "sess-a",
+        }
+    )
+    assert owner_write.action == "allow"
+    assert load_envelope(target)["counters"]["files_touched"] == [
+        str(Path(repo) / "a.py")
+    ]
+
+
+def test_foreign_session_cannot_touch_shared_envelope_state(tmp_path: Path) -> None:
+    """The foreign-session bypass must not extend to the envelope state that
+    protects the bound session: clear/compile and direct state-file writes
+    keep full classification (and its self-modification denials)."""
+    repo = _make_workspace(tmp_path)
+    envelope = make_envelope()
+    envelope["session_id"] = "sess-owner"
+    target = _install_envelope(tmp_path, envelope)
+
+    foreign_clear = hook.process(
+        {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "oacp envelope clear --project test-proj --oacp-dir /home"
+            },
+            "cwd": str(repo),
+            "session_id": "sess-foreign",
+        }
+    )
+    assert foreign_clear.action != "allow"
+    assert target.is_file()
+
+    foreign_compile = hook.process(
+        {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "oacp envelope compile /inbox/other.yaml --receiver claude"
+            },
+            "cwd": str(repo),
+            "session_id": "sess-foreign",
+        }
+    )
+    assert foreign_compile.action != "allow"
+
+    foreign_write = hook.process(
+        {
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(target)},
+            "cwd": str(repo),
+            "session_id": "sess-foreign",
+        }
+    )
+    assert foreign_write.action != "allow"
+
+    foreign_rm = hook.process(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": f"rm {target}"},
+            "cwd": str(repo),
+            "session_id": "sess-foreign",
+        }
+    )
+    assert foreign_rm.action != "allow"
+
+    # Ordinary foreign work is still bypassed — the guard is state-scoped.
+    ordinary = hook.process(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr merge 1"},
+            "cwd": str(repo),
+            "session_id": "sess-foreign",
+        }
+    )
+    assert ordinary.action == "allow"
+
+
+def test_foreign_session_readonly_state_inspection_keeps_bypass(
+    tmp_path: Path,
+) -> None:
+    """State relation is not mutation capability: a foreign session reading
+    shared state gets pre-envelope ALLOW with no counter updates, while
+    mutation-capable spellings of the same surfaces keep the deny."""
+    repo = _make_workspace(tmp_path)
+    envelope = make_envelope()
+    envelope["session_id"] = "sess-owner"
+    target = _install_envelope(tmp_path, envelope)
+
+    readonly_commands = [
+        f"cat {target}",
+        "oacp envelope show --project test-proj --oacp-dir /home",
+        "python3 -m oacp.cli envelope show --project test-proj",
+        f"cd {target.parent} && cat active_envelope.json | grep session_id",
+        f"stat {target}; wc -l {target}",
+    ]
+    for command in readonly_commands:
+        decision = hook.process(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+                "cwd": str(repo),
+                "session_id": "sess-foreign",
+            }
+        )
+        assert decision.action == "allow", command
+    assert load_envelope(target)["counters"]["files_touched"] == []
+
+    mutating_commands = [
+        "oacp envelope clear --project test-proj --oacp-dir /home",
+        # Redirection loses the exemption even under a read-only command.
+        f"cat {target} > /tmp/copy.json",
+        # A read segment cannot launder a mutating one in the compound.
+        f"cat {target} && rm {target}",
+        f"echo extra >> {target}",
+        # Process substitution executes its body under a read-only head.
+        f"cat <(rm {target})",
+        # Allowlisted-by-name tools with execution flags stay excluded.
+        f"rg --pre rm needle {target}",
+        # Trailing show tokens must not bless a different command head.
+        f"rm {target} oacp envelope show",
+        # Interactive pagers (shell escapes) are not inspection tools.
+        f"less {target}",
+        # A look-alike module must not pass for the real CLI.
+        "python3 -m evil_oacp envelope show --project test-proj",
+        # Unknown option grammar on show fails safe.
+        "oacp envelope show --project test-proj --unknown-flag",
+    ]
+    for command in mutating_commands:
+        decision = hook.process(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+                "cwd": str(repo),
+                "session_id": "sess-foreign",
+            }
+        )
+        assert decision.action != "allow", command
+    assert target.is_file()
+
+
+def test_foreign_session_variable_state_mutation_stays_enforced(
+    tmp_path: Path,
+) -> None:
+    """Unresolved shell expansion hides the target from the guard: an env
+    assignment plus a $VAR operand must stay enforced, not bypassed."""
+    repo = _make_workspace(tmp_path)
+    envelope = make_envelope()
+    envelope["session_id"] = "sess-owner"
+    target = _install_envelope(tmp_path, envelope)
+
+    decision = hook.process(
+        {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": (
+                    f"STATE={target.parent}; rm $STATE/active_envelope.json"
+                )
+            },
+            "cwd": str(repo),
+            "session_id": "sess-foreign",
+        }
+    )
+    assert decision.action != "allow"
+    assert target.is_file()
+
+    # A bare protected filename after a cd also stays enforced.
+    cd_form = hook.process(
+        {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": f"cd {target.parent} && rm active_envelope.json"
+            },
+            "cwd": str(repo),
+            "session_id": "sess-foreign",
+        }
+    )
+    assert cd_form.action != "allow"
+
+
+def test_foreign_session_guard_canonicalizes_symlinked_state_root(
+    tmp_path: Path,
+) -> None:
+    """A state root reached through a symlink must still contain the real
+    path: candidates are canonicalized, so the root must be too."""
+    repo = _make_workspace(tmp_path)
+    envelope = make_envelope()
+    envelope["session_id"] = "sess-owner"
+    target = _install_envelope(tmp_path, envelope)
+
+    link_home = tmp_path / "home_link"
+    link_home.symlink_to(tmp_path / "home")
+    symlinked_state_root = str(
+        link_home / "projects" / "test-proj" / "agents" / "claude" / "state"
+    )
+    assert hook._shared_state_affinity(
+        {
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(target)},
+        },
+        symlinked_state_root,
+        str(repo),
+    ) == "affine"
+    assert hook._shared_state_affinity(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": f"mv {target} /tmp/stolen.json"},
+        },
+        symlinked_state_root,
+        str(repo),
+    ) == "affine"
+
+
+def test_foreign_session_uncertain_command_enforced_without_pooling(
+    tmp_path: Path,
+) -> None:
+    """Expansion-bearing foreign commands with no state affinity stay
+    enforced through classification, and foreign work never charges the
+    bound session's files_touched budget."""
+    repo = _make_workspace(tmp_path)
+    envelope = make_envelope()
+    envelope["session_id"] = "sess-owner"
+    target = _install_envelope(tmp_path, envelope)
+
+    decision = hook.process(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo $HOME"},
+            "cwd": str(repo),
+            "session_id": "sess-foreign",
+        }
+    )
+    assert decision.action == "allow"
+    assert load_envelope(target)["counters"]["files_touched"] == []
+
+
+def test_process_unbound_envelope_enforces_every_session(tmp_path: Path) -> None:
+    """An envelope without a session binding keeps the historical
+    (project, agent) scope even for callers that identify themselves."""
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    decision = hook.process(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr merge 1"},
+            "cwd": str(repo),
+            "session_id": "sess-b",
+        }
+    )
+    assert decision.action == "deny"
+
+
+def test_process_bound_envelope_enforces_unidentified_caller(tmp_path: Path) -> None:
+    """A caller the harness gave no session id cannot be proven foreign, so
+    a bound envelope still enforces it — scope never silently narrows."""
+    repo = _make_workspace(tmp_path)
+    envelope = make_envelope()
+    envelope["session_id"] = "sess-a"
+    _install_envelope(tmp_path, envelope)
+    decision = hook.process(
+        {"tool_name": "Bash", "tool_input": {"command": "gh pr merge 1"}, "cwd": str(repo)}
+    )
+    assert decision.action == "deny"
+
+
+def test_process_records_session_claim_for_compile_command(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    target = envelope_path(tmp_path / "home", "test-proj", "claude")
+    claim_file = session_claim_path(target, "sess-a")
+
+    decision = hook.process(
+        {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": (
+                    "oacp envelope compile /inbox/msg_x.yaml "
+                    "--receiver claude --oacp-dir /home"
+                )
+            },
+            "cwd": str(repo),
+            "session_id": "sess-a",
+        }
+    )
+    assert decision.action == "allow"
+    claim = json.loads(claim_file.read_text(encoding="utf-8"))
+    assert claim["session_id"] == "sess-a"
+    assert claim["message_name"] == "msg_x.yaml"
+
+    claim_file.unlink()
+
+    script_spelling = hook.process(
+        {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "python3 scripts/envelope_compiler.py compile /inbox/msg_y.yaml"
+            },
+            "cwd": str(repo),
+            "session_id": "sess-a",
+        }
+    )
+    assert script_spelling.action == "allow"
+    assert json.loads(claim_file.read_text(encoding="utf-8"))["message_name"] == "msg_y.yaml"
+
+
+def test_compile_claim_recorded_for_module_cli_spelling(tmp_path: Path) -> None:
+    """`python3 -m oacp.cli envelope compile …` is a supported front end and
+    must record the claim like the executable spelling; end-to-end, the
+    compiled envelope binds to the hook session."""
+    repo = _make_workspace(tmp_path)
+    home = tmp_path / "home"
+    target = envelope_path(home, "test-proj", "claude")
+
+    agent_dir = home / "projects" / "test-proj" / "agents" / "claude"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    conformance = Path(__file__).resolve().parent / "conformance" / "autonomy"
+    (agent_dir / "config.yaml").write_bytes(
+        (conformance / "configs" / "auto_review_standard.yaml").read_bytes()
+    )
+    inbox = agent_dir / "inbox"
+    inbox.mkdir(exist_ok=True)
+    message_path = inbox / "msg_m.yaml"
+    message_path.write_bytes(
+        (conformance / "messages" / "clean_task.yaml").read_bytes()
+    )
+
+    decision = hook.process(
+        {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": (
+                    f"python3 -m oacp.cli envelope compile {message_path} "
+                    f"--oacp-dir {home}"
+                )
+            },
+            "cwd": str(repo),
+            "session_id": "sess-a",
+        }
+    )
+    assert decision.action == "allow"
+    claim_file = session_claim_path(target, "sess-a")
+    assert json.loads(claim_file.read_text(encoding="utf-8"))["message_name"] == "msg_m.yaml"
+
+    from envelope_compiler import main as compiler_main
+
+    assert compiler_main(
+        ["compile", str(message_path), "--oacp-dir", str(home)]
+    ) == 0
+    assert load_envelope(target)["session_id"] == "sess-a"
+
+
+def test_compile_claim_survives_option_before_positional(tmp_path: Path) -> None:
+    """Value options must not be mistaken for the positional message."""
+    repo = _make_workspace(tmp_path)
+    target = envelope_path(tmp_path / "home", "test-proj", "claude")
+
+    decision = hook.process(
+        {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": (
+                    "oacp envelope compile --receiver claude "
+                    "--oacp-dir /home /inbox/msg_z.yaml"
+                )
+            },
+            "cwd": str(repo),
+            "session_id": "sess-a",
+        }
+    )
+    assert decision.action == "allow"
+    claim_file = session_claim_path(target, "sess-a")
+    assert json.loads(claim_file.read_text(encoding="utf-8"))["message_name"] == "msg_z.yaml"
+
+
+def test_process_writes_no_claim_without_session_or_compile(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    target = envelope_path(tmp_path / "home", "test-proj", "claude")
+    claim_file = session_claim_path(target, "sess-a")
+
+    no_session = hook.process(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "oacp envelope compile /inbox/msg_x.yaml"},
+            "cwd": str(repo),
+        }
+    )
+    assert no_session.action == "allow"
+    assert not claim_file.exists()
+
+    not_compile = hook.process(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "oacp envelope show --project test-proj"},
+            "cwd": str(repo),
+            "session_id": "sess-a",
+        }
+    )
+    assert not_compile.action == "allow"
+    assert not claim_file.exists()
+
+
 def test_main_emits_deny_json(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _make_workspace(tmp_path)
     _install_envelope(tmp_path, make_envelope())
@@ -910,6 +1423,9 @@ def test_main_emits_deny_json(tmp_path: Path, monkeypatch, capsys) -> None:
     assert hook.main([]) == 0
     output = json.loads(capsys.readouterr().out)
     assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+    reason = output["hookSpecificOutput"]["permissionDecisionReason"]
+    assert reason.startswith("[oacp-envelope]")
+    assert "msg-1" in reason
 
 
 def test_main_allow_is_silent(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -939,6 +1455,9 @@ def test_main_corrupt_envelope_asks(tmp_path: Path, monkeypatch, capsys) -> None
     assert hook.main([]) == 0
     output = json.loads(capsys.readouterr().out)
     assert output["hookSpecificOutput"]["permissionDecision"] == "ask"
+    assert output["hookSpecificOutput"]["permissionDecisionReason"].startswith(
+        "[oacp-envelope]"
+    )
 
 
 def test_main_malformed_stdin_asks(monkeypatch, capsys) -> None:
@@ -946,6 +1465,9 @@ def test_main_malformed_stdin_asks(monkeypatch, capsys) -> None:
     assert hook.main([]) == 0
     output = json.loads(capsys.readouterr().out)
     assert output["hookSpecificOutput"]["permissionDecision"] == "ask"
+    assert output["hookSpecificOutput"]["permissionDecisionReason"].startswith(
+        "[oacp-envelope]"
+    )
 
 
 # ── Completion clear: audit-sanctioned envelope exit ─────────────────────────

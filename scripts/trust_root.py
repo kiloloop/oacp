@@ -607,6 +607,31 @@ def revoke_pin(
 # Catalog-vs-pins drift (consumed by `oacp doctor`)
 # ---------------------------------------------------------------------------
 
+
+def receiver_pin_gaps(
+    catalog: Dict[str, Dict[str, Any]],
+    pins: Dict[str, Dict[str, Any]],
+    receiver: str,
+) -> Tuple[List[str], List[str]]:
+    """Return completeness gaps for one receiver in both directions.
+
+    A receiver never needs to pin its own catalog identity. Revoked pins are
+    retained as an audit trail and therefore do not become pin-to-catalog
+    gaps when their catalog identity is decommissioned.
+    """
+    catalog_to_pin = sorted(
+        kid
+        for kid, entry in catalog.items()
+        if entry.get("agent") != receiver and kid not in pins
+    )
+    pin_to_catalog = sorted(
+        kid
+        for kid, pin in pins.items()
+        if pin.get("status") == PIN_STATUS_ACTIVE and kid not in catalog
+    )
+    return catalog_to_pin, pin_to_catalog
+
+
 def _drift(severity: str, code: str, message: str) -> Dict[str, str]:
     return {"severity": severity, "code": code, "message": message}
 
@@ -672,12 +697,14 @@ def drift_report(project_dir: Path) -> List[Dict[str, str]]:
 
     for agent in sorted(loaded_pins):
         pins = loaded_pins[agent]
-        active = 0
-        for kid, pin in pins.items():
-            if pin.get("status") != PIN_STATUS_ACTIVE:
-                continue
-            active += 1
-            if catalog_usable and kid not in catalog:
+        active = sum(
+            1 for pin in pins.values()
+            if pin.get("status") == PIN_STATUS_ACTIVE
+        )
+        _, pin_to_catalog = receiver_pin_gaps(catalog, pins, agent)
+        if catalog_usable:
+            for kid in pin_to_catalog:
+                pin = pins[kid]
                 findings.append(
                     _drift(
                         DRIFT_WARN,
@@ -704,10 +731,10 @@ def drift_report(project_dir: Path) -> List[Dict[str, str]]:
     # receiver's inbox has traffic from that agent); otherwise note it.
     for agent in sorted(loaded_pins):
         pins = loaded_pins[agent]
-        for kid, entry in catalog.items():
+        catalog_to_pin, _ = receiver_pin_gaps(catalog, pins, agent)
+        for kid in catalog_to_pin:
+            entry = catalog[kid]
             catalog_agent = entry.get("agent")
-            if catalog_agent == agent or kid in pins:
-                continue
             pinned_elsewhere = any(
                 other != agent
                 and other_pins.get(kid, {}).get("status") == PIN_STATUS_ACTIVE

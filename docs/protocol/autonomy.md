@@ -41,8 +41,11 @@ autonomy:
     enabled: false
 ```
 
-When config is absent, receivers behave as `always_pause`. Malformed config
-causes a pause and should be surfaced by `oacp doctor`.
+When config is absent, receivers behave as `always_pause`. A present config
+that omits the `autonomy` block entirely, such as a signing-only config,
+resolves the same way: `always_pause`, not `config_malformed`. An explicit but
+malformed `autonomy` value still causes a pause and should be surfaced by
+`oacp doctor`.
 
 `external_side_effects` accepts three policy actions:
 
@@ -222,7 +225,7 @@ Every autonomy decision writes one YAML file:
 
 ```yaml
 schema_version: 2
-spec_version: "0.4.0"
+spec_version: "0.4.1"
 created_at_utc: "2026-05-12T13:23:25Z"
 receiver: codex
 sender: iris
@@ -313,9 +316,12 @@ missing or malformed config. `sender` is normally traceability metadata and
 also binds an enabled standing grant to the sender that received approval.
 `policy_sha256` is the SHA-256 of a canonical, key-sorted serialization of the
 parsed policy, so comments and YAML formatting do not produce false drift.
-`spec_version: "0.4.0"` pins Gate 1 integrity enforcement plus the recalibrated
-Gate 2/3 policy, full task-profile capture, explicit `breached` list, and the
-outcome block shown above. Audit `schema_version: 2` adds thread identity and
+`spec_version: "0.4.1"` pins everything 0.4.0 pinned — Gate 1 integrity
+enforcement, the recalibrated Gate 2/3 policy, full task-profile capture, the
+explicit `breached` list, and the outcome block shown above — plus
+session-scoped envelope enforcement, the enforce-mode trust-pin completeness
+gate, and preserved `always_pause` defaults for configs without an `autonomy`
+block. Audit `schema_version: 2` adds thread identity and
 the structured `result.human_outcome` block. Recorders may upgrade a v1 audit
 to v2 when the first human outcome is written; standing grants trust only v2
 records.
@@ -623,7 +629,7 @@ The envelope is written to
 ```json
 {
   "envelope_version": 1,
-  "spec_version": "0.4.0",
+  "spec_version": "0.4.1",
   "compiler": "envelope_compiler.py",
   "compiled_at_utc": "2026-07-12T02:00:00Z",
   "project": "my-project",
@@ -649,7 +655,8 @@ The envelope is written to
     "private_repo_allowlist": ["example-org/private-repo"]
   },
   "counters": {"files_touched": []},
-  "enforcement": "hooks"
+  "enforcement": "hooks",
+  "session_id": "sess-…"
 }
 ```
 
@@ -664,6 +671,18 @@ Compilation rules:
   runtime enforcement never trusts sender declarations alone.
 - Granular side-effect fields absent from a legacy profile compile to
   `false`. `counters` are runtime state and always start empty.
+- **Session binding.** The envelope records which harness session it
+  belongs to. The runtime hook — the only party that sees the harness
+  session id (it is not present in the command environment) — records a
+  short-lived session claim when it observes the compile command; the
+  compiler consumes the claim (matching it against the message file it
+  actually compiles, within a freshness window) and stamps `session_id`.
+  A recompile for the same task — including a post-re-authorization
+  `--extend` run from outside the bound session — inherits the existing
+  binding. When no valid claim exists (an un-hooked runtime compiled, or
+  the harness supplied no session id) the envelope compiles unbound
+  (`session_id: null`) and enforcement keeps the historical
+  (project, agent) scope for every session.
 
 ### Delivery: static shim, dynamic envelope
 
@@ -677,6 +696,16 @@ clears it (`oacp envelope clear`) at completion; the adapter sanctions that
 completion clear against the task's audit record (see below), so the
 enforcement window can be exited from inside the session exactly once the
 task lifecycle is over.
+
+Enforcement is **session-scoped** when the envelope carries a session
+binding: a tool call from a different harness session gets pre-envelope
+behavior — no classification, no `files_touched` accounting — so a
+concurrent interactive session in the same repository neither inherits the
+dispatched task's constraints nor consumes its file budget. The scope never
+silently narrows: an unbound envelope enforces every session in the
+(project, agent) workspace exactly as before, and a caller the harness gave
+no session id is enforced even under a bound envelope (it cannot be proven
+foreign).
 
 Runtime decisions:
 
@@ -715,6 +744,18 @@ Runtime decisions:
   review; unenforceable never silently degrades to allowed.
 - **allow** — emitted as *no output*: the envelope can only narrow the
   harness's own permission surface, never widen or bypass it.
+- Every emitted **ask** or **deny** reason starts with the stable
+  `[oacp-envelope]` source tag. When an active envelope supplies a message id,
+  the reason also includes `[task <message-id>]`; operators can therefore
+  distinguish an envelope decision from the harness's native permission
+  prompt and identify the task that caused it.
+- Compound Bash classification is quote-aware: separators inside quoted
+  arguments remain argument data, backslash-newline continuations stay in the
+  same segment, and top-level or command-substitution segments are still
+  inspected independently so a read-only head cannot conceal a later
+  mutation. If argv parsing degrades, only a small known read-only command set
+  with no shell control, redirection, expansion, or substitution syntax can
+  pass; everything else escalates to **ask**.
 - `oacp send` is never denied; it is the checkpoint notification pipe. The
   exemption is exactly that wide: read-only oacp subcommands pass, all other
   oacp mutations are classified.
@@ -784,11 +825,12 @@ unconditionally — completion sanctions the exit, never recompilation.
 ### Envelope drift
 
 A tool call that would exceed `expected_files_touched` is denied with the
-canonical checkpoint opener (`Blocked: autonomy threshold exceeded —
-files_touched expected N, now M`), which forces the Threshold-Exceeded
-Checkpoint protocol above: the deny fires once, the session stops, notifies
-the sender, and awaits re-authorization. A revised profile is recompiled
-with `oacp envelope compile --extend`, which preserves accumulated counters.
+canonical tagged checkpoint opener (`[oacp-envelope] Blocked: autonomy
+threshold exceeded — files_touched expected N, now M`), followed by the
+active task id when available. This forces the Threshold-Exceeded Checkpoint
+protocol above: the deny fires once, the session stops, notifies the sender,
+and awaits re-authorization. A revised profile is recompiled with `oacp
+envelope compile --extend`, which preserves accumulated counters.
 
 ### Enforcement recording
 
