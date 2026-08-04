@@ -38,6 +38,7 @@ from oacp_doctor import (  # noqa: E402
     run_doctor,
     validate_autonomy_config_data,
 )
+from autonomy_gate import evaluate_autonomy  # noqa: E402
 from memory_sync import CANONICAL_MEMORY_GITIGNORE  # noqa: E402
 
 
@@ -251,6 +252,66 @@ class TestAutonomyConfig(unittest.TestCase):
             }
         }
         self.assertEqual(validate_autonomy_config_data(data), [])
+
+    def test_signing_only_config_preserves_absent_autonomy_defaults(self) -> None:
+        config_data = {
+            "signing": {
+                "sign_messages": True,
+                "verify_mode": "warn",
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as td:
+            project_dir = Path(td)
+            agent_dir = project_dir / "agents" / "codex"
+            (agent_dir / "audit" / "autonomy_decisions").mkdir(parents=True)
+
+            before = check_autonomy(project_dir)
+            before_config = next(
+                result
+                for result in before.results
+                if result.name == "codex/config.yaml"
+            )
+            self.assertEqual(before_config.severity, Severity.ok)
+            self.assertIn("defaults to always_pause", before_config.message)
+
+            _write(
+                agent_dir / "config.yaml",
+                "signing:\n  sign_messages: true\n  verify_mode: warn\n",
+            )
+            import yaml
+
+            after = check_autonomy(project_dir, yaml_loader=yaml.safe_load)
+            after_config = next(
+                result
+                for result in after.results
+                if result.name == "codex/config.yaml"
+            )
+            self.assertEqual(after_config.severity, Severity.ok)
+            self.assertIn("defaults to always_pause", after_config.message)
+
+        self.assertEqual(validate_autonomy_config_data(config_data), [])
+        self.assertNotEqual(
+            validate_autonomy_config_data({"autonomy": None}),
+            [],
+        )
+
+        decision = evaluate_autonomy(
+            {
+                "id": "msg-signing-only",
+                "from": "iris",
+                "to": "codex",
+                "type": "task_request",
+                "priority": "P2",
+                "created_at_utc": "2026-08-03T00:00:00Z",
+                "subject": "Signing-only config regression",
+                "body": "No action should auto-run.",
+            },
+            config_data,
+        )
+        self.assertEqual(decision["decision"], "paused")
+        self.assertEqual(decision["mode"], "always_pause")
+        self.assertEqual(decision["reason_codes"], ["mode_always_pause"])
 
     def test_rejects_malformed_continuation_grants(self) -> None:
         data = {
@@ -610,12 +671,41 @@ class TestCheckTrust(unittest.TestCase):
     KID = "a" * 43
     GOLDEN_X = "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
 
-    def _pins(self, project_dir: Path, agent: str, kid: str, x: str) -> None:
+    def _catalog(self, project_dir: Path, agent: str = "alice") -> str:
+        from message_signing import jwk_thumbprint
+        from trust_root import import_public_stub
+
+        project_dir.mkdir(parents=True, exist_ok=True)
+        jwk = {"kty": "OKP", "crv": "Ed25519", "x": self.GOLDEN_X}
+        kid = jwk_thumbprint(jwk)
+        stub = {
+            "kid": kid,
+            "jwk": jwk,
+            "agent": agent,
+            "agent_urn": (
+                f"urn:oacp:agent:123e4567-e89b-42d3-a456-426614174000:{agent}"
+            ),
+            "instance_urn": "urn:uuid:123e4567-e89b-42d3-a456-426614174111",
+        }
+        stub_path = project_dir / f"{agent}.pub.json"
+        stub_path.write_text(json.dumps(stub), encoding="utf-8")
+        import_public_stub(stub_path, project_dir, catalog_only=True)
+        return kid
+
+    def _pins(
+        self,
+        project_dir: Path,
+        agent: str,
+        kid: str,
+        x: str,
+        *,
+        status: str = "active",
+    ) -> None:
         pins = project_dir / "agents" / agent / "trust" / "allowed_signers.yaml"
         pins.parent.mkdir(parents=True, exist_ok=True)
         pins.write_text(
             "version: 1\nsigners:\n"
-            f"  - {{agent: iris, kid: {kid}, status: active, "
+            f"  - {{agent: alice, kid: {kid}, status: {status}, "
             f"jwk: {{kty: OKP, crv: Ed25519, x: {x}}}}}\n",
             encoding="utf-8",
         )
@@ -663,6 +753,179 @@ class TestCheckTrust(unittest.TestCase):
             names = [r.name for r in cat.results if r.severity == Severity.warn]
             self.assertIn("trust-pin-not-in-catalog", names)
 
+    def test_revoked_pin_absent_from_catalog_is_not_completeness_gap(self) -> None:
+        from message_signing import jwk_thumbprint
+
+        with tempfile.TemporaryDirectory() as td:
+            project_dir = Path(td) / "proj"
+            agent_dir = project_dir / "agents" / "claude"
+            agent_dir.mkdir(parents=True)
+            (agent_dir / "config.yaml").write_text(
+                "signing:\n  verify_mode: enforce\n",
+                encoding="utf-8",
+            )
+            jwk = {"kty": "OKP", "crv": "Ed25519", "x": self.GOLDEN_X}
+            self._pins(
+                project_dir,
+                "claude",
+                jwk_thumbprint(jwk),
+                self.GOLDEN_X,
+                status="revoked",
+            )
+
+            cat = check_trust(project_dir)
+            result = next(
+                item for item in cat.results
+                if item.name == "trust-pin-completeness"
+            )
+
+            self.assertEqual(result.severity, Severity.ok)
+            self.assertIn("0 gap(s) across 1 receiver(s)", result.message)
+            self.assertIn("0 catalog-to-pin, 0 pin-to-catalog", result.message)
+
+    def test_completeness_warns_without_liveness_signal(self) -> None:
+        """Reproduce the live cataloged kid + missing receiver pin shape."""
+        with tempfile.TemporaryDirectory() as td:
+            project_dir = Path(td) / "proj"
+            agent_dir = project_dir / "agents" / "claude"
+            agent_dir.mkdir(parents=True)
+            (agent_dir / "config.yaml").write_text(
+                "signing:\n  verify_mode: warn\n",
+                encoding="utf-8",
+            )
+            self._catalog(project_dir)
+
+            cat = check_trust(project_dir)
+            result = next(
+                item for item in cat.results
+                if item.name == "trust-pin-completeness"
+            )
+
+            self.assertEqual(result.severity, Severity.warn)
+            self.assertIn("1 gap(s) across 1 receiver(s)", result.message)
+            self.assertIn("1 catalog-to-pin, 0 pin-to-catalog", result.message)
+
+    def test_completeness_summarizes_both_directions(self) -> None:
+        from message_signing import b64url_encode, jwk_thumbprint
+
+        with tempfile.TemporaryDirectory() as td:
+            project_dir = Path(td) / "proj"
+            (project_dir / "agents" / "claude").mkdir(parents=True)
+            codex_dir = project_dir / "agents" / "codex"
+            codex_dir.mkdir(parents=True)
+            (codex_dir / "config.yaml").write_text(
+                "signing:\n  verify_mode: warn\n",
+                encoding="utf-8",
+            )
+            self._catalog(project_dir)
+            other_x = b64url_encode(bytes([7]) * 32)
+            other_jwk = {"kty": "OKP", "crv": "Ed25519", "x": other_x}
+            self._pins(
+                project_dir,
+                "claude",
+                jwk_thumbprint(other_jwk),
+                other_x,
+            )
+
+            cat = check_trust(project_dir)
+            result = next(
+                item for item in cat.results
+                if item.name == "trust-pin-completeness"
+            )
+
+            self.assertEqual(result.severity, Severity.warn)
+            self.assertIn("3 gap(s) across 2 receiver(s)", result.message)
+            self.assertIn("2 catalog-to-pin, 1 pin-to-catalog", result.message)
+
+    def test_enforce_mode_promotes_completeness_gap_to_error(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_dir = Path(td) / "proj"
+            agent_dir = project_dir / "agents" / "claude"
+            agent_dir.mkdir(parents=True)
+            self._catalog(project_dir)
+            (agent_dir / "config.yaml").write_text(
+                "signing:\n  verify_mode: enforce\n",
+                encoding="utf-8",
+            )
+
+            cat = check_trust(project_dir)
+            result = next(
+                item for item in cat.results
+                if item.name == "trust-pin-completeness"
+            )
+
+            self.assertEqual(result.severity, Severity.error)
+            self.assertIn("blocking because verify_mode=enforce", result.message)
+            self.assertIn("claude", result.message)
+
+    def test_enforce_error_localizes_gap_to_warn_mode_receiver(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_dir = Path(td) / "proj"
+            kid = self._catalog(project_dir)
+            for receiver, mode in (("claude", "enforce"), ("codex", "warn")):
+                agent_dir = project_dir / "agents" / receiver
+                agent_dir.mkdir(parents=True)
+                (agent_dir / "config.yaml").write_text(
+                    f"signing:\n  verify_mode: {mode}\n",
+                    encoding="utf-8",
+                )
+            self._pins(project_dir, "claude", kid, self.GOLDEN_X)
+
+            cat = check_trust(project_dir)
+            result = next(
+                item for item in cat.results
+                if item.name == "trust-pin-completeness"
+            )
+
+            self.assertEqual(result.severity, Severity.error)
+            self.assertIn("claude=0 gap(s)", result.message)
+            self.assertIn(
+                "codex=1 gap(s) (1 catalog-to-pin, 0 pin-to-catalog)",
+                result.message,
+            )
+
+    def test_self_catalog_identity_does_not_require_a_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_dir = Path(td) / "proj"
+            agent_dir = project_dir / "agents" / "alice"
+            agent_dir.mkdir(parents=True)
+            (agent_dir / "config.yaml").write_text(
+                "signing:\n  verify_mode: warn\n",
+                encoding="utf-8",
+            )
+            self._catalog(project_dir)
+
+            cat = check_trust(project_dir)
+            result = next(
+                item for item in cat.results
+                if item.name == "trust-pin-completeness"
+            )
+
+            self.assertEqual(result.severity, Severity.ok)
+            self.assertIn("0 gap(s) across 1 receiver(s)", result.message)
+
+    def test_unprofiled_agent_directory_is_not_counted(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_dir = Path(td) / "proj"
+            claude_dir = project_dir / "agents" / "claude"
+            claude_dir.mkdir(parents=True)
+            (claude_dir / "config.yaml").write_text(
+                "signing:\n  verify_mode: warn\n",
+                encoding="utf-8",
+            )
+            (project_dir / "agents" / "gemini").mkdir(parents=True)
+            kid = self._catalog(project_dir)
+            self._pins(project_dir, "claude", kid, self.GOLDEN_X)
+
+            cat = check_trust(project_dir)
+            result = next(
+                item for item in cat.results
+                if item.name == "trust-pin-completeness"
+            )
+
+            self.assertEqual(result.severity, Severity.ok)
+            self.assertIn("0 gap(s) across 1 receiver(s)", result.message)
+
     def test_integrity_failure_is_error(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             project_dir = Path(td)
@@ -673,6 +936,11 @@ class TestCheckTrust(unittest.TestCase):
             # the reader enforces integrity, so the bad kid surfaces as an
             # unreadable pins file carrying the thumbprint detail
             self.assertIn("trust-pins-unreadable", names)
+            completeness = next(
+                item for item in cat.results
+                if item.name == "trust-pin-completeness"
+            )
+            self.assertIn("0 gap(s) across 0 receiver(s)", completeness.message)
 
 
 class TestCheckMemorySync(unittest.TestCase):

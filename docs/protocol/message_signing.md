@@ -16,12 +16,37 @@ outcome — `unsigned`, `signed-verified`, `signed-unknown-kid`,
 `message_auth` audit block; none of them rejects, quarantines-as-rejection,
 or changes how a message is processed. A verified signature is a recorded
 fact about who signed, not a permission. Enforce mode (rejection, receipt
-ledger, quarantine activation) is **v0.4.1**, activated only after a warn
-soak on live fleet traffic; the seams exist in v0.4.0 and none activate.
+ledger, quarantine activation) lands in **a later release**, activated only
+after a warn soak on live fleet traffic and an explicit enforcement ruling;
+the seams exist in v0.4.0 and none activate.
 
 Receivers opt in per-agent via `signing.verify_mode: off | warn` in
 `agents/<receiver>/config.yaml`. An early `enforce` value degrades to
 `warn`; anything else degrades to `off`.
+
+## Enforce-mode preparation
+
+Before any receiver flips to `signing.verify_mode: enforce`, run a fleet-wide
+re-pin sweep and then `oacp doctor --project <name>`. Every receiver must pin
+every peer identity in the project catalog (a receiver's own catalog identity
+is exempt), and every active receiver pin must refer to an identity recorded
+in the catalog. Revoked pins remain as audit history and are excluded from the
+pin-to-catalog completeness direction. Re-import the applicable public stub
+for each missing relationship:
+
+```bash
+oacp trust import /path/to/<kid>.pub.json --project <name> --agent <receiver>
+oacp doctor --project <name>
+```
+
+Doctor reports one aggregate `pin completeness` result with counts in both
+directions across all receiver profiles. Gaps are warnings while the project
+remains in warn mode. If any receiver explicitly configures enforce mode, the
+same aggregate result becomes a blocking error so a missing pin cannot turn
+into silent message rejection after the flip. Unlike the advisory
+`catalog-not-pinned` drift signal, pre-enforce completeness intentionally has
+no liveness exemption: every cataloged peer relationship must be ready before
+any profile enforces.
 
 ## Trust root
 
@@ -182,7 +207,7 @@ telemetry only.
   attests to a key, and key custody on-machine is only as strong as the
   file permissions. This is an accepted, documented limitation of the
   warn-mode rollout.
-- **Keystore hardening is planned follow-up work** for v0.4.1+: OS
+- **Keystore hardening is planned follow-up work** for a later release: OS
   keychain / vault-backed signer backends behind the same `kid` seam.
 
 ## Rotation and revocation

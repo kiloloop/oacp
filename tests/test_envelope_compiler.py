@@ -22,6 +22,8 @@ from envelope_compiler import (  # noqa: E402
     envelope_path,
     load_envelope,
     main,
+    session_claim_path,
+    write_session_claim,
 )
 
 
@@ -296,6 +298,154 @@ def test_cli_force_resets_counters_for_new_message(tmp_path: Path, capsys) -> No
     updated = load_envelope(target)
     assert updated["message_id"] == "msg-2"
     assert updated["counters"]["files_touched"] == []
+
+
+def test_cli_compile_consumes_fresh_session_claim(tmp_path: Path, capsys) -> None:
+    inbox = _workspace(tmp_path)
+    message_path = _write_message(inbox)
+    target = envelope_path(tmp_path, "test-proj", "claude")
+    write_session_claim(target, "sess-a", message_path.name)
+
+    assert main(["compile", str(message_path), "--oacp-dir", str(tmp_path)]) == 0
+    envelope = load_envelope(target)
+    assert envelope["session_id"] == "sess-a"
+    assert not session_claim_path(target, "sess-a").exists()
+
+
+def test_cli_compile_binds_with_options_before_positional(
+    tmp_path: Path, capsys
+) -> None:
+    """End-to-end for the option-order form: claim written, options-first
+    compile invocation, binding preserved."""
+    inbox = _workspace(tmp_path)
+    message_path = _write_message(inbox)
+    target = envelope_path(tmp_path, "test-proj", "claude")
+    write_session_claim(target, "sess-a", message_path.name)
+
+    assert main([
+        "compile", "--receiver", "claude", "--oacp-dir", str(tmp_path),
+        str(message_path),
+    ]) == 0
+    assert load_envelope(target)["session_id"] == "sess-a"
+
+
+def test_cli_compile_racing_claims_from_two_sessions_compile_unbound(
+    tmp_path: Path, capsys
+) -> None:
+    """The reviewed interleaving: session A claims, session B claims the same
+    message before A's compiler runs. The compile must not bind to either —
+    ambiguity degrades to unbound, never to a wrong binding."""
+    inbox = _workspace(tmp_path)
+    message_path = _write_message(inbox)
+    target = envelope_path(tmp_path, "test-proj", "claude")
+    write_session_claim(target, "sess-a", message_path.name)
+    write_session_claim(target, "sess-b", message_path.name)
+
+    assert main(["compile", str(message_path), "--oacp-dir", str(tmp_path)]) == 0
+    assert load_envelope(target)["session_id"] is None
+    assert not session_claim_path(target, "sess-a").exists()
+    assert not session_claim_path(target, "sess-b").exists()
+
+
+def test_cli_compile_same_session_double_claim_still_binds(
+    tmp_path: Path, capsys
+) -> None:
+    inbox = _workspace(tmp_path)
+    message_path = _write_message(inbox)
+    target = envelope_path(tmp_path, "test-proj", "claude")
+    write_session_claim(target, "sess-a", message_path.name)
+    write_session_claim(target, "sess-a", message_path.name)
+
+    assert main(["compile", str(message_path), "--oacp-dir", str(tmp_path)]) == 0
+    assert load_envelope(target)["session_id"] == "sess-a"
+
+
+def test_cli_compile_without_claim_is_unbound(tmp_path: Path, capsys) -> None:
+    inbox = _workspace(tmp_path)
+    message_path = _write_message(inbox)
+
+    assert main(["compile", str(message_path), "--oacp-dir", str(tmp_path)]) == 0
+    envelope = load_envelope(envelope_path(tmp_path, "test-proj", "claude"))
+    assert envelope["session_id"] is None
+
+
+def test_cli_compile_ignores_mismatched_claim(tmp_path: Path, capsys) -> None:
+    inbox = _workspace(tmp_path)
+    message_path = _write_message(inbox)
+    target = envelope_path(tmp_path, "test-proj", "claude")
+    write_session_claim(target, "sess-a", "some-other-message.yaml")
+
+    assert main(["compile", str(message_path), "--oacp-dir", str(tmp_path)]) == 0
+    assert load_envelope(target)["session_id"] is None
+    # A fresh claim for a different message belongs to the compile in
+    # flight for that message — it must survive this consumption.
+    assert session_claim_path(target, "sess-a").is_file()
+
+
+def test_cli_compile_other_messages_claim_survives_and_binds_its_own(
+    tmp_path: Path, capsys
+) -> None:
+    """Two sessions claim two different messages: each compile binds its own
+    claimant, and neither consumption destroys the other's pending claim."""
+    inbox = _workspace(tmp_path)
+    first = _write_message(inbox, "msg-1")
+    second = _write_message(inbox, "msg-2")
+    target = envelope_path(tmp_path, "test-proj", "claude")
+    write_session_claim(target, "sess-a", first.name)
+    write_session_claim(target, "sess-b", second.name)
+
+    assert main(["compile", str(first), "--oacp-dir", str(tmp_path)]) == 0
+    assert load_envelope(target)["session_id"] == "sess-a"
+    assert session_claim_path(target, "sess-b").is_file()
+
+    assert main([
+        "compile", str(second), "--oacp-dir", str(tmp_path), "--force",
+    ]) == 0
+    assert load_envelope(target)["session_id"] == "sess-b"
+    assert not session_claim_path(target, "sess-b").exists()
+
+
+def test_cli_compile_ignores_stale_claim(tmp_path: Path, capsys) -> None:
+    inbox = _workspace(tmp_path)
+    message_path = _write_message(inbox)
+    target = envelope_path(tmp_path, "test-proj", "claude")
+    claim_file = session_claim_path(target, "sess-a")
+    claim_file.parent.mkdir(parents=True, exist_ok=True)
+    claim_file.write_text(
+        json.dumps(
+            {
+                "session_id": "sess-a",
+                "message_name": message_path.name,
+                "claimed_at_utc": "2026-01-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert main(["compile", str(message_path), "--oacp-dir", str(tmp_path)]) == 0
+    assert load_envelope(target)["session_id"] is None
+
+
+def test_cli_recompile_and_extend_preserve_session_binding(
+    tmp_path: Path, capsys
+) -> None:
+    inbox = _workspace(tmp_path)
+    first = _write_message(inbox, "msg-1")
+    second = _write_message(inbox, "msg-2")
+    target = envelope_path(tmp_path, "test-proj", "claude")
+    write_session_claim(target, "sess-a", first.name)
+    assert main(["compile", str(first), "--oacp-dir", str(tmp_path)]) == 0
+    assert load_envelope(target)["session_id"] == "sess-a"
+
+    # Same-message recompile without a fresh claim (e.g. a human-run
+    # --extend after re-authorization) keeps the binding.
+    assert main(["compile", str(first), "--oacp-dir", str(tmp_path)]) == 0
+    assert load_envelope(target)["session_id"] == "sess-a"
+
+    assert main([
+        "compile", str(second), "--oacp-dir", str(tmp_path), "--extend",
+    ]) == 0
+    assert load_envelope(target)["session_id"] == "sess-a"
 
 
 def test_cli_compile_missing_profile_exits_3(tmp_path: Path, capsys) -> None:

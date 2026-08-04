@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import shutil
 import sys
@@ -24,6 +25,7 @@ from autonomy_gate import (  # noqa: E402
     canonical_policy_sha256,
     evaluate_autonomy,
     evaluate_threshold_checkpoint,
+    main as autonomy_main,
     normalize_scope_envelope,
 )
 
@@ -135,6 +137,70 @@ def test_autonomy_gate_records_raw_message_hash_when_path_provided() -> None:
     expected_hash = hashlib.sha256(message_path.read_bytes()).hexdigest()
     assert decision["message_sha256"] == expected_hash
     assert "message_hash_recorded" in decision["reason_codes"]
+
+
+def test_autonomy_gate_cli_writes_audit_and_preserves_stdout(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = FIXTURE_ROOT / "configs" / "auto_review_standard.yaml"
+    message_path = FIXTURE_ROOT / "messages" / "clean_task.yaml"
+    audit_dir = tmp_path / "audit" / "autonomy_decisions"
+
+    assert autonomy_main([
+        "--config",
+        str(config_path),
+        "--message",
+        str(message_path),
+        "--audit-dir",
+        str(audit_dir),
+        "--receiver",
+        "codex",
+    ]) == 0
+
+    first_output = capsys.readouterr()
+    stdout_decision = json.loads(first_output.out)
+    assert first_output.err == ""
+    audit_files = list(audit_dir.glob("*.yaml"))
+    assert len(audit_files) == 1
+    assert re.fullmatch(
+        r"\d{8}T\d{6}Z_msg-20260512120000-iris-clean1\.yaml",
+        audit_files[0].name,
+    )
+    audit_record = _load_yaml(audit_files[0])
+    for key, value in stdout_decision.items():
+        assert audit_record[key] == value
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z",
+        audit_record["created_at_utc"],
+    )
+    assert audit_record["message_subject"] == "Small docs cleanup"
+    assert audit_record["message_path"] == str(message_path)
+    assert audit_record["policy_path"] == str(config_path)
+    assert audit_record["thresholds"] == {
+        "max_estimated_minutes": 45,
+        "max_expected_files_touched": 5,
+    }
+    assert audit_record["runtime"] == {"agent": "codex", "model": None}
+    assert audit_files[0].with_name(audit_files[0].name + ".lock").is_file()
+
+    assert autonomy_main([
+        "--config",
+        str(config_path),
+        "--message",
+        str(message_path),
+        "--audit-dir",
+        str(audit_dir),
+        "--receiver",
+        "codex",
+    ]) == 0
+
+    replay_output = capsys.readouterr()
+    replay_decision = json.loads(replay_output.out)
+    assert replay_decision["decision"] == "paused"
+    assert replay_decision["reason_codes"] == ["message_replayed"]
+    assert replay_output.err == "NOTE: replay detected; audit record not written\n"
+    assert list(audit_dir.glob("*.yaml")) == audit_files
 
 
 def test_autonomy_gate_self_stamps_evaluator_provenance() -> None:

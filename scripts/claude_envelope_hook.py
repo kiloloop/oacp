@@ -14,8 +14,8 @@ constraints and emits a PreToolUse ``permissionDecision``:
 
 - ``deny``  — the call breaches a declared-false capability, targets a repo
   outside the receiver allowlist, or drifts past ``expected_files_touched``
-  (denied with the canonical ``Blocked: autonomy threshold exceeded`` opener
-  so the session pivots to the §E checkpoint protocol).
+  (denied with the canonical ``[oacp-envelope] Blocked: autonomy threshold
+  exceeded`` opener so the session pivots to the §E checkpoint protocol).
 - ``ask``   — the hook cannot confidently classify the call (exotic compound
   command, unresolvable repo). The exact command is escalated for
   just-in-time human review instead of blanket-denied or silently allowed.
@@ -56,11 +56,19 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from autonomy_gate import DESTRUCTIVE_PATTERNS, load_yaml_file
-from envelope_compiler import envelope_path, load_envelope, write_envelope
+from envelope_compiler import (
+    ENVELOPE_FILENAME,
+    SESSION_CLAIM_FILENAME,
+    envelope_path,
+    load_envelope,
+    write_envelope,
+    write_session_claim,
+)
 
-BLOCKED_OPENER = "Blocked: autonomy threshold exceeded"
+SESSION_CLAIM_STEM = SESSION_CLAIM_FILENAME.rsplit(".", 1)[0]
 
-SEGMENT_SPLIT_RE = re.compile(r"[;|&\n]+")
+REASON_PREFIX = "[oacp-envelope]"
+BLOCKED_OPENER = f"{REASON_PREFIX} Blocked: autonomy threshold exceeded"
 # Shell expansion syntax the classifier cannot statically resolve: the shell
 # expands globs/braces AFTER classification, so a pattern operand can reach a
 # protected path while its literal spelling does not. Such operands escalate.
@@ -222,11 +230,29 @@ ALLOW = Decision("allow")
 
 
 def _deny(reason: str) -> Decision:
-    return Decision("deny", reason)
+    return Decision("deny", _prefixed_reason(reason))
 
 
 def _ask(reason: str) -> Decision:
-    return Decision("ask", reason)
+    return Decision("ask", _prefixed_reason(reason))
+
+
+def _prefixed_reason(reason: str) -> str:
+    """Return one operator-visible reason with the stable OACP tag."""
+    if reason.startswith(REASON_PREFIX):
+        return reason
+    return f"{REASON_PREFIX} {reason}"
+
+
+def _with_message_id(decision: Decision, message_id: str) -> Decision:
+    """Add the active task id to a non-allow decision when it is known."""
+    if decision.action == "allow" or not message_id:
+        return decision
+    return Decision(
+        decision.action,
+        f"{_prefixed_reason(decision.reason)} [task {message_id}]",
+        decision.new_files,
+    )
 
 
 class WorkspaceContext:
@@ -1122,18 +1148,167 @@ def _gate_write_paths(
     return ALLOW
 
 
-def _segments_of(command: str) -> List[str]:
-    """Split a command into classifiable segments (F-002).
+def _split_shell_segments(command: str) -> List[str]:
+    """Split on shell operators outside quotes and substitutions.
 
-    Separators cover `;`, `|`, `||`, `&&`, single `&`, and newlines. Command
-    substitution bodies (`$(...)`, backticks) are appended as additional
-    segments so a nested mutation is classified like a top-level one.
+    This is deliberately a small classifier scanner, not a shell parser. It
+    preserves raw segment text for the existing redirect checks, joins shell
+    line continuations, and rejects unterminated quoting/substitution instead
+    of guessing. Separator characters inside quoted arguments stay data.
     """
-    segments = [s.strip() for s in SEGMENT_SPLIT_RE.split(command) if s.strip()]
-    for match in SUBSTITUTION_RE.finditer(command):
-        inner = match.group(1) or match.group(2) or ""
-        segments.extend(s.strip() for s in SEGMENT_SPLIT_RE.split(inner) if s.strip())
+    segments: List[str] = []
+    current: List[str] = []
+    quote: Optional[str] = None
+    in_backticks = False
+    substitution_depth = 0
+    index = 0
+
+    def flush() -> None:
+        segment = "".join(current).strip()
+        if segment:
+            segments.append(segment)
+        current.clear()
+
+    while index < len(command):
+        char = command[index]
+        next_char = command[index + 1] if index + 1 < len(command) else ""
+
+        if char == "\\" and quote != "'":
+            if next_char == "\n":
+                index += 2
+                continue
+            current.append(char)
+            if next_char:
+                current.append(next_char)
+                index += 2
+            else:
+                index += 1
+            continue
+
+        if quote is not None:
+            current.append(char)
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+
+        if in_backticks:
+            current.append(char)
+            if char == "`":
+                in_backticks = False
+            index += 1
+            continue
+
+        if char in ("'", '"'):
+            quote = char
+            current.append(char)
+            index += 1
+            continue
+        if char == "`":
+            in_backticks = True
+            current.append(char)
+            index += 1
+            continue
+        if char == "$" and next_char == "(":
+            substitution_depth += 1
+            current.extend((char, next_char))
+            index += 2
+            continue
+        if substitution_depth:
+            if char == "(":
+                substitution_depth += 1
+            elif char == ")":
+                substitution_depth -= 1
+            current.append(char)
+            index += 1
+            continue
+
+        if char in (";", "\n", "|"):
+            flush()
+            index += 1
+            if char == "|" and index < len(command) and command[index] in ("|", "&"):
+                index += 1
+            continue
+        if char == "&":
+            # `2>&1`, `<&0`, and `&>file` are redirections, not command
+            # boundaries. Their targets remain visible to the redirect gate.
+            if (current and current[-1] in ("<", ">")) or next_char == ">":
+                current.append(char)
+                index += 1
+                continue
+            flush()
+            index += 1
+            if index < len(command) and command[index] == "&":
+                index += 1
+            continue
+
+        current.append(char)
+        index += 1
+
+    if quote is not None or in_backticks or substitution_depth:
+        raise ValueError("unterminated shell quote or command substitution")
+    flush()
     return segments
+
+
+def _segments_of(command: str) -> List[str]:
+    """Return top-level and command-substitution segments (F-002)."""
+    segments = _split_shell_segments(command)
+    substitutions = list(SUBSTITUTION_RE.finditer(command))
+    simple_dollar_substitutions = sum(
+        match.group(1) is not None for match in substitutions
+    )
+    if command.count("$(") != simple_dollar_substitutions:
+        # The deliberately small extraction regex cannot prove the contents
+        # of nested or parenthesized substitutions. Escalate the whole call
+        # instead of letting an uninspected inner mutation hide under a
+        # read-only outer command.
+        raise ValueError("nested or parenthesized command substitution")
+    for match in substitutions:
+        inner = match.group(1) or match.group(2) or ""
+        segments.extend(_split_shell_segments(inner))
+    return segments
+
+
+DEGRADED_READONLY_COMMANDS = {
+    "cat",
+    "cmp",
+    "diff",
+    "grep",
+    "head",
+    "jq",
+    "ls",
+    "pwd",
+    "rg",
+    "stat",
+    "tail",
+    "test",
+    "wc",
+}
+
+
+def _degraded_readonly_segment(segment: str) -> bool:
+    """Conservatively recognize a direct read-only head after argv failure.
+
+    No shell control, redirect, expansion, or substitution syntax is allowed
+    on this fallback. Ripgrep's command-executing ``--pre`` mode is excluded.
+    The quote-aware scanner has already rejected unbalanced shell syntax.
+    """
+    if re.search(r"[;|&<>()`$\n]", segment) or EXPANSION_SYNTAX_RE.search(segment):
+        return False
+    words = segment.strip().split()
+    while words and ENV_ASSIGNMENT_RE.match(words[0]):
+        words.pop(0)
+    if words and words[0] in ("command", "builtin"):
+        words.pop(0)
+    if not words or words[0].startswith("-"):
+        return False
+    program = Path(words[0]).name
+    if program == "rg" and any(
+        word == "--pre" or word.startswith("--pre=") for word in words[1:]
+    ):
+        return False
+    return program in DEGRADED_READONLY_COMMANDS
 
 
 def _classify_segment(
@@ -1308,7 +1483,10 @@ def classify_bash(
                 )
 
     write_targets: List[str] = []
-    segments = _segments_of(command)
+    try:
+        segments = _segments_of(command)
+    except ValueError:
+        return _ask(f"cannot segment shell command: {command!r}")
     # A command with exactly one segment has no earlier shell state (cd,
     # export) that could retarget a target-sensitive subcommand after
     # validation — the completion clear is sanctioned only in that form.
@@ -1317,6 +1495,8 @@ def classify_bash(
         try:
             tokens = shlex.split(segment, posix=True)
         except ValueError:
+            if _degraded_readonly_segment(segment):
+                continue
             return _ask(f"cannot classify shell segment: {segment!r}")
         decision = _classify_segment(
             tokens,
@@ -1408,24 +1588,316 @@ def emit(decision: Decision) -> None:
     )
 
 
+def _compile_message_name(payload: Dict[str, Any]) -> Optional[str]:
+    """Return the message filename when this tool call runs an envelope compile.
+
+    Recognizes ``oacp envelope compile <message> ...`` (and the script-path
+    spelling ``... envelope_compiler.py compile <message> ...``) anywhere in a
+    Bash command. Best-effort by design: a miss degrades to an unbound
+    envelope, never to a wrong binding — the compiler still checks the
+    claimed filename against the message it actually compiles.
+    """
+    if str(payload.get("tool_name") or "") != "Bash":
+        return None
+    command = str((payload.get("tool_input") or {}).get("command") or "")
+    if "compile" not in command:
+        return None
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return None
+    # Compile options that consume a value: their value token must never be
+    # mistaken for the positional message (mirrors the compiler's argparse
+    # surface — keep in sync with envelope_compiler.py's compile subparser).
+    value_options = {"--receiver", "--project", "--oacp-dir", "--config"}
+    for index, token in enumerate(tokens[:-1]):
+        # Front ends for the same compile operation: the `oacp` executable
+        # (any path spelling), the module CLI (`python3 -m oacp.cli`), and
+        # the compiler script invoked directly.
+        is_cli = (
+            token == "envelope"
+            and index > 0
+            and tokens[index - 1].endswith(("oacp", "oacp.cli"))
+        )
+        is_script = token.endswith("envelope_compiler.py")
+        if not (is_cli or is_script):
+            continue
+        rest = tokens[index + 1 :]
+        if not rest or rest[0] != "compile":
+            continue
+        skip_next = False
+        for operand in rest[1:]:
+            if skip_next:
+                skip_next = False
+                continue
+            if operand.startswith("-"):
+                if operand in value_options:
+                    skip_next = True
+                continue
+            return Path(operand).name
+    return None
+
+
+def _shared_state_affinity(
+    payload: Dict[str, Any], state_root: str, cwd: str
+) -> str:
+    """Classify a foreign-session tool call's relation to shared envelope state.
+
+    Returns ``"affine"`` when the call names the shared envelope state that
+    protects the bound session (an ``oacp envelope`` invocation, a protected
+    state filename anywhere in the command, or an operand resolving into the
+    receiver's ``state/`` directory — through any symlinked spelling),
+    ``"uncertain"`` when the target cannot be determined statically
+    (unresolved shell expansion, substitution, unparseable input), and
+    ``"clear"`` for ordinary foreign work. Callers deny mutation-capable
+    affine calls outright — the classifier itself allows some mutation
+    spellings (e.g. plain ``rm`` with a ``$VAR`` operand), so falling
+    through is not a safe backstop — but keep pre-envelope behavior for
+    provably read-only inspection (``_readonly_state_inspection``), keep
+    uncertain calls enforced without budget accounting, and bypass only
+    clear ones.
+    """
+    tool_name = str(payload.get("tool_name") or "")
+    tool_input = payload.get("tool_input") or {}
+    # Compare against the canonical spelling of the state root: OACP homes
+    # reached through a symlink otherwise never match a canonicalized
+    # candidate, and the guard would wave the real path through.
+    state_root = os.path.realpath(state_root)
+    if tool_name in ("Write", "Edit", "NotebookEdit"):
+        file_path = str(
+            tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+        )
+        if not file_path:
+            return "uncertain"
+        canonical = os.path.realpath(_normalize_file_path(file_path, cwd))
+        return "affine" if _within(canonical, state_root) else "clear"
+    if tool_name != "Bash":
+        return "clear"
+    command = str(tool_input.get("command") or "")
+    lowered = command.lower()
+    if "envelope" in lowered and (
+        "oacp" in lowered or "envelope_compiler" in lowered or "oacp-envelope" in lowered
+    ):
+        return "affine"
+    # Protected state filenames anywhere in the raw command — catches bare
+    # names after a `cd`, operands inside substitutions, and mv/rm targets.
+    if ENVELOPE_FILENAME in command or SESSION_CLAIM_STEM in command:
+        return "affine"
+    if state_root in command:
+        return "affine"
+    parse_failed = False
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        tokens = []
+        parse_failed = True
+    for token in tokens:
+        # An env-assignment token can smuggle the path in its value part.
+        value = token.split("=", 1)[1] if ENV_ASSIGNMENT_RE.match(token) else token
+        candidate = os.path.realpath(_normalize_file_path(value, cwd))
+        if _within(candidate, state_root):
+            return "affine"
+    if (
+        parse_failed
+        or "$" in command
+        or "`" in command
+        or EXPANSION_SYNTAX_RE.search(command)
+    ):
+        return "uncertain"
+    return "clear"
+
+
+# Commands that cannot mutate or execute anything when output redirection,
+# process substitution, and shell expansion are all absent (each is ruled
+# out before this set is consulted). Membership requires the tool to have
+# no write mode AND no command-execution flag in any common implementation:
+# `sed` (-i), `sort` (-o), `find` (-delete/-exec), `tee`, `rg` (--pre),
+# `less`/`more` (shell escapes, `less -o`), and `file` (-C writes a magic
+# cache) all stay out.
+READONLY_INSPECTION_COMMANDS = {
+    "cat",
+    "cd",
+    "cmp",
+    "diff",
+    "echo",
+    "grep",
+    "head",
+    "jq",
+    "ls",
+    "pwd",
+    "stat",
+    "tail",
+    "test",
+    "wc",
+}
+
+
+def _readonly_state_inspection(payload: Dict[str, Any]) -> bool:
+    """True when an affine Bash call is provably read-only inspection.
+
+    State relation is not the same as mutation capability: a foreign
+    session reading shared state (``oacp envelope show``, ``cat``/``stat``
+    on state files) cannot disturb the bound session, so it keeps
+    pre-envelope behavior. Conservative by construction — any parse
+    failure, unresolved expansion, redirection, process substitution, or
+    command outside a small inspection allowlist means the affine deny
+    stands: the exemption must prove the complete command cannot spawn,
+    embed, or execute a mutation.
+    """
+    if str(payload.get("tool_name") or "") != "Bash":
+        return False
+    command = str((payload.get("tool_input") or {}).get("command") or "")
+    if not command.strip():
+        return False
+    if "$" in command or "`" in command or ">" in command:
+        return False
+    # Process substitution executes its body: `cat <(rm state)` mutates
+    # under a read-only head. (`>(...)` is already caught by the `>` check.)
+    if "<(" in command:
+        return False
+    if EXPANSION_SYNTAX_RE.search(command):
+        return False
+    try:
+        segments = _segments_of(command)
+    except ValueError:
+        return False
+    for segment in segments:
+        try:
+            tokens = shlex.split(segment, posix=True)
+        except ValueError:
+            return False
+        while tokens and ENV_ASSIGNMENT_RE.match(tokens[0]):
+            tokens.pop(0)
+        if not tokens:
+            return False
+        if Path(tokens[0]).name in READONLY_INSPECTION_COMMANDS:
+            continue
+        if _is_envelope_show_invocation(tokens):
+            continue
+        return False
+    return True
+
+
+# `envelope show` takes exactly these value-carrying options (keep in sync
+# with envelope_compiler.py's common parser). Anything else denies, so a
+# grammar change fails safe.
+SHOW_VALUE_OPTIONS = {"--receiver", "--project", "--oacp-dir"}
+
+
+def _is_envelope_show_invocation(tokens: List[str]) -> bool:
+    """Anchored recognition of the read-only ``envelope show`` form.
+
+    The front end must be the command head — a subsequence scan would let
+    trailing spoof tokens bless a different leading command (`rm state
+    oacp envelope show`) — and the remaining argv must fit show's option
+    grammar exactly.
+    """
+    head = Path(tokens[0]).name
+    if head == "oacp":
+        if tokens[1:3] != ["envelope", "show"]:
+            return False
+        rest = tokens[3:]
+    elif head.startswith("python"):
+        if len(tokens) >= 3 and tokens[1] == "-m":
+            # Module names are exact — an endswith match would bless
+            # look-alike modules.
+            if tokens[2] not in ("oacp.cli", "oacp"):
+                return False
+            if tokens[3:5] != ["envelope", "show"]:
+                return False
+            rest = tokens[5:]
+        elif len(tokens) >= 2 and tokens[1].endswith("envelope_compiler.py"):
+            if tokens[2:3] != ["show"]:
+                return False
+            rest = tokens[3:]
+        else:
+            return False
+    elif tokens[0].endswith("envelope_compiler.py"):
+        if tokens[1:2] != ["show"]:
+            return False
+        rest = tokens[2:]
+    else:
+        return False
+    expect_value = False
+    for token in rest:
+        if expect_value:
+            expect_value = False
+            continue
+        if token in SHOW_VALUE_OPTIONS:
+            expect_value = True
+            continue
+        return False
+    return not expect_value
+
+
 def process(payload: Dict[str, Any], receiver: str = "claude") -> Decision:
     from _oacp_env import resolve_oacp_home
 
     cwd = str(payload.get("cwd") or os.getcwd())
+    session_id = str(payload.get("session_id") or "")
     project = find_project(Path(cwd))
     if project is None:
         return ALLOW
     oacp_root = resolve_oacp_home(cwd=Path(cwd))
     target = envelope_path(oacp_root, project, receiver)
-    if not target.is_file():
-        return ALLOW
 
     from envelope_compiler import envelope_lock
+
+    if not target.is_file():
+        # No active envelope: if this very call is about to compile one,
+        # record which session it belongs to. Only the hook sees the harness
+        # session id (it is absent from the Bash environment), so this
+        # observation is the binding's sole source. Best-effort: a failed
+        # claim write must never affect the call's outcome.
+        if session_id:
+            message_name = _compile_message_name(payload)
+            if message_name:
+                try:
+                    with envelope_lock(target):
+                        if not target.is_file():
+                            write_session_claim(target, session_id, message_name)
+                except OSError:
+                    pass
+        return ALLOW
 
     with envelope_lock(target):
         envelope = load_envelope(target)
         if envelope is None:
             return ALLOW
+        bound_session = str(envelope.get("session_id") or "")
+        foreign_session = bool(
+            bound_session and session_id and bound_session != session_id
+        )
+        if foreign_session:
+            # Session-bound envelope, different session: pre-envelope
+            # behavior — no classification, no files_touched accounting.
+            # An unbound envelope (legacy compile, or a caller the harness
+            # gave no session id) keeps the historical (project, agent)
+            # scope: enforcement never silently narrows.
+            affinity = _shared_state_affinity(payload, str(target.parent), cwd)
+            if affinity == "affine":
+                # Pure inspection of shared state cannot disturb the bound
+                # session — only mutation capability loses the bypass.
+                if _readonly_state_inspection(payload):
+                    return ALLOW
+                # A foreign session has no legitimate mutation of the state
+                # protecting the bound session — deny outright rather than
+                # trusting classification, which allows some mutation
+                # spellings (e.g. plain rm with a $VAR operand).
+                return _with_message_id(
+                    _deny(
+                        "this call can modify envelope state bound to another "
+                        "session; a concurrent session must not compile over, "
+                        "clear, or edit the active envelope (read-only "
+                        "inspection is exempt)"
+                    ),
+                    str(envelope.get("message_id") or ""),
+                )
+            if affinity == "clear":
+                return ALLOW
+            # Uncertain target (unresolved expansion / unparseable): stay
+            # enforced through full classification, but never charge the
+            # bound session's files_touched budget for foreign work.
         context = WorkspaceContext(
             oacp_root=oacp_root,
             project=str(envelope.get("project") or project),
@@ -1439,12 +1911,12 @@ def process(payload: Dict[str, Any], receiver: str = "claude") -> Decision:
             envelope,
             context,
         )
-        if decision.action == "allow" and decision.new_files:
+        if decision.action == "allow" and decision.new_files and not foreign_session:
             counters = envelope.setdefault("counters", {})
             touched = list(counters.get("files_touched") or [])
             counters["files_touched"] = sorted(set(touched) | set(decision.new_files))
             write_envelope(target, envelope)
-    return decision
+    return _with_message_id(decision, context.message_id)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

@@ -20,7 +20,9 @@ reason code ``envelope_compile_error`` instead of executing unenforced.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -28,7 +30,7 @@ import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional, Sequence
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from _oacp_constants import SPEC_VERSION, utc_now_iso
 from autonomy_gate import (
@@ -45,6 +47,15 @@ ENVELOPE_VERSION = 1
 ENVELOPE_SPEC_VERSION = SPEC_VERSION
 ENVELOPE_FILENAME = "active_envelope.json"
 ENVELOPE_COMPILE_ERROR = "envelope_compile_error"
+
+# Session-claim sidecar: the runtime hook records the compiling session's
+# identity here (it alone sees the harness session id, on the tool call that
+# runs the compile); the compiler consumes it and stamps the envelope. A
+# claim older than this window, or naming a different message file, is
+# ignored — the envelope then compiles unbound (session_id null) and the
+# hook enforces for every session, the pre-session-binding behavior.
+SESSION_CLAIM_FILENAME = "pending_session_claim.json"
+SESSION_CLAIM_MAX_AGE_SECONDS = 120
 
 # Safe-ID grammar for the message id embedded in the envelope. The runtime
 # adapter compares this id against audit-record content, and it must never
@@ -87,6 +98,7 @@ def build_envelope(
     project: str,
     message_path: Optional[Path] = None,
     now_iso: Optional[str] = None,
+    session_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Return an envelope dict for an admitted message, or raise
     :class:`EnvelopeCompileError`.
@@ -138,6 +150,7 @@ def build_envelope(
             "files_touched": [],
         },
         "enforcement": "hooks",
+        "session_id": session_id or None,
     }
 
 
@@ -146,6 +159,100 @@ def build_envelope(
 
 def envelope_path(oacp_root: Path, project: str, receiver: str) -> Path:
     return oacp_root / "projects" / project / "agents" / receiver / "state" / ENVELOPE_FILENAME
+
+
+def session_claim_path(envelope_target: Path, session_id: str) -> Path:
+    """Per-session claim file: concurrent sessions never overwrite each other.
+
+    Distinct files are what makes a same-message claim race *detectable* —
+    with one shared file, last-writer-wins would silently bind the compile
+    to whichever session claimed last.
+    """
+    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:12]
+    stem, suffix = SESSION_CLAIM_FILENAME.rsplit(".", 1)
+    return envelope_target.parent / f"{stem}.{digest}.{suffix}"
+
+
+def _iter_session_claim_paths(envelope_target: Path) -> List[Path]:
+    stem, suffix = SESSION_CLAIM_FILENAME.rsplit(".", 1)
+    return sorted(envelope_target.parent.glob(f"{stem}*.{suffix}"))
+
+
+def write_session_claim(
+    envelope_target: Path, session_id: str, message_name: str
+) -> None:
+    """Record the compiling session's identity for the compiler to consume.
+
+    Callers (the runtime hook) must hold ``envelope_lock(envelope_target)``.
+    The claim is advisory: losing or skipping it degrades to an unbound
+    envelope, never to a wrong binding.
+    """
+    claim = {
+        "session_id": session_id,
+        "message_name": message_name,
+        "claimed_at_utc": utc_now_iso(),
+    }
+    path = session_claim_path(envelope_target, session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(claim, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _parse_session_claim(raw: str, message_name: str) -> Tuple[str, Optional[str]]:
+    """Classify a claim against ``message_name``.
+
+    Returns ``("match", session_id)`` for a fresh claim naming the same
+    message, ``("other", None)`` for a fresh claim naming a different
+    message (a concurrent compile in flight — it belongs to that compile),
+    and ``("discard", None)`` for malformed or stale claims.
+    """
+    try:
+        claim = json.loads(raw)
+        if not isinstance(claim, dict):
+            return ("discard", None)
+        claimed_at = dt.datetime.strptime(
+            str(claim.get("claimed_at_utc") or ""), "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=dt.timezone.utc)
+        age = (dt.datetime.now(dt.timezone.utc) - claimed_at).total_seconds()
+        if not (0 <= age <= SESSION_CLAIM_MAX_AGE_SECONDS):
+            return ("discard", None)
+        if str(claim.get("message_name") or "") != message_name:
+            return ("other", None)
+        session_id = str(claim.get("session_id") or "")
+        return ("match", session_id) if session_id else ("discard", None)
+    except (ValueError, TypeError):
+        return ("discard", None)
+
+
+def consume_session_claim(envelope_target: Path, message_name: str) -> Optional[str]:
+    """Read, validate, and delete the pending claims for ``message_name``.
+
+    Returns a session id only when exactly one session holds a fresh claim
+    naming the same message file. Two *different* sessions with fresh claims
+    for the same message are indistinguishable to the compiler — the compile
+    could belong to either — so ambiguity degrades to an unbound envelope,
+    never to a wrong binding. Malformed and stale claims are garbage-collected;
+    a fresh claim naming a *different* message survives untouched so the
+    concurrent compile it belongs to can still bind. Callers must hold
+    ``envelope_lock``.
+    """
+    claimed_sessions = set()
+    for path in _iter_session_claim_paths(envelope_target):
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except (FileNotFoundError, OSError):
+            continue
+        verdict, session_id = _parse_session_claim(raw, message_name)
+        if verdict == "other":
+            continue
+        try:
+            path.unlink()
+        except (FileNotFoundError, OSError):
+            pass
+        if verdict == "match" and session_id:
+            claimed_sessions.add(session_id)
+    if len(claimed_sessions) == 1:
+        return claimed_sessions.pop()
+    return None
 
 
 @contextmanager
@@ -248,6 +355,7 @@ def _cmd_compile(args: argparse.Namespace, oacp_root: Path) -> int:
 
     target = envelope_path(oacp_root, project, args.receiver)
     with envelope_lock(target):
+        claimed_session = consume_session_claim(target, message_path.name)
         existing = load_envelope(target)
         if existing is not None:
             same_message = existing.get("message_id") == envelope["message_id"]
@@ -266,6 +374,14 @@ def _cmd_compile(args: argparse.Namespace, oacp_root: Path) -> int:
                     envelope["counters"]["files_touched"] = list(
                         prior["files_touched"]
                     )
+                # A recompile for the same task keeps its session binding:
+                # the documented --extend runs outside the bound session
+                # (post-re-auth, often a human terminal with no hook to
+                # write a fresh claim), and dropping the binding there
+                # would silently re-expose peer sessions to enforcement.
+                if claimed_session is None:
+                    claimed_session = str(existing.get("session_id") or "") or None
+        envelope["session_id"] = claimed_session
         write_envelope(target, envelope)
 
     if args.json:

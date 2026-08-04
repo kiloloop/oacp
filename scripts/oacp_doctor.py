@@ -495,14 +495,21 @@ def _validate_status_data(data: Any, agent_name: str) -> List[str]:
 
 
 def validate_autonomy_config_data(data: Any) -> List[str]:
-    """Validate agents/<receiver>/config.yaml autonomy settings."""
+    """Validate agents/<receiver>/config.yaml autonomy settings.
+
+    A config with no ``autonomy`` block preserves the same conservative
+    ``always_pause`` default as an absent config file. This lets independent
+    settings such as message signing be enabled without changing receiver
+    autonomy.
+    """
     errors: List[str] = []
     if not isinstance(data, dict):
         return ["root must be a YAML mapping"]
 
-    autonomy = data.get("autonomy")
-    if autonomy is None:
-        return ["missing required field 'autonomy'"]
+    if "autonomy" not in data:
+        return []
+
+    autonomy = data["autonomy"]
     if not isinstance(autonomy, dict):
         return ["field 'autonomy' must be a mapping"]
 
@@ -659,10 +666,17 @@ def check_autonomy(
                     message=f"{agent_name}/config.yaml — {'; '.join(errs)}",
                 ))
             else:
+                autonomy_suffix = (
+                    "; autonomy absent, defaults to always_pause"
+                    if isinstance(data, dict) and "autonomy" not in data
+                    else ""
+                )
                 cat.results.append(DoctorResult(
                     name=f"{agent_name}/config.yaml",
                     severity=Severity.ok,
-                    message=f"{agent_name}/config.yaml — valid",
+                    message=(
+                        f"{agent_name}/config.yaml — valid{autonomy_suffix}"
+                    ),
                 ))
 
         orphaned: List[str] = []
@@ -772,7 +786,112 @@ def check_agent_status(
 # ── Category 6: Trust Root ───────────────────────────────────────────────
 
 
-def check_trust(project_dir: Path) -> DoctorCategory:
+def _configured_enforce_receivers(
+    project_dir: Path,
+    *,
+    yaml_loader: Optional[Any] = None,
+) -> List[str]:
+    """Return receivers that explicitly configure signing enforcement."""
+    loader = yaml_loader
+    if loader is None:
+        yaml_mod = _try_yaml_import()
+        if yaml_mod is not None:
+            loader = yaml_mod.safe_load
+    if loader is None:
+        return []
+
+    agents_dir = project_dir / "agents"
+    if not agents_dir.is_dir():
+        return []
+
+    receivers: List[str] = []
+    for agent_dir in sorted(agents_dir.iterdir()):
+        config_path = agent_dir / "config.yaml"
+        if not agent_dir.is_dir() or not config_path.is_file():
+            continue
+        try:
+            config = loader(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue  # Schema checks report malformed configs separately.
+        if not isinstance(config, dict):
+            continue
+        signing = config.get("signing")
+        if not isinstance(signing, dict):
+            continue
+        mode = signing.get("verify_mode")
+        if isinstance(mode, str) and mode.strip().lower() == "enforce":
+            receivers.append(agent_dir.name)
+    return receivers
+
+
+def _trust_completeness(project_dir: Path) -> Optional[Dict[str, Any]]:
+    """Count both gap directions for every locally profiled receiver."""
+    try:
+        from message_verify import ALLOWED_SIGNERS_RELPATH, load_allowed_signers
+        from trust_root import (
+            CATALOG_RELPATH,
+            TrustRootError,
+            load_catalog,
+            receiver_pin_gaps,
+        )
+    except ImportError:  # pragma: no cover - packaging guard
+        return None
+
+    agents_dir = project_dir / "agents"
+    if not agents_dir.is_dir():
+        return None
+
+    try:
+        catalog = load_catalog(project_dir / CATALOG_RELPATH)
+    except TrustRootError:
+        return None  # The canonical drift report emits the blocking detail.
+
+    receiver_count = 0
+    catalog_to_pin = 0
+    pin_to_catalog = 0
+    receiver_gaps: Dict[str, Dict[str, int]] = {}
+    for agent_dir in sorted(agents_dir.iterdir()):
+        if not agent_dir.is_dir():
+            continue
+        pins_path = agent_dir / ALLOWED_SIGNERS_RELPATH
+        # Legacy workspaces may retain bare agent directories that were never
+        # configured as receivers. A receiver config or trust pins is the
+        # local profile signal; do not turn dormant directory stubs into
+        # enforce-readiness requirements.
+        if not (agent_dir / "config.yaml").is_file() and not pins_path.is_file():
+            continue
+        try:
+            pins = load_allowed_signers(pins_path)
+        except TrustRootError:
+            continue  # The canonical drift report emits the blocking detail.
+
+        receiver_count += 1
+        catalog_gap_kids, pin_gap_kids = receiver_pin_gaps(
+            catalog,
+            pins,
+            agent_dir.name,
+        )
+        receiver_catalog_to_pin = len(catalog_gap_kids)
+        receiver_pin_to_catalog = len(pin_gap_kids)
+        catalog_to_pin += receiver_catalog_to_pin
+        pin_to_catalog += receiver_pin_to_catalog
+        receiver_gaps[agent_dir.name] = {
+            "catalog_to_pin": receiver_catalog_to_pin,
+            "pin_to_catalog": receiver_pin_to_catalog,
+        }
+
+    return {
+        "receiver_count": receiver_count,
+        "catalog_to_pin": catalog_to_pin,
+        "pin_to_catalog": pin_to_catalog,
+        "receiver_gaps": receiver_gaps,
+    }
+
+
+def check_trust(
+    project_dir: Path,
+    yaml_loader: Optional[Any] = None,
+) -> DoctorCategory:
     """Check catalog-vs-pins drift for the project's signing trust root.
 
     Zero-authority semantics: an unpinned catalog
@@ -822,6 +941,51 @@ def check_trust(project_dir: Path) -> DoctorCategory:
             severity=severity,
             message=finding["message"],
             fix_hint=fix_hint,
+        ))
+
+    completeness = _trust_completeness(project_dir)
+    if completeness is not None:
+        catalog_to_pin = completeness["catalog_to_pin"]
+        pin_to_catalog = completeness["pin_to_catalog"]
+        gap_count = catalog_to_pin + pin_to_catalog
+        enforce_receivers = _configured_enforce_receivers(
+            project_dir,
+            yaml_loader=yaml_loader,
+        )
+        severity = Severity.ok
+        if gap_count:
+            severity = Severity.error if enforce_receivers else Severity.warn
+        enforcement_note = ""
+        if gap_count and enforce_receivers:
+            enforcement_note = (
+                "; blocking because verify_mode=enforce is configured for "
+                + ", ".join(enforce_receivers)
+            )
+        receiver_note = ""
+        receiver_gaps = completeness["receiver_gaps"]
+        if receiver_gaps:
+            receiver_note = "; per receiver: " + "; ".join(
+                f"{receiver}={counts['catalog_to_pin'] + counts['pin_to_catalog']} "
+                f"gap(s) ({counts['catalog_to_pin']} catalog-to-pin, "
+                f"{counts['pin_to_catalog']} pin-to-catalog)"
+                for receiver, counts in receiver_gaps.items()
+            )
+        cat.results.append(DoctorResult(
+            name="trust-pin-completeness",
+            severity=severity,
+            message=(
+                f"pin completeness — {gap_count} gap(s) across "
+                f"{completeness['receiver_count']} receiver(s): "
+                f"{catalog_to_pin} catalog-to-pin, "
+                f"{pin_to_catalog} pin-to-catalog{enforcement_note}"
+                f"{receiver_note}"
+            ),
+            fix_hint=(
+                "Run the pre-enforce re-pin sweep for peer catalog identities; "
+                "re-import or revoke active pins absent from the catalog"
+                if gap_count
+                else ""
+            ),
         ))
     return cat
 
@@ -1276,7 +1440,7 @@ def run_doctor(
             categories.append(check_schemas(project_dir, yaml_loader=yaml_loader))
             categories.append(check_autonomy(project_dir, yaml_loader=yaml_loader))
             categories.append(check_agent_status(project_dir, yaml_loader=yaml_loader, now_fn=now_fn))
-            categories.append(check_trust(project_dir))
+            categories.append(check_trust(project_dir, yaml_loader=yaml_loader))
 
     if include_memory:
         categories.append(check_memory_sync(oacp_dir, runner=runner, now_fn=now_fn))

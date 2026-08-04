@@ -14,14 +14,16 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 import yaml
 
-from _oacp_constants import REPO_SLUG_RE, SPEC_VERSION, utc_now_iso
+from _oacp_constants import REPO_SLUG_RE, SPEC_VERSION, locked_audit, utc_now_iso
 from validate_message import validate_message_dict
 
 
@@ -249,9 +251,81 @@ def load_yaml_file(path: Path) -> Dict[str, Any]:
     return data
 
 
+def write_audit_record(
+    audit_dir: Path,
+    decision: Dict[str, Any],
+    *,
+    config: Dict[str, Any],
+    message: Dict[str, Any],
+    message_path: Path,
+    policy_path: Path,
+    receiver: str,
+    now_utc: Optional[dt.datetime] = None,
+) -> Path:
+    """Persist a documented audit event without mutating evaluator stdout.
+
+    The evaluator's result block is admission-time state. Receivers still own
+    terminal result updates, human outcomes, and message-auth attachment.
+    """
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    created_at = utc_now_iso(now_utc)
+    autonomy = config.get("autonomy")
+    raw_thresholds = (
+        autonomy.get("auto_review_thresholds")
+        if isinstance(autonomy, dict)
+        else None
+    )
+    thresholds = {
+        key: raw_thresholds.get(key) if isinstance(raw_thresholds, dict) else None
+        for key in NUMERIC_THRESHOLD_KEYS
+    }
+    audit_record = dict(decision)
+    audit_record.setdefault("created_at_utc", created_at)
+    audit_record.setdefault("message_subject", message.get("subject"))
+    audit_record.setdefault("message_path", str(message_path))
+    audit_record.setdefault("policy_path", str(policy_path))
+    audit_record.setdefault("thresholds", thresholds)
+    audit_record.setdefault("runtime", {"agent": receiver, "model": None})
+
+    message_id = str(decision.get("message_id") or "missing-message-id")
+    safe_message_id = re.sub(r"[^A-Za-z0-9._-]", "_", message_id).strip("._")
+    safe_message_id = safe_message_id[:200] or "missing-message-id"
+    stamp = created_at.replace(":", "").replace("-", "")
+    audit_path = audit_dir / f"{stamp}_{safe_message_id}.yaml"
+    content = yaml.safe_dump(audit_record, sort_keys=False, allow_unicode=True)
+    temp_path: Optional[Path] = None
+
+    with locked_audit(audit_path):
+        if audit_path.exists():
+            raise FileExistsError(f"audit record already exists: {audit_path}")
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=audit_dir,
+                prefix=f".{audit_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+                temp_path = Path(handle.name)
+            os.chmod(temp_path, 0o600)
+            os.replace(temp_path, audit_path)
+        finally:
+            if temp_path is not None and temp_path.exists():
+                temp_path.unlink()
+
+    return audit_path
+
+
 def validate_receiver_config(config: Dict[str, Any]) -> List[str]:
     errors: List[str] = []
-    autonomy = config.get("autonomy")
+    if "autonomy" not in config:
+        return []
+
+    autonomy = config["autonomy"]
     if not isinstance(autonomy, dict):
         return ["field 'autonomy' must be a mapping"]
 
@@ -310,7 +384,8 @@ def receiver_policy(config: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     if errors:
         raise AutonomyConfigError("; ".join(errors))
 
-    autonomy = config["autonomy"]
+    autonomy = config.get("autonomy", {"default_mode": "always_pause"})
+    assert isinstance(autonomy, dict)  # Guaranteed by validation above.
     thresholds = autonomy.get("auto_review_thresholds") or {}
     continuation = autonomy.get("continuation_grants") or {}
     return str(autonomy.get("default_mode")), {
@@ -1580,17 +1655,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         config = load_yaml_file(args.config)
         message = load_yaml_file(args.message)
         actuals = load_yaml_file(args.actuals) if args.actuals else None
-        print(json.dumps(
-            evaluate_autonomy(
-                message,
-                config,
-                actuals,
+        decision = evaluate_autonomy(
+            message,
+            config,
+            actuals,
+            message_path=args.message,
+            audit_dir=args.audit_dir,
+            receiver=args.receiver,
+        )
+        if args.audit_dir is not None and decision.get("reason_codes") != [
+            "message_replayed"
+        ]:
+            write_audit_record(
+                args.audit_dir,
+                decision,
+                config=config,
+                message=message,
                 message_path=args.message,
-                audit_dir=args.audit_dir,
+                policy_path=args.config,
                 receiver=args.receiver,
-            ),
-            indent=2,
-        ))
+            )
+        elif args.audit_dir is not None:
+            print("NOTE: replay detected; audit record not written", file=sys.stderr)
+        print(json.dumps(decision, indent=2))
         return 0
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
