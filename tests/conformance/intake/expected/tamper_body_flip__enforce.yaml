@@ -1,0 +1,9 @@
+case: tamper_body_flip__enforce
+mode: enforce
+config: configs/enforce.yaml
+message: ../signing/messages/tamper_body_flip.yaml
+expected:
+  intake_action: reject
+  exit_code: 3
+  annotation_label: signed-INVALID
+  quarantined: true

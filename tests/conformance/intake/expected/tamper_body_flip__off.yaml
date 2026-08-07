@@ -1,0 +1,9 @@
+case: tamper_body_flip__off
+mode: off
+config: configs/off.yaml
+message: ../signing/messages/tamper_body_flip.yaml
+expected:
+  intake_action: proceed
+  exit_code: 0
+  annotation_label: null
+  quarantined: false

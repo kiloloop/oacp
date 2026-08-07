@@ -53,7 +53,7 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from autonomy_gate import DESTRUCTIVE_PATTERNS, load_yaml_file
 from envelope_compiler import (
@@ -339,6 +339,115 @@ def is_dependency_path(path: str) -> bool:
     if name in DEPENDENCY_FILENAMES:
         return True
     return name.startswith("requirements") and name.endswith(".txt")
+
+
+_TOML_TABLE_RE = re.compile(
+    r"^[ \t]*\[(?P<name>[^\[\]\r\n]+)\][ \t]*(?:#.*)?(?:\r?\n)?$"
+)
+_PROJECT_VERSION_RE = re.compile(
+    r"^(?P<prefix>[ \t]*version[ \t]*=[ \t]*)"
+    r"(?P<literal>\"(?:\\.|[^\"\\])*\"|'[^']*')"
+    r"(?P<suffix>[ \t]*(?:#.*)?)(?P<newline>\r?\n)?$"
+)
+
+
+def _canonicalize_project_version(document: str) -> Optional[Tuple[str, str]]:
+    """Replace the sole ``[project] version`` literal with a sentinel.
+
+    This is deliberately narrower than a general TOML parser: the exemption
+    must prove that every byte outside one ordinary version-string literal is
+    unchanged. Unsupported or ambiguous shapes fail closed and keep the
+    dependency-manifest denial.
+    """
+    lines = document.splitlines(keepends=True)
+    current_table: Optional[str] = None
+    match_index: Optional[int] = None
+    version_literal: Optional[str] = None
+    canonical_line: Optional[str] = None
+
+    for index, line in enumerate(lines):
+        table = _TOML_TABLE_RE.fullmatch(line)
+        if table:
+            current_table = table.group("name").strip()
+            continue
+        if line.lstrip().startswith("["):
+            current_table = None
+            continue
+        if current_table != "project":
+            continue
+        version = _PROJECT_VERSION_RE.fullmatch(line)
+        if version is None:
+            continue
+        if match_index is not None:
+            return None
+        match_index = index
+        version_literal = version.group("literal")
+        canonical_line = (
+            f"{version.group('prefix')}\"<oacp-project-version>\""
+            f"{version.group('suffix')}{version.group('newline') or ''}"
+        )
+
+    if match_index is None or version_literal is None or canonical_line is None:
+        return None
+    lines[match_index] = canonical_line
+    return "".join(lines), version_literal
+
+
+def _preview_file_tool_change(
+    tool_name: str,
+    tool_input: Dict[str, Any],
+    normalized_path: str,
+) -> Optional[Tuple[str, str]]:
+    """Reconstruct a file tool's pre/post documents without writing them."""
+    try:
+        before = Path(normalized_path).read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+
+    if tool_name == "Write":
+        content = tool_input.get("content")
+        if not isinstance(content, str):
+            return None
+        return before, content
+    if tool_name != "Edit":
+        return None
+
+    old = tool_input.get("old_string")
+    new = tool_input.get("new_string")
+    if not isinstance(old, str) or not isinstance(new, str) or not old:
+        return None
+    occurrences = before.count(old)
+    if occurrences == 0:
+        return None
+    replace_all = tool_input.get("replace_all") is True
+    if not replace_all and occurrences != 1:
+        return None
+    after = before.replace(old, new) if replace_all else before.replace(old, new, 1)
+    return before, after
+
+
+def _is_version_only_pyproject_edit(
+    tool_name: str,
+    tool_input: Dict[str, Any],
+    normalized_path: str,
+) -> bool:
+    """True only when an Edit/Write changes one project-version literal."""
+    if Path(normalized_path).name != "pyproject.toml":
+        return False
+    preview = _preview_file_tool_change(tool_name, tool_input, normalized_path)
+    if preview is None:
+        return False
+    before, after = preview
+    before_version = _canonicalize_project_version(before)
+    after_version = _canonicalize_project_version(after)
+    if before_version is None or after_version is None:
+        return False
+    before_canonical, before_literal = before_version
+    after_canonical, after_literal = after_version
+    return (
+        before_literal != after_literal
+        and before_canonical == after_canonical
+    )
 
 
 def _normalize_file_path(path: str, cwd: str) -> str:
@@ -1089,6 +1198,7 @@ def _gate_write_paths(
     counters: Dict[str, Any],
     verb: str,
     context: Optional[WorkspaceContext] = None,
+    dependency_exemption: Optional[Callable[[str], bool]] = None,
 ) -> Decision:
     """Shared secret/dependency/file-counter gate for file tools and Bash
     writes. Counts distinct paths cumulatively so a single call cannot jump
@@ -1110,13 +1220,6 @@ def _gate_write_paths(
                 f"{verb} of secret-class path {normalized!r} is outside the "
                 "envelope (touches_auth_config_or_secrets: false)"
             )
-        if not constraints.get("touches_dependencies") and is_dependency_path(
-            normalized
-        ):
-            return _deny(
-                f"{verb} of dependency manifest {normalized!r} is outside the "
-                "envelope (touches_dependencies: false)"
-            )
         if context is not None:
             canonical = os.path.realpath(normalized)
             if _within(canonical, os.path.realpath(str(context.state_dir()))):
@@ -1133,6 +1236,18 @@ def _gate_write_paths(
                             "the envelope (authority-bearing auth config; "
                             "touches_auth_config_or_secrets: false)"
                         )
+        if (
+            not constraints.get("touches_dependencies")
+            and is_dependency_path(normalized)
+            and not (
+                dependency_exemption is not None
+                and dependency_exemption(normalized)
+            )
+        ):
+            return _deny(
+                f"{verb} of dependency manifest {normalized!r} is outside the "
+                "envelope (touches_dependencies: false)"
+            )
         if is_bookkeeping_path(normalized, context):
             continue
         if normalized in touched or normalized in new_files:
@@ -1534,9 +1649,25 @@ def classify_file_write(
     constraints: Dict[str, Any],
     counters: Dict[str, Any],
     context: Optional[WorkspaceContext] = None,
+    tool_name: str = "",
+    tool_input: Optional[Dict[str, Any]] = None,
 ) -> Decision:
+    dependency_exemption: Optional[Callable[[str], bool]] = None
+    if tool_input is not None and tool_name in ("Edit", "Write"):
+        def version_exemption(normalized: str) -> bool:
+            return _is_version_only_pyproject_edit(
+                tool_name, tool_input, normalized
+            )
+
+        dependency_exemption = version_exemption
     return _gate_write_paths(
-        [file_path], cwd, constraints, counters, "edit", context
+        [file_path],
+        cwd,
+        constraints,
+        counters,
+        "edit",
+        context,
+        dependency_exemption,
     )
 
 
@@ -1561,7 +1692,15 @@ def classify(
         file_path = str(tool_input.get("file_path") or "")
         if not file_path:
             return ALLOW
-        return classify_file_write(file_path, cwd, constraints, counters, context)
+        return classify_file_write(
+            file_path,
+            cwd,
+            constraints,
+            counters,
+            context,
+            tool_name,
+            tool_input,
+        )
     if tool_name == "NotebookEdit":
         notebook = str(tool_input.get("notebook_path") or "")
         if not notebook:
@@ -1609,7 +1748,7 @@ def _compile_message_name(payload: Dict[str, Any]) -> Optional[str]:
     # Compile options that consume a value: their value token must never be
     # mistaken for the positional message (mirrors the compiler's argparse
     # surface — keep in sync with envelope_compiler.py's compile subparser).
-    value_options = {"--receiver", "--project", "--oacp-dir", "--config"}
+    value_options = {"--receiver", "--project", "--oacp-dir", "--config", "--audit"}
     for index, token in enumerate(tokens[:-1]):
         # Front ends for the same compile operation: the `oacp` executable
         # (any path spelling), the module CLI (`python3 -m oacp.cli`), and
@@ -1782,6 +1921,7 @@ def _readonly_state_inspection(payload: Dict[str, Any]) -> bool:
 # with envelope_compiler.py's common parser). Anything else denies, so a
 # grammar change fails safe.
 SHOW_VALUE_OPTIONS = {"--receiver", "--project", "--oacp-dir"}
+SHOW_FLAG_OPTIONS = {"-h", "--help"}
 
 
 def _is_envelope_show_invocation(tokens: List[str]) -> bool:
@@ -1823,10 +1963,18 @@ def _is_envelope_show_invocation(tokens: List[str]) -> bool:
         if expect_value:
             expect_value = False
             continue
-        if token in SHOW_VALUE_OPTIONS:
-            expect_value = True
+        if token in SHOW_FLAG_OPTIONS:
             continue
-        return False
+        option, separator, _value = token.partition("=")
+        matches = [
+            candidate
+            for candidate in SHOW_VALUE_OPTIONS
+            if candidate.startswith(option)
+        ]
+        if len(matches) != 1:
+            return False
+        if not separator:
+            expect_value = True
     return not expect_value
 
 

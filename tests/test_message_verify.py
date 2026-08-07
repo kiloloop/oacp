@@ -83,10 +83,10 @@ class TestVerifyModeKnob(unittest.TestCase):
             "off",
         )
 
-    def test_enforce_degrades_to_warn_never_rejecting(self) -> None:
+    def test_enforce_is_a_real_mode(self) -> None:
         self.assertEqual(
             load_verify_mode(self._write_config("signing:\n  verify_mode: enforce\n")),
-            "warn",
+            "enforce",
         )
 
     def test_garbage_and_malformed_degrade_to_off(self) -> None:

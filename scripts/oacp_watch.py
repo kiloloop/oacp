@@ -81,14 +81,14 @@ def _resolve_oacp_home(explicit: Optional[str] = None) -> Path:
     return resolve_oacp_home(explicit)
 
 
-def _load_yaml_mapping(path: Path) -> Dict[str, Any]:
-    raw = path.read_text(encoding="utf-8")
+def _parse_yaml_mapping_bytes(raw: bytes, path: Path) -> Dict[str, Any]:
+    text = raw.decode("utf-8")
     if yaml is not None:
-        loaded = yaml.load(raw, Loader=yaml.BaseLoader)
+        loaded = yaml.load(text, Loader=yaml.BaseLoader)
     else:
         from validate_message import _parse_simple_yaml
 
-        loaded = _parse_simple_yaml(raw)
+        loaded = _parse_simple_yaml(text)
 
     if loaded is None:
         return {}
@@ -97,18 +97,56 @@ def _load_yaml_mapping(path: Path) -> Dict[str, Any]:
     return loaded
 
 
-def _message_metadata(project: str, agent: str, path: Path) -> Dict[str, str]:
-    data = _load_yaml_mapping(path)
-    return {
+def _message_metadata(
+    project: str,
+    agent: str,
+    path: Path,
+    verification: Dict[str, Any],
+) -> Dict[str, str]:
+    """Event metadata for one inbox message, verify-before-parse.
+
+    The watcher surfaces from/type/subject/priority into events consumed
+    by agent runtimes, so it honors the same receive contract as the
+    lister: under ``enforce`` an unverified message becomes a HELD event
+    built from the filename only — none of its (attacker-controlled)
+    fields are parsed or surfaced.
+    """
+    from message_verify import read_verified_inbox_message
+
+    read = read_verified_inbox_message(
+        path, verification, _parse_yaml_mapping_bytes
+    )
+    if read["raw"] is None or (read["data"] is None and not read["held"]):
+        raise ValueError(read["error"] or f"unreadable message: {path}")
+    metadata = {
         "event": "new_message",
         "project": project,
         "agent": agent,
         "file": path.name,
-        "from": str(data.get("from", "")).strip() or "?",
-        "type": str(data.get("type", "")).strip() or "?",
-        "subject": str(data.get("subject", "")).strip() or "(no subject)",
-        "priority": str(data.get("priority", "")).strip() or "?",
     }
+    if read["held"]:
+        metadata.update(
+            {
+                "from": "?",
+                "type": "?",
+                "subject": "(held: unverified under enforce)",
+                "priority": "?",
+                "auth": read["auth"]["status"],
+            }
+        )
+        return metadata
+    data = read["data"]
+    metadata.update(
+        {
+            "from": str(data.get("from", "")).strip() or "?",
+            "type": str(data.get("type", "")).strip() or "?",
+            "subject": str(data.get("subject", "")).strip() or "(no subject)",
+            "priority": str(data.get("priority", "")).strip() or "?",
+        }
+    )
+    if read["auth"] is not None:
+        metadata["auth"] = read["auth"]["status"]
+    return metadata
 
 
 def _error_event(
@@ -299,17 +337,31 @@ def _write_state(state_file: Path, payload: Dict[str, Any]) -> None:
 
 def _scan_target(
     target: WatchTarget,
+    oacp_dir: Optional[str] = None,
 ) -> tuple[Dict[str, Dict[str, str]], Dict[str, float], List[Dict[str, Any]]]:
+    from message_verify import receiver_intake_context
+
     errors: List[Dict[str, Any]] = []
     current_messages: Dict[str, Dict[str, str]] = {}
     mtimes: Dict[str, float] = {}
+    # Per-scan context: config edits (mode flips, re-signs) apply on the
+    # next cycle, and an unauthorized config fails the scan closed to
+    # enforce (held events) rather than parsing anything.
+    verification = receiver_intake_context(
+        target.inbox_dir.parent,
+        receiver=target.agent,
+        project=target.project,
+        oacp_dir=oacp_dir,
+    )
     for path in sorted(
         candidate
         for candidate in target.inbox_dir.iterdir()
         if candidate.is_file() and candidate.suffix == ".yaml"
     ):
         try:
-            metadata = _message_metadata(target.project, target.agent, path)
+            metadata = _message_metadata(
+                target.project, target.agent, path, verification
+            )
             mtime = path.stat().st_mtime
         except Exception as exc:
             errors.append(
@@ -329,6 +381,8 @@ def _scan_target(
             "subject": metadata["subject"],
             "priority": metadata["priority"],
         }
+        if "auth" in metadata:
+            current_messages[path.name]["auth"] = metadata["auth"]
         mtimes[path.name] = mtime
     return current_messages, mtimes, errors
 
@@ -452,7 +506,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 json_output=args.json_output,
             )
             continue
-        current_messages, mtimes, scan_errors = _scan_target(target)
+        current_messages, mtimes, scan_errors = _scan_target(target, args.oacp_dir)
         if scan_errors:
             had_errors = True
             for event in scan_errors:

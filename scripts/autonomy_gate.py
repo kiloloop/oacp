@@ -19,7 +19,7 @@ import re
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
 
 import yaml
 
@@ -30,6 +30,16 @@ from validate_message import validate_message_dict
 VALID_MODES = {"always_pause", "auto_review"}
 POLICY_ACTIONS = {"pause", "allow_pr_artifacts", "allow"}
 AUTONOMY_AUDIT_SCHEMA_VERSION = 2
+# The serving-model signal a session exports for audit instrumentation. This
+# names the model actually serving the invoking session — never the model a
+# configuration *requested*, which can be silently served by a different
+# model, alias, or context variant.
+RUNTIME_MODEL_ENV_VAR = "OACP_RUNTIME_MODEL"
+# `model[context]` suffix form (e.g. `claude-sonnet-5[1m]`): same weights,
+# different serving context window. Split at write time into the base id plus
+# a separate `model_context` field so per-model grouping never divides one
+# model across suffix variants.
+_MODEL_CONTEXT_SUFFIX_RE = re.compile(r"^(?P<base>[^\[\]]+)\[(?P<context>[^\[\]]+)\]$")
 NUMERIC_THRESHOLD_KEYS = ("max_estimated_minutes", "max_expected_files_touched")
 POLICY_THRESHOLD_KEYS = (
     "destructive_ops",
@@ -135,6 +145,7 @@ PINNED_REASON_CODES = frozenset({
     "message_replayed",
     "message_valid",
     "mode_always_pause",
+    "policy_auth_invalid",
     "public_visibility_pause",
     "risk_obvious_no_profile",
     "risk_threshold_passed",
@@ -152,10 +163,24 @@ GUARDRAILS_FENCE_RE = re.compile(
     r"(?P<content>.*?)^[ \t]*```[ \t]*(?:\n|$)"
 )
 NEGATION_PREFIX_RE = re.compile(
-    r"\b(?:no|not|never|do\s+not|does\s+not|don't|doesn't)\b"
+    r"\b(?:"
+    r"no|not|never|do\s+not|does\s+not|don't|doesn't|"
+    r"out\s+of\s+scope|exclude(?:s|d)?|avoid|refrain\s+from|"
+    r"prohibited|forbidden|skip|without"
+    r")\b"
     r"[^.!?;\n]{0,160}$",
     re.IGNORECASE,
 )
+BLOCK_NEGATION_PREFIX_RE = re.compile(
+    r"\b(?:"
+    r"no|not|never|do\s+not|does\s+not|don't|doesn't|"
+    r"out\s+of\s+scope|exclude(?:s|d)?|avoid|refrain\s+from|"
+    r"prohibited|forbidden"
+    r")\b"
+    r"[^.!?;\n]{0,160}$",
+    re.IGNORECASE,
+)
+ATX_HEADING_RE = re.compile(r"^[ \t]{0,3}#{1,6}(?:[ \t]+|$)")
 DESTRUCTIVE_PATTERNS = (
     ("rm -rf", re.compile(r"(?<!\w)rm\s+-rf(?!\w)", re.IGNORECASE)),
     ("--force", re.compile(r"(?<![\w-])--force(?![\w-])", re.IGNORECASE)),
@@ -251,6 +276,88 @@ def load_yaml_file(path: Path) -> Dict[str, Any]:
     return data
 
 
+def _parse_yaml_mapping(raw: bytes, path: Path) -> Dict[str, Any]:
+    """Parse a mapping from an already-read snapshot (never re-reads *path*)."""
+    data = yaml.safe_load(raw.decode("utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} must contain a YAML mapping")
+    return data
+
+
+def normalize_runtime_model(value: Any) -> Tuple[Optional[str], Optional[str]]:
+    """Return ``(normalized model id, context marker)`` for a raw model value.
+
+    Write-time normalization covers the drift classes that corrupt per-model
+    grouping: case variants fold to lowercase, and a ``[context]`` suffix
+    splits into the base id plus a separate context marker. Empty or
+    whitespace-only input normalizes to ``(None, None)``.
+    """
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return None, None
+    context: Optional[str] = None
+    match = _MODEL_CONTEXT_SUFFIX_RE.fullmatch(text)
+    if match:
+        text = match.group("base").strip()
+        context = match.group("context").strip().lower() or None
+    return text.lower() or None, context
+
+
+def resolve_runtime_block(
+    supplied: Any,
+    receiver: str,
+    env: Optional[Mapping[str, str]] = None,
+) -> Dict[str, Any]:
+    """Resolve the audit record's ``runtime`` block at the writer.
+
+    The serving model resolves caller-first (an explicit ``runtime.model``
+    already on the decision), then from the ``OACP_RUNTIME_MODEL``
+    environment variable the invoking session exports; both are normalized
+    before the record is written, with ``model_source`` naming the
+    provenance and ``model_raw`` preserving any input the normalization
+    changed. With no signal the field is an explicit unknown — ``None``
+    plus a ``model_unknown_reason`` — never a silent default. The
+    *requested* model (harness configuration, settings files) is
+    deliberately never consulted: a request can be served by a different
+    model, and filling from it would reintroduce the confound this field
+    exists to remove.
+    """
+    env_map: Mapping[str, str] = os.environ if env is None else env
+    runtime: Dict[str, Any] = dict(supplied) if isinstance(supplied, dict) else {}
+    runtime["agent"] = str(runtime.get("agent") or receiver)
+    for stale_key in ("model_source", "model_context", "model_raw", "model_unknown_reason"):
+        runtime.pop(stale_key, None)
+
+    raw = runtime.get("model")
+    source: Optional[str] = None
+    if str(raw if raw is not None else "").strip():
+        source = "caller"
+    else:
+        raw = env_map.get(RUNTIME_MODEL_ENV_VAR)
+        if str(raw if raw is not None else "").strip():
+            source = f"env:{RUNTIME_MODEL_ENV_VAR}"
+
+    model, context = normalize_runtime_model(raw)
+    if model is None:
+        runtime["model"] = None
+        runtime["model_source"] = None
+        runtime["model_unknown_reason"] = (
+            "no serving-model signal: decision carried no runtime.model and "
+            f"{RUNTIME_MODEL_ENV_VAR} is unset; the requested model is never "
+            "used as a fallback"
+        )
+        return runtime
+
+    raw_text = str(raw)
+    runtime["model"] = model
+    runtime["model_source"] = source
+    if context is not None:
+        runtime["model_context"] = context
+    if raw_text != model:
+        runtime["model_raw"] = raw_text
+    return runtime
+
+
 def write_audit_record(
     audit_dir: Path,
     decision: Dict[str, Any],
@@ -267,6 +374,29 @@ def write_audit_record(
     The evaluator's result block is admission-time state. Receivers still own
     terminal result updates, human outcomes, and message-auth attachment.
     """
+    result_block = decision.get("result")
+    completion_kind = (
+        result_block.get("completion_kind") if isinstance(result_block, dict) else None
+    )
+    if completion_kind not in PINNED_COMPLETION_KINDS:
+        # Caller-supplied keys merge into evaluator-written records; without
+        # this write-time check an off-enum kind lands in the durable record
+        # and every downstream reader must special-case it.
+        raise ValueError(
+            "refusing to write audit record: result.completion_kind "
+            f"{completion_kind!r} is not a pinned completion kind "
+            f"({', '.join(sorted(PINNED_COMPLETION_KINDS))})"
+        )
+    if decision.get("decision") == "auto_accepted" and decision.get("scope_envelope") is None:
+        # An admitted decision always carries a bound: profiled admissions
+        # envelope from the profile, profileless admissions from the
+        # documented default. Null-on-admitted is a schema violation, not a
+        # persistable state.
+        raise ValueError(
+            "refusing to write audit record: an admitted decision must "
+            "carry a scope envelope (scope_envelope: null on an admitted "
+            "record is a schema violation)"
+        )
     audit_dir.mkdir(parents=True, exist_ok=True)
     created_at = utc_now_iso(now_utc)
     autonomy = config.get("autonomy")
@@ -285,7 +415,9 @@ def write_audit_record(
     audit_record.setdefault("message_path", str(message_path))
     audit_record.setdefault("policy_path", str(policy_path))
     audit_record.setdefault("thresholds", thresholds)
-    audit_record.setdefault("runtime", {"agent": receiver, "model": None})
+    audit_record["runtime"] = resolve_runtime_block(
+        audit_record.get("runtime"), receiver=receiver
+    )
 
     message_id = str(decision.get("message_id") or "missing-message-id")
     safe_message_id = re.sub(r"[^A-Za-z0-9._-]", "_", message_id).strip("._")
@@ -480,6 +612,40 @@ def normalize_scope_envelope(profile: Dict[str, Any]) -> Dict[str, Any]:
     return envelope
 
 
+# Documented default bounds for profileless admitted requests
+# (brainstorm-class): reply-only work, every risk flag false. The
+# profile exemption is admission-only — the sender needn't author a
+# profile, but the bound always exists.
+DEFAULT_PROFILELESS_ENVELOPE_MINUTES = 25
+DEFAULT_PROFILELESS_ENVELOPE_FILES = 2
+SCOPE_ENVELOPE_SOURCE_PROFILE = "task_profile"
+SCOPE_ENVELOPE_SOURCE_DEFAULT = "default_profileless"
+
+
+def default_scope_envelope(message: Dict[str, Any]) -> Dict[str, Any]:
+    """Construct the documented default envelope for a profileless request.
+
+    Bounds: 25 minutes / 2 files / reply-only (`sends_oacp_reply_only`
+    true, every other capability and risk flag false). `risk_tier` mirrors
+    the message's own declared `priority` when it is a valid tier — it is
+    the sender's severity claim — else `P2`. A sender that legitimately
+    needs more attaches a voluntary task_profile (the supported override
+    path); the profile envelope then replaces this default entirely.
+    """
+    priority = str(message.get("priority") or "").strip()
+    envelope: Dict[str, Any] = {
+        "estimated_minutes": DEFAULT_PROFILELESS_ENVELOPE_MINUTES,
+        "expected_files_touched": DEFAULT_PROFILELESS_ENVELOPE_FILES,
+        "risk_tier": priority if priority in {"P0", "P1", "P2", "P3"} else "P2",
+        "target_repo": "",
+    }
+    for key in LEGACY_PROFILE_BOOL_FIELDS + SIDE_EFFECT_BOOL_FIELDS:
+        envelope[key] = False
+    envelope["sends_oacp_reply_only"] = True
+    envelope["continuation_grants"] = {}
+    return envelope
+
+
 def first_match(
     patterns: Sequence[Tuple[str, re.Pattern[str]]],
     body: str,
@@ -491,9 +657,13 @@ def first_match(
 
 
 def canonical_policy_sha256(config: Dict[str, Any]) -> str:
-    """Hash parsed policy data so comments and formatting do not create drift."""
+    """Hash parsed policy data so comments and formatting do not create drift.
+
+    The ``auth`` trailer key is excluded: it is authorization metadata, and
+    the hash must name the same policy content signed or unsigned.
+    """
     serialized = json.dumps(
-        config,
+        {key: value for key, value in config.items() if key != "auth"},
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
@@ -519,7 +689,19 @@ def _match_is_negated(body: str, match: re.Match[str]) -> bool:
     prefix = body[:match.start()]
     boundary = max(prefix.rfind(mark) for mark in ("\n", ".", "!", "?", ";", "—", "–"))
     clause_prefix = prefix[boundary + 1:]
-    return NEGATION_PREFIX_RE.search(clause_prefix) is not None
+    if NEGATION_PREFIX_RE.search(clause_prefix) is not None:
+        return True
+
+    match_line_start = prefix.rfind("\n") + 1
+    preceding_lines = body[:match_line_start].splitlines()
+    for line in reversed(preceding_lines):
+        stripped = line.strip()
+        if not stripped:
+            return False
+        is_heading = bool(ATX_HEADING_RE.match(line)) or stripped.endswith(":")
+        if is_heading:
+            return BLOCK_NEGATION_PREFIX_RE.search(stripped) is not None
+    return False
 
 
 def _gate3_body(body: str, notes: List[Dict[str, str]]) -> str:
@@ -583,8 +765,16 @@ def _first_sensitive_match(
 def message_sha256(
     message: Dict[str, Any],
     message_path: Optional[Path] = None,
+    message_raw: Optional[bytes] = None,
 ) -> str:
-    """Return the raw YAML hash when a path is available, otherwise a stable fallback."""
+    """Hash the message: snapshot bytes first, then path, then a stable fallback.
+
+    ``message_raw`` is the caller's verified snapshot — when provided, the
+    recorded hash names exactly the bytes that were verified and parsed,
+    never a fresh (swappable) read of the path.
+    """
+    if message_raw is not None:
+        return hashlib.sha256(message_raw).hexdigest()
     if message_path is not None:
         return hashlib.sha256(message_path.read_bytes()).hexdigest()
     serialized = yaml.safe_dump(message, sort_keys=True, allow_unicode=False).encode("utf-8")
@@ -1286,12 +1476,25 @@ def evaluate_autonomy(
     audit_dir: Optional[Path] = None,
     receiver: str = "codex",
     now_utc: Optional[dt.datetime] = None,
+    policy_auth: Optional[Dict[str, Any]] = None,
+    message_raw: Optional[bytes] = None,
 ) -> Dict[str, Any]:
-    """Evaluate a message/config pair and return a canonical decision dict."""
-    msg_hash = message_sha256(message, message_path)
+    """Evaluate a message/config pair and return a canonical decision dict.
+
+    ``policy_auth`` is the policy-file authorization block produced by
+    `policy_signing.verify_policy_data` on the receiver config snapshot.
+    When supplied it is recorded into the decision, and an ``invalid``
+    status fails closed before any gate consumes the (untrusted) config —
+    the record then carries ``policy_auth_invalid``, distinguishable from
+    both a missing policy and a merely malformed one. ``message_raw`` is
+    the verified message snapshot; when supplied, the recorded
+    ``message_sha256`` names those exact bytes.
+    """
+    msg_hash = message_sha256(message, message_path, message_raw)
     policy_hash = canonical_policy_sha256(config)
     logged_notes: List[Dict[str, str]] = []
     profile_snapshot: Optional[Dict[str, Any]] = None
+    envelope_source: Optional[str] = None
 
     def finish(decision: Dict[str, Any]) -> Dict[str, Any]:
         reason_codes = list(decision.get("reason_codes") or [])
@@ -1306,6 +1509,14 @@ def evaluate_autonomy(
         decision["schema_version"] = AUTONOMY_AUDIT_SCHEMA_VERSION
         decision["spec_version"] = SPEC_VERSION
         decision["evaluator"] = evaluator_provenance()
+        if policy_auth is not None:
+            # The authorized-policy identity: together with policy_sha256
+            # this commits the record to WHO authorized the policy, not just
+            # which bytes ran.
+            decision["policy_auth"] = {
+                key: policy_auth.get(key)
+                for key in ("status", "signer_agent", "signer_kid", "reason")
+            }
         decision["receiver"] = receiver
         decision["sender"] = message.get("from")
         decision["message_id"] = message.get("id")
@@ -1313,6 +1524,12 @@ def evaluate_autonomy(
         decision["conversation_id"] = message.get("conversation_id")
         decision["parent_message_id"] = message.get("parent_message_id")
         decision.setdefault("task_profile", profile_snapshot)
+        # Every envelope names where it came from; a null envelope (only
+        # ever legitimate on a pause taken before construction) names
+        # nothing.
+        decision["scope_envelope_source"] = (
+            envelope_source if decision.get("scope_envelope") is not None else None
+        )
         decision.setdefault(
             "breached",
             reason_codes if decision.get("decision") == "paused" else [],
@@ -1363,6 +1580,11 @@ def evaluate_autonomy(
             )
         return finish(decision)
 
+    if policy_auth is not None and policy_auth.get("status") == "invalid":
+        # Tampered policy fails closed before anything reads it — including
+        # its own autonomy block and verify mode.
+        return paused("always_pause", ["policy_auth_invalid"], "config_malformed")
+
     try:
         mode, policy = receiver_policy(config)
     except AutonomyConfigError:
@@ -1401,13 +1623,19 @@ def evaluate_autonomy(
     envelope: Optional[Dict[str, Any]] = None
     profile_required_reason = "task_profile_present"
     if profile is None:
+        # Admission-only exemption: the exempt type skips the authoring
+        # requirement, never the bound — the receiver constructs the
+        # documented default envelope instead of running unbounded.
         profile_required_reason = "task_profile_not_required"
         logged_notes.extend(side_effect_notes_for_allowed_type(body))
+        envelope = default_scope_envelope(message)
+        envelope_source = SCOPE_ENVELOPE_SOURCE_DEFAULT
     else:
         try:
             envelope = normalize_scope_envelope(profile)
         except TaskProfileError:
             return paused(mode, ["task_profile_unparsable"])
+        envelope_source = SCOPE_ENVELOPE_SOURCE_PROFILE
 
     gate3_body = _gate3_body(body, logged_notes)
 
@@ -1527,13 +1755,18 @@ def evaluate_autonomy(
 
     grant_result: Dict[str, Any] = {"present": False, "enabled": False}
     if envelope is not None:
-        grant_result = evaluate_continuation_grant(
-            message,
-            envelope,
-            bool(policy["continuation_grants_enabled"]),
-            audit_dir=audit_dir,
-            receiver=receiver,
-        )
+        if envelope_source == SCOPE_ENVELOPE_SOURCE_PROFILE:
+            # Continuation grants are a sender-declared surface; a default
+            # envelope declares nothing, so grant interplay is reachable on
+            # exempt types only through a voluntary profile (the supported
+            # override path).
+            grant_result = evaluate_continuation_grant(
+                message,
+                envelope,
+                bool(policy["continuation_grants_enabled"]),
+                audit_dir=audit_dir,
+                receiver=receiver,
+            )
         declaration_breaches = _profile_declaration_errors(envelope)
         if declaration_breaches:
             return paused(
@@ -1643,17 +1876,89 @@ def evaluate_autonomy(
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Exit codes: 0 decision evaluated (including fail-closed pauses) ·
+    2 usage/IO error · 3 intake rejected under ``verify_mode: enforce``
+    (message quarantined, nothing evaluated)."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--message", required=True, type=Path)
     parser.add_argument("--actuals", type=Path)
     parser.add_argument("--audit-dir", type=Path)
     parser.add_argument("--receiver", default="codex")
+    parser.add_argument(
+        "--oacp-dir",
+        default=None,
+        help="Override OACP home directory (keystore + policy trust anchor)",
+    )
     args = parser.parse_args(argv)
 
     try:
-        config = load_yaml_file(args.config)
-        message = load_yaml_file(args.message)
+        # Single-read snapshot discipline: every security-sensitive input
+        # (config, message) is read exactly once into a bounded snapshot;
+        # verification and evaluation both consume THAT snapshot. Nothing
+        # after this point re-reads a path — a file swapped on disk after
+        # its verification cannot reach the decision logic.
+        import policy_signing
+        from _oacp_env import resolve_oacp_home
+        from message_verify import (
+            intake_verify,
+            read_message_bounded,
+            verify_mode_from_config,
+        )
+
+        home = (
+            resolve_oacp_home(args.oacp_dir)
+            if args.oacp_dir
+            else resolve_oacp_home()
+        )
+        # Policy authorization runs before ANYTHING parses the config: a
+        # tampered config must not get to choose its own verify mode.
+        config_context = policy_signing.derive_policy_context(
+            args.config,
+            home,
+            receiver=args.receiver,
+            kind=policy_signing.POLICY_KIND_RECEIVER_CONFIG,
+        )
+        config_raw = policy_signing.read_policy_bounded(args.config)
+        policy_auth = policy_signing.verify_policy_data(
+            config_raw, home, receiver=args.receiver, context=config_context
+        )
+        config = _parse_yaml_mapping(config_raw, args.config)
+        # The auth trailer is authorization metadata, not policy content —
+        # policy_sha256 must name the same bytes signed and unsigned.
+        config.pop("auth", None)
+
+        message_raw = read_message_bounded(args.message)
+        if policy_auth["status"] != policy_signing.POLICY_STATUS_INVALID:
+            # Verified intake runs under the (now authorized) config
+            # snapshot. A rejected message is quarantined, never evaluated.
+            intake = intake_verify(
+                args.message,
+                args.config,
+                receiver=args.receiver,
+                oacp_dir=args.oacp_dir,
+                message_raw=message_raw,
+                verify_mode=verify_mode_from_config(config),
+            )
+            if intake["annotation"]:
+                print(intake["annotation"], file=sys.stderr)
+            if intake["action"] == "reject":
+                print(
+                    json.dumps(
+                        {
+                            "decision": "intake_rejected",
+                            "verify_mode": intake["mode"],
+                            "receiver": args.receiver,
+                            "message_path": str(args.message),
+                            "message_auth": intake["message_auth"],
+                            "quarantine_copy": intake["quarantine_copy"],
+                        },
+                        indent=2,
+                    )
+                )
+                return 3
+
+        message = _parse_yaml_mapping(message_raw, args.message)
         actuals = load_yaml_file(args.actuals) if args.actuals else None
         decision = evaluate_autonomy(
             message,
@@ -1662,6 +1967,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             message_path=args.message,
             audit_dir=args.audit_dir,
             receiver=args.receiver,
+            policy_auth=policy_auth,
+            message_raw=message_raw,
         )
         if args.audit_dir is not None and decision.get("reason_codes") != [
             "message_replayed"

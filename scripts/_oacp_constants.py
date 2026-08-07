@@ -15,7 +15,7 @@ REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 # The protocol spec version the tooling implements. Stamped into audit
 # records, compiled envelopes, and workspace.json at init so every artifact
 # names the contract it was produced under.
-SPEC_VERSION = "0.4.1"
+SPEC_VERSION = "0.4.2"
 CREATABLE_RUNTIMES = ("claude", "codex", "cursor", "gemini")
 ALL_RUNTIMES = ("claude", "codex", "cursor", "gemini", "human", "unknown")
 CANONICAL_CAPABILITIES = {
@@ -33,6 +33,11 @@ CANONICAL_CAPABILITIES = {
     "async_tasks",
     "image_generation",
 }
+
+
+def is_agent_dir(path: Path) -> bool:
+    """Return whether *path* is a visible agent directory."""
+    return path.is_dir() and not path.name.startswith(".")
 
 
 def utc_now_iso(now: dt.datetime | None = None) -> str:

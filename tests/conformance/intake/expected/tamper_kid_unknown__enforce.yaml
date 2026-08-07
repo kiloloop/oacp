@@ -1,0 +1,9 @@
+case: tamper_kid_unknown__enforce
+mode: enforce
+config: configs/enforce.yaml
+message: ../signing/messages/tamper_kid_unknown.yaml
+expected:
+  intake_action: reject
+  exit_code: 3
+  annotation_label: signed-unknown-kid
+  quarantined: true

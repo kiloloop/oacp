@@ -649,6 +649,41 @@ class TestRunDoctor(unittest.TestCase):
             self.assertIn("Agent Status", cat_names)
             self.assertIn("Trust Root", cat_names)
 
+    def test_hidden_agent_scaffolding_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            hub_dir = Path(td)
+            project_dir = hub_dir / "projects" / "testproj"
+            project_dir.mkdir(parents=True)
+            _write(project_dir / "workspace.json", '{"name": "testproj"}')
+            (project_dir / "agents" / "claude" / "inbox").mkdir(parents=True)
+            (project_dir / "agents" / ".claude" / ".cc-writes").mkdir(
+                parents=True
+            )
+
+            cats = run_doctor(
+                oacp_dir=hub_dir,
+                project="testproj",
+                runner=_fake_runner(),
+                which_fn=_fake_which({"git", "python3", "gh"}),
+            )
+
+            workspace = next(cat for cat in cats if cat.name == "Workspace")
+            agent_result = next(
+                result for result in workspace.results if result.name == "agents/"
+            )
+            self.assertEqual(agent_result.message, "agents/ directory — 1 agent(s)")
+
+            diagnostics = "\n".join(
+                " ".join(
+                    part
+                    for part in (result.name, result.message, result.fix_hint or "")
+                    if part
+                )
+                for category in cats
+                for result in category.results
+            )
+            self.assertNotIn(".claude", diagnostics)
+
     def test_include_memory_adds_memory_sync_category(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             hub_dir = Path(td)

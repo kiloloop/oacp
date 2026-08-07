@@ -1,0 +1,9 @@
+case: unsigned_notification__warn
+mode: warn
+config: configs/warn.yaml
+message: ../signing/messages/unsigned_notification.yaml
+expected:
+  intake_action: proceed
+  exit_code: 0
+  annotation_label: unsigned
+  quarantined: false

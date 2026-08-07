@@ -501,6 +501,27 @@ class TestRevoke(TrustTempDirCase):
             pins = load_allowed_signers(pins_path)
             self.assertEqual(pins[GOLDEN_KID]["status"], "revoked")
 
+    def test_revoke_all_receivers_ignores_hidden_agent_dirs(self) -> None:
+        self._pin_for("claude")
+        hidden_pins = (
+            self.project_dir
+            / "agents"
+            / ".claude"
+            / "trust"
+            / "allowed_signers.yaml"
+        )
+        hidden_pins.parent.mkdir(parents=True)
+        hidden_pins.write_text(
+            self.pins_path.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+
+        report = revoke_pin(self.project_dir, GOLDEN_KID, all_receivers=True)
+
+        self.assertEqual(report["receivers"], {"claude": "revoked"})
+        self.assertEqual(
+            load_allowed_signers(hidden_pins)[GOLDEN_KID]["status"], "active"
+        )
+
     def test_revoke_all_receivers_requires_a_pin_somewhere(self) -> None:
         with self.assertRaises(TrustRevokeError):
             revoke_pin(self.project_dir, GOLDEN_KID, all_receivers=True)

@@ -1,28 +1,84 @@
-# Message Signing — Trust Root & Key Management (v0.4.0, warn mode)
+# Message Signing — Trust Root & Key Management
 
 Status: **non-normative** companion to the message-signing wire format.
 The wire format itself — the raw-prefix detached-JWS `auth` trailer — is
 specified in [`inbox_outbox.md` → "Signed messages"](inbox_outbox.md);
 this document covers the trust root, verification modes, and key
-management. The normative authority-doctrine amendment ships with the
-first authority-bearing knob (a later 0.4.x/0.5 release) as its own
-reviewed change.
+management.
 
-## Warn-mode seam (v0.4.0)
+## Verify modes
+
+Receivers opt in per-agent via `signing.verify_mode: off | warn | enforce`
+in `agents/<receiver>/config.yaml`; any other value degrades to `off`.
 
 **Warn mode records identity and grants no authority.** Every verification
 outcome — `unsigned`, `signed-verified`, `signed-unknown-kid`,
 `signed-INVALID`, `signed-REVOKED` — produces an annotation and a
 `message_auth` audit block; none of them rejects, quarantines-as-rejection,
 or changes how a message is processed. A verified signature is a recorded
-fact about who signed, not a permission. Enforce mode (rejection, receipt
-ledger, quarantine activation) lands in **a later release**, activated only
-after a warn soak on live fleet traffic and an explicit enforcement ruling;
-the seams exist in v0.4.0 and none activate.
+fact about who signed, not a permission.
 
-Receivers opt in per-agent via `signing.verify_mode: off | warn` in
-`agents/<receiver>/config.yaml`. An early `enforce` value degrades to
-`warn`; anything else degrades to `off`.
+**Enforce mode makes rejection mechanism, not receiver diligence.** The
+autonomy gate invokes verification at message intake, before any
+evaluation, parse, or gate runs. Only `signed-verified` proceeds; every
+other outcome — unsigned, INVALID, unknown-kid, revoked, and
+unverifiable-without-crypto — is rejected: a mode-600 evidence copy is
+quarantined into the receiver's `dead_letter/` (exclusive-create; the
+original inbox artifact is never touched), nothing is evaluated, and the
+gate exits `3` with an `intake_rejected` decision object. An unusable or
+tampered trust root fails closed the same way: with no loadable pins,
+nothing verifies, so everything rejects.
+
+### Receiver intake contract
+
+What a receiver's inbox-processing flow does with each annotation, by mode:
+
+| Annotation | `off` | `warn` | `enforce` |
+|---|---|---|---|
+| (none — verification skipped) | process | — | — |
+| `unsigned` | — | process; annotation recorded | rejected at intake (quarantined, unprocessed) |
+| `signed-verified` | — | process; identity recorded | process |
+| `signed-unknown-kid` | — | process; annotation recorded | rejected at intake |
+| `signed-INVALID` | — | process; evidence quarantine available (`--quarantine`) | rejected at intake |
+| `signed-REVOKED` | — | process; annotation recorded | rejected at intake |
+| `signed-unverifiable (crypto unavailable)` | — | process; annotation recorded | rejected at intake (fail closed) |
+
+Under `enforce` the rejection happens inside the gate CLI — a receiver
+flow that never explicitly runs `oacp verify` still cannot process an
+unverified message, because admission itself refuses. The quarantined
+evidence copy plus the gate's `intake_rejected` output are the record of
+the rejection; no admission audit record is written for a message that
+never reached admission. Receivers surface the rejection to their
+operator and may notify the sender; they never process or silently delete
+the quarantined evidence.
+
+Every receiver read path verifies before it parses. The gate is the
+admission choke point; every other CLI surface that reads inbox
+artifacts goes through one shared receive boundary (resolve the
+authorized receiver config, load policy-checked pins, verify one
+bounded snapshot, and only then parse those bytes): the `oacp inbox`
+lister, the `oacp watch` event emitter, the send helper's
+parent-message lookup (a held message can never donate
+`conversation_id` to an outgoing reply), and the trust drift report's
+inbox traffic probe (a forged `from:` line cannot manufacture a
+liveness signal). Under `enforce`, a message that is not
+`signed-verified` surfaces as a HELD row or event built from
+filesystem metadata only — none of its (attacker-controlled) fields
+are parsed or surfaced; under `warn` rows and events carry the
+verification status; under `off` behavior is unchanged. These read
+paths are read-only, so they never quarantine — dispositioning a held
+message belongs to the processing path. The envelope compiler is a
+processing step and fails closed instead: under `enforce` it refuses
+to compile an envelope from a message that is not signed-verified,
+and the envelope's `message_sha256` names the verified snapshot.
+
+**Verified bytes are the processed bytes.** Verification and any
+subsequent parse, hash, or evaluation of the same artifact consume one
+bounded read — a single snapshot. A verifier that approves one read and a
+consumer that then re-reads the path would leave a swap window between
+them; the gate, the inbox lister, and the policy loaders all parse the
+exact bytes they verified, and the audit record's `message_sha256` names
+that snapshot.
 
 ## Enforce-mode preparation
 
@@ -188,6 +244,90 @@ Warn-mode semantics carry through unchanged: the block records identity
 and grants no authority — gates and instrumentation consume it as
 telemetry only.
 
+## Policy-file signing
+
+The autonomy audit record's `policy_sha256` proves **which** policy ran;
+policy-file signing proves it was **authorized**. The receiver's two
+policy files — `config.yaml` and `trust/allowed_signers.yaml` — carry the
+same raw-prefix detached-JWS auth trailer as messages, under a distinct
+JOSE profile (`typ: oacp-policy+yaml`, domain `urn:oacp:policy:v1`) so a
+message signature can never authorize a policy file and a policy signature
+can never authenticate a message.
+
+- **Trust anchor**: the machine-local keystore under `$OACP_HOME/keys/`.
+  A policy file for receiver X verifies only against agent X's own public
+  keys (the `<kid>.pub.json` stubs written by `oacp key gen`); a valid
+  signature by a *different* local agent's key is a receiver-binding
+  failure, not authorization. Tampering with a policy file on disk
+  therefore requires the 0600 private key material, not just filesystem
+  write access. (The trust root cannot anchor its own signature — the
+  keystore is the separate root that breaks that cycle.)
+- **Context binding**: every policy signature commits to its target —
+  `{project, receiver, kind}` (`receiver_config` or `allowed_signers`) —
+  inside the protected header's `oacp.policy` claim, and verification
+  requires an exact match against the file's canonical workspace
+  location. A signature over one project's policy never authorizes a
+  byte-identical file in another project, a config signature never
+  authorizes a trust root (or vice versa), and a signed policy file
+  copied outside its canonical location does not verify at all.
+- **Sign and re-sign**:
+
+  ```bash
+  oacp trust sign-policy --project <name> --agent <receiver>
+  ```
+
+  signs both files with the receiver's own local key and round-trip
+  verifies them. Unlike messages (append-once, immutable), policy files
+  are long-lived and edited: signing strips any existing trailer and signs
+  the current content — run it again after every policy edit.
+- **Enrollment (downgrade resistance)**: the first successful
+  `sign-policy` run enrolls each target in the machine-local registry
+  `$OACP_HOME/keys/policy_enrollment.json` (part of the keystore trust
+  anchor, outside every project workspace). From then on, that policy
+  file without a verifiable signature — trailer stripped, or crypto
+  unavailable — is `invalid`, never `unsigned`: stripping a signature is
+  tampering, not a path back to bootstrap. Enrollment is recorded only
+  after every target round-trip verifies, so a partial signing failure
+  never strands an unsigned file behind downgrade resistance.
+- **Writers re-sign or refuse**: trust mutations that re-emit
+  `allowed_signers.yaml` (`oacp trust import` / `revoke`) atomically
+  re-sign an enrolled trust root with the receiver's own key. If the
+  signing key is unavailable, the mutation is refused before anything is
+  written — a writer never strips an enrolled file's signature as a side
+  effect, and a fleet-wide revoke either fully lands signed or leaves
+  zero pins changed.
+- **One authorized read path**: consumers load policy files through a
+  single loader that reads the file once (bounded at 1 MiB), verifies
+  those bytes, and parses the policy from the same snapshot — the bytes
+  evaluated are always the bytes verified. This covers the autonomy gate,
+  intake's trust-root load, the envelope compiler, the send helper's
+  signing-intent read, trust mutations, and the inbox lister; `oacp
+  doctor` reports each policy file's authorization status per receiver
+  (verified / unsigned-bootstrap / invalid / unsupported) without
+  blocking diagnostics.
+- **Verified at load, fail closed on tamper**: loaders check the signature
+  wherever the policy is consumed. The gate records the outcome in every
+  decision as a `policy_auth` block (`status`, `signer_agent`,
+  `signer_kid`, `reason`); together with `policy_sha256` the record
+  commits to an authorized policy identity, not just bytes. A **tampered**
+  `config.yaml` pauses the decision with reason code `policy_auth_invalid`
+  before anything reads the config — including its own `verify_mode`, so a
+  tamper cannot switch enforcement off. A **tampered**
+  `allowed_signers.yaml` makes the trust root unusable exactly like an
+  unreadable one: no pins load, and under `enforce` every inbound message
+  consequently rejects. Both failures are distinguishable in the record
+  from a policy that is merely *absent* (absent config is a usage error
+  with no record; absent pins simply mean no pins).
+- **Bootstrap**: a fresh workspace's policy files are unsigned and load
+  normally with `policy_auth.status: unsigned` recorded — signing requires
+  a key, so the order is `oacp init` → `oacp key gen --agent <receiver>` →
+  `oacp trust sign-policy`. Unsigned is a visible, recorded state, never a
+  silent one. On a host without the crypto extra, a signed but
+  *unenrolled* policy file records `unsupported` and loads (signing
+  itself always requires the extra); an *enrolled* one is `invalid` —
+  fail closed, because that host's registry proves a signature is
+  required.
+
 ## Key management
 
 - **Keys are per-machine and never leave `$OACP_HOME/keys/`.** They are
@@ -235,3 +375,9 @@ signed prefix bytes, and JWS preimages, plus a tamper-detection suite
 cases). Implementations of the framing or the verify flow should run
 against it; the corpus README defines which expected fields are
 normative and why regenerating goldens requires a ruling.
+
+The receive-path behavior — what a receiver *does* with each verification
+outcome under each verify mode — is pinned separately by the intake corpus
+at `tests/conformance/intake/`: four failure classes (unsigned /
+signed-INVALID / unknown-kid / revoked) under `off`/`warn`/`enforce`, plus
+a signed-verified positive control, executed against the real gate CLI.

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Kiloloop
 # SPDX-License-Identifier: Apache-2.0
-"""message_verify.py — OACP receiver verify-before-parse (warn mode).
+"""message_verify.py — OACP receiver verify-before-parse.
 
-Implements the receiver half of the v0.4.0 message-signing design
+Implements the receiver half of the message-signing design
 ("raw-prefix detached-JWS auth trailer v1"):
 
 - **Verify before parse**: the auth trailer is extracted from the raw bytes
@@ -20,15 +20,19 @@ Implements the receiver half of the v0.4.0 message-signing design
   the single swap point behind `load_allowed_signers`. Catalog management,
   import, and drift detection live in ``trust_root.py`` and never run at
   verify time.
-- **Warn mode records identity and grants no authority**: every outcome —
-  unsigned / signed-unknown-kid / signed-verified / signed-INVALID — produces
-  an annotation and a ``message_auth`` audit block, never a rejection.
-  Enforce/quarantine-as-rejection lands in a later release; the seams
-  exist, none activate.
-- **No-clobber quarantine**: byte-tamper cases (a present signature that
-  fails verification) write an evidence copy aside into ``dead_letter/``
-  with exclusive-create semantics. The original message file is never
-  touched, moved, or overwritten.
+- **Three verify modes** (``signing.verify_mode`` in the receiver config).
+  ``off`` skips verification. ``warn`` records identity and grants no
+  authority: every outcome — unsigned / signed-unknown-kid /
+  signed-verified / signed-INVALID — produces an annotation and a
+  ``message_auth`` audit block, never a rejection. ``enforce`` makes
+  rejection mechanism: at intake (`intake_verify`, invoked by the autonomy
+  gate before any evaluation), only ``signed-verified`` proceeds — any
+  other outcome quarantines an evidence copy and refuses to process the
+  message, honoring the non-zero exit contract (exit 3).
+- **No-clobber quarantine**: rejected and byte-tampered artifacts write an
+  evidence copy aside into ``dead_letter/`` with exclusive-create
+  semantics. The original message file is never touched, moved, or
+  overwritten.
 
 The ``message_auth`` block mirrors the schema-v2 ``human_outcome`` pattern:
 a recorder (`attach_message_auth`) writes it into an existing autonomy audit
@@ -94,7 +98,7 @@ ANNOTATIONS = {
     STATUS_UNSUPPORTED: "signed-unverifiable (crypto unavailable)",
 }
 
-VERIFY_MODES = ("off", "warn")
+VERIFY_MODES = ("off", "warn", "enforce")
 TRUST_FILE_VERSION = 1
 PIN_STATUS_ACTIVE = "active"
 PIN_STATUS_REVOKED = "revoked"
@@ -151,13 +155,31 @@ def classify_auth_trailer(raw: bytes) -> Tuple[str, bytes, Optional[str]]:
 # Receiver config knob + pin-file reader (swappable)
 # ---------------------------------------------------------------------------
 
+def verify_mode_from_config(loaded: Any) -> str:
+    """Resolve `signing.verify_mode` from an already-parsed receiver config.
+
+    Snapshot-friendly form of `load_verify_mode`: callers that hold a
+    verified config snapshot resolve the mode from THAT object instead of
+    re-reading the file (the bytes verified must be the bytes that choose
+    the mode). ``off``, ``warn``, and ``enforce`` are all real modes and
+    are returned unmodified; any other value degrades to ``off``.
+    """
+    if not isinstance(loaded, dict):
+        return "off"
+    signing = loaded.get("signing")
+    if not isinstance(signing, dict):
+        return "off"
+    mode = str(signing.get("verify_mode", "off")).strip().lower()
+    if mode in VERIFY_MODES:
+        return mode
+    return "off"
+
+
 def load_verify_mode(config_path: Path) -> str:
     """Read `signing.verify_mode` from a receiver config; default ``off``.
 
     Receivers without the knob (or without the file) behave exactly as
-    today. ``enforce`` is not activated in v0.4.0 — a receiver opting in
-    early degrades to ``warn`` (identity recorded, nothing rejected);
-    any other value degrades to ``off``.
+    today.
     """
     config_path = Path(config_path)
     if not config_path.is_file():
@@ -168,17 +190,7 @@ def load_verify_mode(config_path: Path) -> str:
         loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     except Exception:
         return "off"
-    if not isinstance(loaded, dict):
-        return "off"
-    signing = loaded.get("signing")
-    if not isinstance(signing, dict):
-        return "off"
-    mode = str(signing.get("verify_mode", "off")).strip().lower()
-    if mode in VERIFY_MODES:
-        return mode
-    if mode == "enforce":
-        return "warn"
-    return "off"
+    return verify_mode_from_config(loaded)
 
 
 def load_allowed_signers(pins_path: Path) -> Dict[str, Dict[str, Any]]:
@@ -217,6 +229,20 @@ def load_allowed_signers(pins_path: Path) -> Dict[str, Dict[str, Any]]:
         loaded = yaml.safe_load(pins_path.read_text(encoding="utf-8"))
     except Exception as exc:
         raise TrustRootError(f"cannot read pin file {pins_path}: {exc}") from exc
+    return parse_allowed_signers(loaded, pins_path)
+
+
+def parse_allowed_signers(
+    loaded: Any, pins_path: Path
+) -> Dict[str, Dict[str, Any]]:
+    """Validate an already-parsed pins document; see `load_allowed_signers`.
+
+    Snapshot-friendly form: callers holding a policy-verified snapshot of
+    the trust file validate THAT object instead of re-reading the path
+    (*pins_path* is used only for error messages). The ``auth`` trailer
+    key, when present, is ignored — it is authorization metadata handled
+    by the policy-signature check, not pin content.
+    """
     if not isinstance(loaded, dict):
         raise TrustRootError(f"pin file {pins_path} must be a YAML mapping")
     version = loaded.get("version")
@@ -579,7 +605,263 @@ def attach_message_auth(
 
 
 # ---------------------------------------------------------------------------
-# CLI: manual verify (the warn annotation path's entry point)
+# Intake verification (the enforce-mode caller)
+# ---------------------------------------------------------------------------
+
+def _load_pins_policy_checked(
+    pins_path: Path,
+    *,
+    receiver: Optional[str] = None,
+    oacp_dir: Optional[str] = None,
+) -> Tuple[Dict[str, Dict[str, Any]], Optional[str], Optional[Dict[str, Any]]]:
+    """Load receiver pins, first verifying the trust file's own signature.
+
+    Returns ``(pins, trust_error, trust_policy_auth)``. A trust file whose
+    policy signature is INVALID is unusable exactly like an unreadable one
+    (`TrustRootError` shape): no pins load, the reason is recorded, and
+    under enforce every inbound message consequently rejects — tampering
+    with the trust root fails closed instead of widening trust.
+    """
+    pins: Dict[str, Dict[str, Any]] = {}
+    trust_error: Optional[str] = None
+    trust_policy_auth: Optional[Dict[str, Any]] = None
+    try:
+        if pins_path.is_file():
+            from _oacp_env import resolve_oacp_home
+
+            import policy_signing
+
+            home = (
+                resolve_oacp_home(oacp_dir) if oacp_dir else resolve_oacp_home()
+            )
+            # One snapshot: the bytes whose policy signature is checked are
+            # the bytes the pins are parsed from — the trust file cannot be
+            # swapped between its authorization check and its use.
+            try:
+                loaded, trust_policy_auth, _raw = (
+                    policy_signing.load_authorized_policy(
+                        pins_path,
+                        home,
+                        receiver=receiver or "",
+                        kind=policy_signing.POLICY_KIND_ALLOWED_SIGNERS,
+                        on_invalid="return",
+                    )
+                )
+            except policy_signing.PolicyAuthError as exc:
+                raise TrustRootError(str(exc)) from exc
+            if trust_policy_auth["status"] == policy_signing.POLICY_STATUS_INVALID:
+                raise TrustRootError(
+                    "trust root signature invalid: "
+                    f"{trust_policy_auth['reason']}"
+                )
+            pins = parse_allowed_signers(loaded, pins_path)
+    except (TrustRootError, OSError) as exc:
+        trust_error = str(exc)
+    return pins, trust_error, trust_policy_auth
+
+
+def intake_verify(
+    message_path: Path,
+    config_path: Path,
+    *,
+    receiver: Optional[str] = None,
+    oacp_dir: Optional[str] = None,
+    message_raw: Optional[bytes] = None,
+    verify_mode: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Mechanized receive-path verification — rejection as mechanism.
+
+    Called by the autonomy gate before any evaluation, so that a receiver's
+    ``signing.verify_mode`` acts at intake rather than depending on
+    per-receiver diligence:
+
+    - ``off`` — no verification; action ``proceed`` with no message_auth.
+    - ``warn`` — verify and annotate; action ``proceed`` (identity
+      recorded, no authority granted).
+    - ``enforce`` — only ``signed-verified`` proceeds. Any other outcome
+      (unsigned, INVALID, unknown-kid, revoked, unsupported-crypto)
+      quarantines a mode-600 evidence copy into the receiver's
+      ``dead_letter/`` and returns action ``reject``: the message must not
+      be processed, and callers honor the non-zero exit contract (exit 3).
+
+    The pins load runs through the policy-signature check
+    (`_load_pins_policy_checked`), so a tampered trust root fails closed.
+
+    Snapshot discipline: callers that go on to PROCESS the message must
+    pass ``message_raw`` (the exact bytes they will parse) and
+    ``verify_mode`` (resolved from their verified config snapshot) — the
+    path-based fallbacks exist for report-only callers; a processing
+    caller that lets this function re-read the paths reintroduces the
+    verify-then-swap window.
+    """
+    config_path = Path(config_path)
+    mode = verify_mode if verify_mode is not None else load_verify_mode(config_path)
+    if mode not in VERIFY_MODES:
+        mode = "off"
+    result: Dict[str, Any] = {
+        "mode": mode,
+        "action": "proceed",
+        "message_auth": None,
+        "annotation": None,
+        "quarantine_copy": None,
+        "trust_policy_auth": None,
+    }
+    if mode == "off":
+        return result
+
+    receiver_dir = config_path.parent
+    pins_path = receiver_dir / ALLOWED_SIGNERS_RELPATH
+    raw = (
+        message_raw
+        if message_raw is not None
+        else read_message_bounded(Path(message_path))
+    )
+    pins, trust_error, trust_policy_auth = _load_pins_policy_checked(
+        pins_path, receiver=receiver, oacp_dir=oacp_dir
+    )
+    result["trust_policy_auth"] = trust_policy_auth
+
+    message_auth = verify_message(
+        raw,
+        pins,
+        trust_source=str(pins_path),
+        trust_error=trust_error,
+    )
+    result["message_auth"] = message_auth
+    result["annotation"] = annotate(message_auth)
+
+    if mode == "enforce" and message_auth["status"] != STATUS_VERIFIED:
+        quarantined = quarantine_write_aside(
+            raw, Path(message_path), receiver_dir / DEAD_LETTER_DIRNAME
+        )
+        message_auth["quarantine_copy"] = str(quarantined)
+        result["quarantine_copy"] = str(quarantined)
+        result["action"] = "reject"
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Shared receive-snapshot boundary (every non-gate inbox read path)
+# ---------------------------------------------------------------------------
+
+def receiver_intake_context(
+    receiver_dir: Path,
+    *,
+    receiver: str,
+    project: Optional[str] = None,
+    oacp_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Resolve one receiver's verify mode + pins for inbox read paths.
+
+    The receiver config is an authorized policy read; a config that fails
+    policy authorization cannot be allowed to choose its own (weaker)
+    verify mode, so the context fails closed to ``enforce`` with the error
+    recorded in ``policy_error``. Resolve the context once per receiver
+    per pass and share it across that pass's `read_verified_inbox_message`
+    calls.
+    """
+    receiver_dir = Path(receiver_dir)
+    config_path = receiver_dir / "config.yaml"
+    context: Dict[str, Any] = {
+        "mode": "off",
+        "pins": {},
+        "trust_source": None,
+        "trust_error": None,
+        "policy_error": None,
+    }
+    if not config_path.is_file():
+        return context
+
+    from _oacp_env import resolve_oacp_home
+
+    import policy_signing
+
+    home = resolve_oacp_home(oacp_dir) if oacp_dir else resolve_oacp_home()
+    try:
+        config, _policy_auth, _raw = policy_signing.load_authorized_policy(
+            config_path,
+            home,
+            receiver=receiver,
+            kind=policy_signing.POLICY_KIND_RECEIVER_CONFIG,
+            project=project,
+        )
+    except policy_signing.PolicyAuthError as exc:
+        context["mode"] = "enforce"
+        context["policy_error"] = str(exc)
+        context["trust_error"] = str(exc)
+        return context
+    context["mode"] = verify_mode_from_config(config)
+    if context["mode"] == "off":
+        return context
+    pins_path = receiver_dir / ALLOWED_SIGNERS_RELPATH
+    pins, trust_error, _trust_policy_auth = _load_pins_policy_checked(
+        pins_path, receiver=receiver, oacp_dir=oacp_dir
+    )
+    context["pins"] = pins
+    context["trust_source"] = str(pins_path)
+    context["trust_error"] = trust_error
+    return context
+
+
+def read_verified_inbox_message(
+    path: Path,
+    context: Dict[str, Any],
+    parse: Any,
+) -> Dict[str, Any]:
+    """THE non-gate inbox read: one bounded snapshot, verified before parsed.
+
+    *parse* is the caller's ``(raw: bytes, path: Path) -> data`` parser —
+    it runs only when the context's mode allows this message to be parsed
+    at all, so the verify-before-parse decision lives here, once, for
+    every consumer (lister, watcher, parent lookup, diagnostics).
+
+    Returns ``{raw, auth, held, data, error}``:
+
+    - ``held`` — mode is ``enforce`` and the snapshot is not
+      signed-verified. The message's (attacker-controlled) content MUST
+      NOT be parsed or surfaced; ``data`` stays None and callers render
+      from filesystem metadata only. Read paths are read-only, so a held
+      result never quarantines — disposition belongs to the gate.
+    - ``auth`` — the ``message_auth`` block (None when mode is ``off``).
+    - ``error`` — read or parse failure (``data`` None).
+    """
+    result: Dict[str, Any] = {
+        "raw": None,
+        "auth": None,
+        "held": False,
+        "data": None,
+        "error": None,
+    }
+    try:
+        raw = read_message_bounded(Path(path))
+    except OSError as exc:
+        result["error"] = str(exc)
+        return result
+    result["raw"] = raw
+
+    mode = context.get("mode", "off")
+    if mode in ("warn", "enforce"):
+        message_auth = verify_message(
+            raw,
+            context.get("pins") or {},
+            trust_source=context.get("trust_source"),
+            trust_error=context.get("trust_error"),
+        )
+        result["auth"] = message_auth
+        if mode == "enforce" and message_auth["status"] != STATUS_VERIFIED:
+            result["held"] = True
+            return result
+
+    try:
+        result["data"] = parse(raw, Path(path))
+    except Exception as exc:
+        result["error"] = str(exc)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# CLI: manual verify (annotation entry point; enforce intake lives in
+# `intake_verify`, invoked by the autonomy gate)
 # ---------------------------------------------------------------------------
 
 def _resolve_pins_path(args: argparse.Namespace) -> Optional[Path]:
@@ -636,10 +918,9 @@ def main() -> int:
     pins: Dict[str, Dict[str, Any]] = {}
     trust_error: Optional[str] = None
     if pins_path is not None:
-        try:
-            pins = load_allowed_signers(pins_path)
-        except TrustRootError as exc:
-            trust_error = str(exc)
+        pins, trust_error, _trust_policy_auth = _load_pins_policy_checked(
+            pins_path, receiver=args.receiver, oacp_dir=args.oacp_dir
+        )
 
     message_auth = verify_message(
         raw,

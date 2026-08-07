@@ -1,0 +1,9 @@
+case: signed_revoked__warn
+mode: warn
+config: configs/warn.yaml
+message: ../signing/messages/signed_revoked.yaml
+expected:
+  intake_action: proceed
+  exit_code: 0
+  annotation_label: signed-REVOKED
+  quarantined: false

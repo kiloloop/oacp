@@ -21,12 +21,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from autonomy_gate import (  # noqa: E402
     PINNED_COMPLETION_KINDS,
     PINNED_REASON_CODES,
+    RUNTIME_MODEL_ENV_VAR,
     _base_result,
     canonical_policy_sha256,
     evaluate_autonomy,
     evaluate_threshold_checkpoint,
     main as autonomy_main,
+    normalize_runtime_model,
     normalize_scope_envelope,
+    resolve_runtime_block,
+    write_audit_record,
 )
 
 
@@ -142,7 +146,9 @@ def test_autonomy_gate_records_raw_message_hash_when_path_provided() -> None:
 def test_autonomy_gate_cli_writes_audit_and_preserves_stdout(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv(RUNTIME_MODEL_ENV_VAR, raising=False)
     config_path = FIXTURE_ROOT / "configs" / "auto_review_standard.yaml"
     message_path = FIXTURE_ROOT / "messages" / "clean_task.yaml"
     audit_dir = tmp_path / "audit" / "autonomy_decisions"
@@ -181,7 +187,11 @@ def test_autonomy_gate_cli_writes_audit_and_preserves_stdout(
         "max_estimated_minutes": 45,
         "max_expected_files_touched": 5,
     }
-    assert audit_record["runtime"] == {"agent": "codex", "model": None}
+    runtime = audit_record["runtime"]
+    assert runtime["agent"] == "codex"
+    assert runtime["model"] is None
+    assert runtime["model_source"] is None
+    assert runtime["model_unknown_reason"]
     assert audit_files[0].with_name(audit_files[0].name + ".lock").is_file()
 
     assert autonomy_main([
@@ -293,6 +303,144 @@ def test_guardrails_fence_keeps_operative_terms_visible_as_advisories() -> None:
     assert "deploy" in patterns
     assert "auth" in patterns
     assert "lexical_advisory" in decision["reason_codes"]
+
+
+@pytest.mark.parametrize(
+    "task_text",
+    [
+        "Out of scope: deploy to production.",
+        "Excluded: deploy to production.",
+        "Exclude any deploy to production.",
+        "This task excludes: deploy to production.",
+        "Avoid any deploy to production.",
+        "Refrain from any deploy to production.",
+        "Prohibited: deploy to production.",
+        "Forbidden: deploy to production.",
+        "Skip any deploy to production.",
+        "Without any deploy to production.",
+    ],
+)
+def test_negation_vocabulary_demotes_same_clause_side_effect(task_text: str) -> None:
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml")
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "private_pr_artifacts.yaml")
+    message["body"] = message["body"].replace(
+        "Update the existing branch, open a pull request, and post the review comment.",
+        task_text,
+    )
+
+    decision = evaluate_autonomy(message, config)
+
+    assert decision["decision"] == "auto_accepted"
+    assert {
+        "code": "lexical_advisory_negated",
+        "matched_pattern": "deploy",
+    } in decision["logged_notes"]
+
+
+@pytest.mark.parametrize(
+    "task_text",
+    [
+        "Out of scope:\n- deploy to production.",
+        "## Out of scope\n- deploy to production.",
+    ],
+)
+def test_negation_heading_demotes_side_effect_inside_bounded_block(
+    task_text: str,
+) -> None:
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml")
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "private_pr_artifacts.yaml")
+    message["body"] = message["body"].replace(
+        "Update the existing branch, open a pull request, and post the review comment.",
+        task_text,
+    )
+
+    decision = evaluate_autonomy(message, config)
+
+    assert decision["decision"] == "auto_accepted"
+    assert {
+        "code": "lexical_advisory_negated",
+        "matched_pattern": "deploy",
+    } in decision["logged_notes"]
+
+
+@pytest.mark.parametrize(
+    "task_text",
+    [
+        "Not in scope:\n- edit documentation.\n\n- deploy to production.",
+        "Out of scope:\n- edit documentation.\n## In scope\n- deploy to production.",
+    ],
+)
+def test_negation_heading_does_not_escape_its_block(task_text: str) -> None:
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml")
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "private_pr_artifacts.yaml")
+    message["body"] = message["body"].replace(
+        "Update the existing branch, open a pull request, and post the review comment.",
+        task_text,
+    )
+
+    decision = evaluate_autonomy(message, config)
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["hard_stop_external_side_effect"]
+    assert decision["matched_pattern"] == "deploy"
+
+
+@pytest.mark.parametrize(
+    "task_text",
+    [
+        "Do the following, without delay:\n- deploy to production.",
+        "Skip this introduction:\n- deploy to production.",
+    ],
+)
+def test_ambiguous_negation_forms_do_not_scope_over_heading_blocks(
+    task_text: str,
+) -> None:
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml")
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "private_pr_artifacts.yaml")
+    message["body"] = message["body"].replace(
+        "Update the existing branch, open a pull request, and post the review comment.",
+        task_text,
+    )
+
+    decision = evaluate_autonomy(message, config)
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["hard_stop_external_side_effect"]
+    assert decision["matched_pattern"] == "deploy"
+
+
+@pytest.mark.parametrize(
+    ("task_text", "reason_code", "matched_pattern"),
+    [
+        (
+            "Out of scope:\n- push to main.",
+            "hard_stop_external_side_effect",
+            "push to main",
+        ),
+        (
+            "Out of scope:\n- commercial pricing changes.",
+            "hard_stop_content_sensitivity",
+            "pricing",
+        ),
+    ],
+)
+def test_negation_heading_does_not_demote_non_demotable_patterns(
+    task_text: str,
+    reason_code: str,
+    matched_pattern: str,
+) -> None:
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml")
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "private_pr_artifacts.yaml")
+    message["body"] = message["body"].replace(
+        "Update the existing branch, open a pull request, and post the review comment.",
+        task_text,
+    )
+
+    decision = evaluate_autonomy(message, config)
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == [reason_code]
+    assert decision["matched_pattern"] == matched_pattern
 
 
 def test_autonomy_gate_pauses_same_receiver_replay(tmp_path: Path) -> None:
@@ -895,3 +1043,164 @@ def test_unpinned_completion_kind_rejected() -> None:
         _base_result("paused", kind, checkpoint)
     with pytest.raises(ValueError, match="completion_kind"):
         _base_result("paused", "hard_stop", checkpoint)
+
+
+def test_normalize_runtime_model_folds_case_and_splits_context() -> None:
+    assert normalize_runtime_model("GPT-5") == ("gpt-5", None)
+    assert normalize_runtime_model("claude-opus-4-8") == ("claude-opus-4-8", None)
+    assert normalize_runtime_model("claude-opus-4-8[1m]") == ("claude-opus-4-8", "1m")
+    assert normalize_runtime_model(" Claude-Sonnet-5[1M] ") == ("claude-sonnet-5", "1m")
+    assert normalize_runtime_model(None) == (None, None)
+    assert normalize_runtime_model("   ") == (None, None)
+
+
+def test_resolve_runtime_block_reads_env_signal() -> None:
+    runtime = resolve_runtime_block(
+        None,
+        "claude",
+        env={RUNTIME_MODEL_ENV_VAR: "Claude-Fable-5[1m]"},
+    )
+    assert runtime == {
+        "agent": "claude",
+        "model": "claude-fable-5",
+        "model_source": f"env:{RUNTIME_MODEL_ENV_VAR}",
+        "model_context": "1m",
+        "model_raw": "Claude-Fable-5[1m]",
+    }
+
+
+def test_resolve_runtime_block_caller_value_wins_over_env() -> None:
+    runtime = resolve_runtime_block(
+        {"agent": "codex", "model": "gpt-5"},
+        "codex",
+        env={RUNTIME_MODEL_ENV_VAR: "some-other-model"},
+    )
+    assert runtime["model"] == "gpt-5"
+    assert runtime["model_source"] == "caller"
+    assert "model_raw" not in runtime
+    assert "model_context" not in runtime
+
+
+def test_resolve_runtime_block_normalizes_caller_value() -> None:
+    runtime = resolve_runtime_block({"model": "GPT-5"}, "codex", env={})
+    assert runtime["agent"] == "codex"
+    assert runtime["model"] == "gpt-5"
+    assert runtime["model_source"] == "caller"
+    assert runtime["model_raw"] == "GPT-5"
+
+
+def test_resolve_runtime_block_explicit_unknown_without_signal() -> None:
+    runtime = resolve_runtime_block(None, "claude", env={})
+    assert runtime["model"] is None
+    assert runtime["model_source"] is None
+    assert runtime["model_unknown_reason"]
+
+
+def test_resolve_runtime_block_never_reads_requested_model_channels() -> None:
+    # Requested-model channels (harness configuration such as
+    # ANTHROPIC_MODEL) must never fill the serving-model field: a request
+    # can be served by a different model, alias, or context variant, which
+    # is the confound the field exists to remove.
+    runtime = resolve_runtime_block(
+        None,
+        "claude",
+        env={"ANTHROPIC_MODEL": "claude-opus-5", "CLAUDE_MODEL": "claude-opus-5"},
+    )
+    assert runtime["model"] is None
+    assert runtime["model_unknown_reason"]
+
+
+def test_written_record_stamps_normalized_env_model(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(RUNTIME_MODEL_ENV_VAR, "Claude-Fable-5[1m]")
+    audit_dir = tmp_path / "audit" / "autonomy_decisions"
+    assert autonomy_main([
+        "--config",
+        str(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml"),
+        "--message",
+        str(FIXTURE_ROOT / "messages" / "clean_task.yaml"),
+        "--audit-dir",
+        str(audit_dir),
+        "--receiver",
+        "claude",
+    ]) == 0
+    capsys.readouterr()
+    (audit_path,) = audit_dir.glob("*.yaml")
+    runtime = _load_yaml(audit_path)["runtime"]
+    assert runtime["model"] == "claude-fable-5"
+    assert runtime["model_context"] == "1m"
+    assert runtime["model_source"] == f"env:{RUNTIME_MODEL_ENV_VAR}"
+    assert runtime["model_raw"] == "Claude-Fable-5[1m]"
+
+
+def test_written_record_never_carries_silent_null_model(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A record written on the current spec carries either a non-null model
+    # or an explicit unknown marker with a reason — never a silent null.
+    # Historical records are never the writer's to touch: with no signal
+    # the writer records null-with-reason rather than inventing a value.
+    monkeypatch.delenv(RUNTIME_MODEL_ENV_VAR, raising=False)
+    audit_dir = tmp_path / "audit" / "autonomy_decisions"
+    assert autonomy_main([
+        "--config",
+        str(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml"),
+        "--message",
+        str(FIXTURE_ROOT / "messages" / "clean_task.yaml"),
+        "--audit-dir",
+        str(audit_dir),
+        "--receiver",
+        "claude",
+    ]) == 0
+    capsys.readouterr()
+    (audit_path,) = audit_dir.glob("*.yaml")
+    runtime = _load_yaml(audit_path)["runtime"]
+    assert runtime["model"] is not None or runtime["model_unknown_reason"]
+
+
+def test_write_audit_record_rejects_off_enum_completion_kind(tmp_path: Path) -> None:
+    audit_dir = tmp_path / "audit" / "autonomy_decisions"
+    decision = {
+        "decision": "paused",
+        "message_id": "msg-20260512120000-iris-clean1",
+        "result": {"completion_kind": "human_approved_completed"},
+    }
+    with pytest.raises(ValueError, match="completion_kind"):
+        write_audit_record(
+            audit_dir,
+            decision,
+            config={},
+            message={"subject": "x"},
+            message_path=tmp_path / "msg.yaml",
+            policy_path=tmp_path / "config.yaml",
+            receiver="codex",
+        )
+    assert not audit_dir.exists()
+
+
+def test_write_audit_record_rejects_missing_result_block(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="completion_kind"):
+        write_audit_record(
+            tmp_path / "audit" / "autonomy_decisions",
+            {"decision": "paused", "message_id": "msg-x"},
+            config={},
+            message={"subject": "x"},
+            message_path=tmp_path / "msg.yaml",
+            policy_path=tmp_path / "config.yaml",
+            receiver="codex",
+        )
+
+
+def test_resolve_runtime_block_preserves_whitespace_only_raw_change() -> None:
+    # Trimming changes the caller's input, so model_raw must preserve the
+    # exact original value even when the change is only surrounding
+    # whitespace.
+    runtime = resolve_runtime_block({"model": " gpt-5 "}, "codex", env={})
+    assert runtime["model"] == "gpt-5"
+    assert runtime["model_source"] == "caller"
+    assert runtime["model_raw"] == " gpt-5 "

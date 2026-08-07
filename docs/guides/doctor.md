@@ -35,6 +35,10 @@ Checks the project directory structure under `$OACP_HOME/projects/<name>/`.
 - **workspace.json** — must exist and contain valid JSON
 - **agents/ directory** — must exist; reports the number of registered agents
 
+Agent discovery ignores hidden directories directly under `agents/`. Tooling
+scaffolding such as `agents/.claude/.cc-writes/` is therefore not counted or
+checked as a phantom agent if a runtime creates it in that location.
+
 ### 3. Inbox Health
 
 Scans each agent's `inbox/` directory for pending messages and staleness.

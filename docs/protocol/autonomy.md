@@ -106,6 +106,35 @@ schema-invalid profile pauses with `task_profile_unparsable`; it is not a fatal
 message-schema error. Message types listed in `allow_without_task_profile`, such
 as `brainstorm_request`, may auto-accept without the block.
 
+### Default scope envelope (profileless admissions)
+
+`allow_without_task_profile` is an **admission-only exemption**: the sender
+needn't author a profile, but the bound always exists — a grant removes
+friction, never the bound. A profileless admitted request receives the
+documented default envelope instead of running unbounded:
+
+- `estimated_minutes: 25`, `expected_files_touched: 2`, reply-only
+  (`sends_oacp_reply_only: true`); every other capability and risk flag
+  `false`; `target_repo` empty; no continuation grants.
+- `risk_tier` mirrors the message's own declared `priority` when it is a
+  valid tier (`P0`–`P3`) — it is the sender's severity claim — else `P2`.
+
+The default envelope binds the post-accept threshold checkpoint exactly
+like a declared one: a genuinely long profileless task may
+checkpoint-pause against it — that is the bound existing, by design, not a
+regression. A sender that legitimately needs more attaches a **voluntary
+`task_profile` on the exempt type** — a documented, supported path; the
+profile's envelope then replaces the default entirely (and is the only way
+an exempt type reaches continuation-grant evaluation, since a default
+envelope declares nothing).
+
+Every decision names its envelope's origin in `scope_envelope_source`
+(`task_profile` or `default_profileless`; null only on a pause taken
+before envelope construction). No admitted message type is
+envelope-exempt — the exempt set is empty — and `scope_envelope: null` on
+an admitted record is a **schema violation**: the audit writer refuses to
+persist it rather than recording an unbounded admission.
+
 The core declaration is complete only when it includes the two numeric fields,
 `risk_tier`, and all five legacy risk booleans shown above. Granular side-effect
 booleans are optional but must agree with `external_side_effects`; a profile
@@ -178,7 +207,16 @@ If any required gate is missing or uncertain, the receiver pauses.
    - Path-like tokens such as `packets/deploy/` are not deploy verbs.
    - Exclude sender-marked `oacp-guardrails` fences from demotable pause
      classification while logging their matches as advisories. Suppress
-     demotable matches in clauses headed by `no`, `not`, `never`, or `do not`.
+     demotable matches in clauses headed by `no`, `not`, `never`, `do not`,
+     `does not`, `don't`, `doesn't`, `out of scope`, `exclude`/`excluded`,
+     `excludes`, `avoid`, `refrain from`, `prohibited`, `forbidden`, `skip`, or
+     `without`. A classic negation or scope-oriented form in a Markdown heading
+     or colon-terminated heading also scopes over the following block;
+     `skip` and `without` remain same-clause only because their ordinary prose
+     uses are ambiguous. Heading scope ends at the first blank line or next
+     heading, so the first governed line must follow the heading directly.
+     Non-demotable hard stops remain hard even when they appear in such a
+     clause or block.
    - With a complete profile, demote side-effect or sensitive-scope lexical
      matches to a logged `lexical_advisory` when the corresponding declaration
      is `false`. Missing/unparsable profiles and contradictory declarations do
@@ -225,7 +263,7 @@ Every autonomy decision writes one YAML file:
 
 ```yaml
 schema_version: 2
-spec_version: "0.4.1"
+spec_version: "0.4.2"
 created_at_utc: "2026-05-12T13:23:25Z"
 receiver: codex
 sender: iris
@@ -267,7 +305,8 @@ breached: []
 co_occurring_reason_codes: []
 runtime:
   agent: codex
-  model: gpt-5
+  model: gpt-5            # serving model, normalized at the writer; null only with a reason
+  model_source: "env:OACP_RUNTIME_MODEL"
 evaluator:
   source: scripts/autonomy_gate.py
   content_sha256: "<sha256 of the evaluator file bytes>"
@@ -315,13 +354,26 @@ result:
 missing or malformed config. `sender` is normally traceability metadata and
 also binds an enabled standing grant to the sender that received approval.
 `policy_sha256` is the SHA-256 of a canonical, key-sorted serialization of the
-parsed policy, so comments and YAML formatting do not produce false drift.
-`spec_version: "0.4.1"` pins everything 0.4.0 pinned — Gate 1 integrity
+parsed policy (excluding any `auth` trailer key), so comments, YAML
+formatting, and signing state do not produce false drift. Records written
+through the gate CLI additionally carry a `policy_auth` block —
+`{status: unsigned | verified | invalid | unsupported, signer_agent,
+signer_kid, reason}` — the policy-file authorization outcome (see
+`message_signing.md` → "Policy-file signing"): together with
+`policy_sha256` the record commits to an *authorized* policy identity,
+not just which bytes ran. An `invalid` status fails closed with reason
+code `policy_auth_invalid` before any gate consumes the config.
+`spec_version: "0.4.2"` pins everything 0.4.1 pinned — Gate 1 integrity
 enforcement, the recalibrated Gate 2/3 policy, full task-profile capture, the
-explicit `breached` list, and the outcome block shown above — plus
-session-scoped envelope enforcement, the enforce-mode trust-pin completeness
-gate, and preserved `always_pause` defaults for configs without an `autonomy`
-block. Audit `schema_version: 2` adds thread identity and
+explicit `breached` list, the outcome block shown above, session-scoped
+envelope enforcement, the enforce-mode trust-pin completeness gate, and
+preserved `always_pause` defaults for configs without an `autonomy` block —
+plus intake verification as mechanism (`verify_mode: enforce` rejects at
+the gate), the `policy_auth` authorized-policy block, the default scope
+envelope for profileless admissions (with `scope_envelope_source` and the
+null-on-admitted writer refusal), and the recorded none-by-rule
+enforcement branch for approved public-visibility tasks. Audit
+`schema_version: 2` adds thread identity and
 the structured `result.human_outcome` block. Recorders may upgrade a v1 audit
 to v2 when the first human outcome is written; standing grants trust only v2
 records.
@@ -336,6 +388,25 @@ the committed blob at HEAD; a dirty tree, an untracked copy, or a
 non-checkout install all record `null` rather than a SHA that names code
 which did not run. The only evaluator block a receiver ever authors by
 hand is the no-executed-gate case: `executed: false` with no hashes.
+
+`runtime.model` is resolved **at the writer and never backfilled**. The
+serving model resolves caller-first (an explicit `runtime.model` already on
+the decision), then from the `OACP_RUNTIME_MODEL` environment variable the
+invoking session exports — the variable names the model actually serving
+that session, not the model a configuration requested. Values are
+normalized at write time: case variants fold to lowercase, and a
+`[context]` suffix (same weights, different serving context window) splits
+into the base id plus a separate `model_context` field so per-model
+grouping never divides one model across suffix variants. `model_source`
+names the provenance (`caller` or `env:OACP_RUNTIME_MODEL`) and
+`model_raw` preserves any input the normalization changed. A record with
+no signal carries an explicit unknown — `model: null` plus a
+`model_unknown_reason` — never a silent null. The *requested* model
+(harness configuration, settings files) is deliberately never consulted,
+and historical records are never rewritten: a request can be silently
+served by a different model, alias, or context variant, and filling the
+field from it would reintroduce exactly the confound the field exists to
+remove.
 
 `breached` is always an ordered list, but its entries intentionally reflect the
 evaluation phase. Admission-time pauses record pinned gate reason codes (for
@@ -373,7 +444,9 @@ Receivers copy the evaluator's `completion_kind` verbatim and never overwrite
 it at terminal update time — a paused-then-approved task keeps
 `admission_paused` while `final_state` moves to `done` and `human_outcome`
 records the approval. Receiver-composed values outside this enum are
-non-conforming. Records written before this pin carry mixed
+non-conforming, and the audit writer enforces the pin at write time: a
+decision whose `result.completion_kind` is missing or outside the enum is
+refused rather than persisted. Records written before this pin carry mixed
 cause/event/state values (`hard_stop`, bare `paused`, fused decision+state
 kinds) and cannot be bucketed against the pinned enum.
 
@@ -449,7 +522,10 @@ that malformed request can be approved or modified.
 Evaluator implementations must reject unpinned reason codes. The canonical
 families are:
 
-- integrity/config: `config_malformed`, `mode_always_pause`,
+- integrity/config: `config_malformed`, `policy_auth_invalid` (the
+  receiver config carries a policy signature that fails verification —
+  the gate refuses to evaluate a tampered policy, distinguishably from a
+  merely malformed or absent one), `mode_always_pause`,
   `message_invalid`, `message_expired`, `message_replayed`,
   `task_profile_missing`, `task_profile_unparsable`,
   `risk_obvious_no_profile`, `envelope_compile_error`;
@@ -623,13 +699,54 @@ autonomy config into a runtime envelope:
 oacp envelope compile <message.yaml> --receiver <agent>
 ```
 
+**Admitted public-visibility tasks are the one explicit exception.** A
+compiled `public_visibility: true` envelope denies the entire chain the
+human just approved — the runtime adapter has no post-approval carve-out —
+so for a public task whose admission audit records a human outcome of
+`approved`/`modified`, the receiver passes that record to the compiler:
+
+```
+oacp envelope compile <message.yaml> --receiver <agent> \
+  --audit <admission-record.yaml>
+```
+
+and the compiler takes the **none-by-rule branch**: it does **not**
+compile, and it stamps `result.envelope_enforcement: none` plus
+`result.envelope_enforcement_reason: public_visibility_admission_approved`
+into the audit record under the audit lock. Degradation is the documented
+mode, not silence — the human admission approval plus live supervision is
+the named control, and the record says so.
+
+The approval record is authorization, so eligibility is strict: the
+`--audit` path must resolve inside the receiver's canonical admission
+audit directory (`agents/<receiver>/audit/autonomy_decisions/` — an
+arbitrary readable YAML never qualifies), and the record must be an
+admission-**paused** record carrying a `schema_version`, content-matched
+on `message_id` + `receiver` (in the record itself, never the filename),
+bound to the exact verified message snapshot via `message_sha256`, with
+a recorded human outcome of `approved` or `modified`. Eligibility and
+the marker write consume ONE locked read of the record. A none-by-rule
+result must also MEAN none: the branch holds the envelope lock, fails
+closed if any envelope is active for the receiver (its normal lifecycle
+clears it — never a silent delete, never a false `none`), and consumes
+the compiling session's pending claim so a deliberate no-envelope
+success cannot bind a later, unrelated compile.
+
+This is a deliberate, recorded exception to "a grant removes friction,
+never the bound": for approved public work the **human is the bound**,
+and the exception retires when a post-approval envelope path (compile
+consuming the recorded approval into a workable public envelope) ships.
+Private tasks, and public tasks without a matching eligible record, are
+entirely unaffected: the fail-closed compile below still runs, and an
+unapproved public envelope still denies at the hook.
+
 The envelope is written to
 `agents/<receiver>/state/active_envelope.json`:
 
 ```json
 {
   "envelope_version": 1,
-  "spec_version": "0.4.1",
+  "spec_version": "0.4.2",
   "compiler": "envelope_compiler.py",
   "compiled_at_utc": "2026-07-12T02:00:00Z",
   "project": "my-project",
@@ -705,7 +822,11 @@ dispatched task's constraints nor consumes its file budget. The scope never
 silently narrows: an unbound envelope enforces every session in the
 (project, agent) workspace exactly as before, and a caller the harness gave
 no session id is enforced even under a bound envelope (it cannot be proven
-foreign).
+foreign). A foreign session still cannot mutate the shared envelope state;
+only provably read-only inspection is exempt. The `oacp envelope show`
+inspection grammar recognizes argparse-equivalent value options in both
+`--option value` and `--option=value` forms, plus unambiguous long-option
+abbreviations and help flags, while unknown options continue to fail closed.
 
 Runtime decisions:
 
@@ -762,6 +883,14 @@ Runtime decisions:
 - Determinable Bash write targets feed the same distinct-file counter as
   Edit/Write calls (`/dev/*` excluded), so shell writes cannot bypass
   `expected_files_touched`.
+- A `pyproject.toml` Edit or Write under `touches_dependencies: false` is
+  exempt from the dependency-manifest denial only when the hook can
+  reconstruct both complete documents and prove that every byte outside the
+  sole `[project] version` string literal is unchanged. The file still counts
+  toward `expected_files_touched`. Dependency, optional-dependency, and
+  build-system changes remain denied, as do mixed edits, ambiguous or
+  unsupported file-tool inputs, and every Bash-side manifest write whose
+  resulting content cannot be proven before execution.
 - Protocol bookkeeping never consumes the file budget. The receiver's own
   `audit/`, `inbox/`, and `outbox/` directories and the runtime scratchpad
   (reply/body-file composition) are the enforcement layer's instrumentation
@@ -836,8 +965,13 @@ envelope compile --extend`, which preserves accumulated counters.
 
 The audit `result` block records `envelope_enforcement: hooks | none`.
 Receivers set `hooks` after a successful compile on an adapter-equipped
-runtime; `none` means pickup-gate-only enforcement (no adapter for the
-runtime yet). Degradation must never be silent.
+runtime; `none` means pickup-gate-only enforcement. Degradation must never
+be silent: when `none` is a **rule** rather than a runtime gap, the record
+carries the named reason alongside it —
+`envelope_enforcement_reason: public_visibility_admission_approved` for
+the admitted-public branch above, stamped by the compiler itself. A bare
+`none` with no reason means an adapterless runtime (the historical
+pickup-gate-only state), distinguishable from the rule-based mode.
 
 Enforcement boundary: hooks constrain every tool call inside the session,
 including subagent tool calls, and fire before sandbox/permission

@@ -829,6 +829,23 @@ def edit(path: str, envelope: Optional[Dict[str, Any]] = None) -> hook.Decision:
     return hook.classify("Edit", {"file_path": path}, "/repo", envelope)
 
 
+def _pyproject_text(version: str = "0.4.1") -> str:
+    return f'''[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "demo"
+version = "{version}"
+dependencies = [
+  "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+crypto = ["cryptography>=3.4"]
+'''
+
+
 def test_secret_paths_denied() -> None:
     for path in (
         "/repo/.env",
@@ -857,6 +874,128 @@ def test_dependency_manifest_allowed_when_declared() -> None:
         "/repo/pyproject.toml", make_envelope(touches_dependencies=True)
     )
     assert decision.action == "allow"
+
+
+@pytest.mark.parametrize("tool_name", ["Edit", "Write"])
+def test_version_only_pyproject_file_tool_edit_allowed_and_counted(
+    tmp_path: Path,
+    tool_name: str,
+) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    before = _pyproject_text()
+    pyproject.write_text(before, encoding="utf-8")
+    tool_input: Dict[str, Any] = {"file_path": str(pyproject)}
+    if tool_name == "Edit":
+        tool_input.update(
+            old_string='version = "0.4.1"',
+            new_string='version = "0.4.2"',
+        )
+    else:
+        tool_input["content"] = _pyproject_text("0.4.2")
+
+    decision = hook.classify(
+        tool_name,
+        tool_input,
+        str(tmp_path),
+        make_envelope(),
+    )
+
+    assert decision.action == "allow"
+    assert decision.new_files == [str(pyproject)]
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (
+            'dependencies = [\n  "PyYAML>=6.0",\n]',
+            'dependencies = [\n  "PyYAML>=6.0",\n  "httpx>=0.27",\n]',
+        ),
+        (
+            'crypto = ["cryptography>=3.4"]',
+            'crypto = ["cryptography>=44"]',
+        ),
+        (
+            'requires = ["hatchling>=1.27"]',
+            'requires = ["hatchling>=1.28"]',
+        ),
+    ],
+)
+def test_real_pyproject_dependency_edit_stays_denied(
+    tmp_path: Path,
+    old: str,
+    new: str,
+) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(_pyproject_text(), encoding="utf-8")
+
+    decision = hook.classify(
+        "Edit",
+        {"file_path": str(pyproject), "old_string": old, "new_string": new},
+        str(tmp_path),
+        make_envelope(),
+    )
+
+    assert decision.action == "deny"
+    assert "touches_dependencies: false" in decision.reason
+
+
+def test_mixed_version_and_dependency_pyproject_edit_stays_denied(
+    tmp_path: Path,
+) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(_pyproject_text(), encoding="utf-8")
+    old = 'version = "0.4.1"\ndependencies = [\n  "PyYAML>=6.0",\n]'
+    new = (
+        'version = "0.4.2"\ndependencies = [\n'
+        '  "PyYAML>=6.0",\n  "httpx>=0.27",\n]'
+    )
+
+    decision = hook.classify(
+        "Edit",
+        {"file_path": str(pyproject), "old_string": old, "new_string": new},
+        str(tmp_path),
+        make_envelope(),
+    )
+
+    assert decision.action == "deny"
+    assert "touches_dependencies: false" in decision.reason
+
+
+def test_pyproject_write_with_dependency_change_stays_denied(
+    tmp_path: Path,
+) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(_pyproject_text(), encoding="utf-8")
+    content = _pyproject_text("0.4.2").replace(
+        '  "PyYAML>=6.0",\n',
+        '  "PyYAML>=6.0",\n  "httpx>=0.27",\n',
+    )
+
+    decision = hook.classify(
+        "Write",
+        {"file_path": str(pyproject), "content": content},
+        str(tmp_path),
+        make_envelope(),
+    )
+
+    assert decision.action == "deny"
+    assert "touches_dependencies: false" in decision.reason
+
+
+def test_bash_version_edit_of_pyproject_stays_fail_closed(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(_pyproject_text(), encoding="utf-8")
+
+    decision = hook.classify(
+        "Bash",
+        {"command": f"sed -i s/0.4.1/0.4.2/ {pyproject}"},
+        str(tmp_path),
+        make_envelope(),
+    )
+
+    assert decision.action == "deny"
+    assert "touches_dependencies: false" in decision.reason
 
 
 def test_file_counter_drift_denied_with_canonical_opener() -> None:
@@ -1103,7 +1242,15 @@ def test_foreign_session_readonly_state_inspection_keeps_bypass(
     readonly_commands = [
         f"cat {target}",
         "oacp envelope show --project test-proj --oacp-dir /home",
+        (
+            "oacp envelope show --project=test-proj --oacp-dir=/home "
+            "--receiver=claude"
+        ),
         "python3 -m oacp.cli envelope show --project test-proj",
+        "python3 -m oacp.cli envelope show --project=test-proj",
+        "oacp envelope show --pro=test-proj --rec claude",
+        "oacp envelope show --help",
+        "oacp envelope show -h",
         f"cd {target.parent} && cat active_envelope.json | grep session_id",
         f"stat {target}; wc -l {target}",
     ]
@@ -1382,6 +1529,42 @@ def test_compile_claim_survives_option_before_positional(tmp_path: Path) -> None
     assert decision.action == "allow"
     claim_file = session_claim_path(target, "sess-a")
     assert json.loads(claim_file.read_text(encoding="utf-8"))["message_name"] == "msg_z.yaml"
+
+
+def test_compile_claim_survives_audit_option_before_positional(
+    tmp_path: Path,
+) -> None:
+    """--audit consumes a value: its argument is never the message.
+
+    Covers the executable, module, and script spellings — a desynced
+    option grammar would claim ``audit.yaml`` and leave the real compile
+    unbound for every session.
+    """
+    repo = _make_workspace(tmp_path)
+    target = envelope_path(tmp_path / "home", "test-proj", "claude")
+
+    commands = (
+        "oacp envelope compile --audit /audit/record.yaml "
+        "--receiver claude /inbox/msg_z.yaml",
+        "python3 -m oacp.cli envelope compile --audit /audit/record.yaml "
+        "/inbox/msg_z.yaml",
+        "python3 scripts/envelope_compiler.py compile "
+        "--audit /audit/record.yaml /inbox/msg_z.yaml",
+    )
+    for index, command in enumerate(commands):
+        session = f"sess-audit-{index}"
+        decision = hook.process(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+                "cwd": str(repo),
+                "session_id": session,
+            }
+        )
+        assert decision.action == "allow"
+        claim_file = session_claim_path(target, session)
+        claim = json.loads(claim_file.read_text(encoding="utf-8"))
+        assert claim["message_name"] == "msg_z.yaml", command
 
 
 def test_process_writes_no_claim_without_session_or_compile(tmp_path: Path) -> None:
