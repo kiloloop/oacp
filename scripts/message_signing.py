@@ -44,7 +44,7 @@ import re
 import stat
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import AbstractSet, Any, Dict, List, Optional, Sequence, Tuple
 
 from _oacp_constants import AGENT_RE, utc_now_iso
 
@@ -276,19 +276,42 @@ def validate_kid(value: Any) -> None:
 # Protected header + signing input (the PAE preimage)
 # ---------------------------------------------------------------------------
 
-def build_protected_header(kid: str, agent: str, instance: str) -> Dict[str, Any]:
-    """Strict OACP protected header. `agent`/`instance` are full URNs."""
+def build_protected_header(
+    kid: str,
+    agent: str,
+    instance: str,
+    *,
+    typ: str = JWS_TYP,
+    domain: str = SIG_DOMAIN,
+    extra_oacp: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Strict OACP protected header. `agent`/`instance` are full URNs.
+
+    ``typ``/``domain`` default to the message profile; other signed artifact
+    classes (policy files) pass their own pair so a signature can never be
+    replayed across artifact classes. ``extra_oacp`` carries profile-specific
+    claims merged into the ``oacp`` member (the policy profile binds its
+    target context here); keys must not collide with the base claim set.
+    """
+    oacp: Dict[str, Any] = {
+        "scheme": SIG_SCHEME,
+        "domain": domain,
+        "agent": agent,
+        "instance": instance,
+    }
+    if extra_oacp:
+        collisions = sorted(set(extra_oacp) & set(oacp))
+        if collisions:
+            raise AuthFormatError(
+                f"extra oacp claim(s) collide with base claims: {', '.join(collisions)}"
+            )
+        oacp.update(extra_oacp)
     return {
         "alg": JWS_ALG,
-        "typ": JWS_TYP,
+        "typ": typ,
         "kid": kid,
         "crit": list(CRIT_PARAMS),
-        "oacp": {
-            "scheme": SIG_SCHEME,
-            "domain": SIG_DOMAIN,
-            "agent": agent,
-            "instance": instance,
-        },
+        "oacp": oacp,
     }
 
 
@@ -309,11 +332,23 @@ def signing_input(protected_b64: str, payload: bytes) -> bytes:
     )
 
 
-def validate_protected_header(protected_b64: str) -> Dict[str, Any]:
+def validate_protected_header(
+    protected_b64: str,
+    *,
+    expected_typ: str = JWS_TYP,
+    expected_domain: str = SIG_DOMAIN,
+    extra_oacp_keys: AbstractSet[str] = frozenset(),
+) -> Dict[str, Any]:
     """Decode + structurally validate one protected header (no crypto).
 
     Enforces the locked JOSE profile: EdDSA only, exact key set, crit:oacp,
-    URN identity, no key-location/certificate parameters.
+    URN identity, no key-location/certificate parameters. ``expected_typ``/
+    ``expected_domain`` default to the message profile; verifying another
+    artifact class (policy files) passes its own pair, so a header signed
+    for one class always fails validation in the other. ``extra_oacp_keys``
+    names profile-specific ``oacp`` members that are REQUIRED for that
+    profile (still an exact key set — extras remain unknown-member errors);
+    semantic validation of their values belongs to the profile's verifier.
     """
     if not isinstance(protected_b64, str) or len(protected_b64) > MAX_PROTECTED_CHARS:
         raise AuthFormatError("protected header missing or oversized")
@@ -333,8 +368,8 @@ def validate_protected_header(protected_b64: str) -> Dict[str, Any]:
 
     if header["alg"] != JWS_ALG:
         raise AuthFormatError(f"alg must be {JWS_ALG!r}")
-    if header["typ"] != JWS_TYP:
-        raise AuthFormatError(f"typ must be {JWS_TYP!r}")
+    if header["typ"] != expected_typ:
+        raise AuthFormatError(f"typ must be {expected_typ!r}")
     validate_kid(header["kid"])
     if header["crit"] != CRIT_PARAMS:
         raise AuthFormatError(f"crit must be exactly {CRIT_PARAMS!r}")
@@ -342,15 +377,16 @@ def validate_protected_header(protected_b64: str) -> Dict[str, Any]:
     oacp = header["oacp"]
     if not isinstance(oacp, dict):
         raise AuthFormatError("oacp header member must be a JSON object")
-    unknown = sorted(set(oacp) - OACP_HEADER_KEYS)
+    expected_oacp_keys = set(OACP_HEADER_KEYS) | set(extra_oacp_keys)
+    unknown = sorted(set(oacp) - expected_oacp_keys)
     if unknown:
         raise AuthFormatError(f"unknown oacp header member(s): {', '.join(unknown)}")
-    missing = sorted(OACP_HEADER_KEYS - set(oacp))
+    missing = sorted(expected_oacp_keys - set(oacp))
     if missing:
         raise AuthFormatError(f"missing oacp header member(s): {', '.join(missing)}")
     if oacp["scheme"] != SIG_SCHEME:
         raise AuthFormatError(f"unknown signing scheme: {oacp['scheme']!r}")
-    if oacp["domain"] != SIG_DOMAIN:
+    if oacp["domain"] != expected_domain:
         raise AuthFormatError(f"unknown signing domain: {oacp['domain']!r}")
     validate_agent_urn(oacp["agent"])
     validate_instance_urn(oacp["instance"])
@@ -477,7 +513,14 @@ def auth_structure_errors(auth_value: Any) -> List[str]:
 # Signing (sender half)
 # ---------------------------------------------------------------------------
 
-def sign_payload(payload: bytes, signers: Sequence["FileKeySigner"]) -> str:
+def sign_payload(
+    payload: bytes,
+    signers: Sequence["FileKeySigner"],
+    *,
+    typ: str = JWS_TYP,
+    domain: str = SIG_DOMAIN,
+    extra_oacp: Optional[Dict[str, Any]] = None,
+) -> str:
     """Sign the raw prefix bytes with 1-8 signers; return the auth value."""
     if not signers:
         raise SigningUnavailableError("no signing keys provided")
@@ -486,7 +529,12 @@ def sign_payload(payload: bytes, signers: Sequence["FileKeySigner"]) -> str:
     entries = []
     for signer in signers:
         header = build_protected_header(
-            kid=signer.kid, agent=signer.agent_urn, instance=signer.instance_urn
+            kid=signer.kid,
+            agent=signer.agent_urn,
+            instance=signer.instance_urn,
+            typ=typ,
+            domain=domain,
+            extra_oacp=extra_oacp,
         )
         protected_b64 = encode_protected_header(header)
         signature = signer.sign(signing_input(protected_b64, payload))

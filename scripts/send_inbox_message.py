@@ -54,7 +54,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from _oacp_constants import utc_now_iso
+from _oacp_constants import is_agent_dir, utc_now_iso
 
 # Import validation from sibling script
 _scripts_dir = Path(__file__).resolve().parent
@@ -158,7 +158,7 @@ def _matching_agent_cards(project_dir: Path, runtime: str) -> List[str]:
 
     matches: List[str] = []
     for agent_dir in sorted(agents_dir.iterdir()):
-        if not agent_dir.is_dir():
+        if not is_agent_dir(agent_dir):
             continue
         card_path = agent_dir / "agent_card.yaml"
         if not card_path.is_file():
@@ -257,17 +257,45 @@ def find_parent_message(
     """Search sender's inbox and outbox for a message with the given ID.
 
     Returns dict with 'conversation_id' if found, else None.
+
+    The inbox side is untrusted input, so it goes through the shared
+    receive boundary: under the sender's own ``enforce`` mode an
+    unverified message is held and can never donate thread identity
+    (``conversation_id``) to an outgoing reply. Outbox artifacts are
+    self-authored and read directly.
     """
+    from message_verify import (
+        read_verified_inbox_message,
+        receiver_intake_context,
+    )
     from validate_message import _parse_simple_yaml
 
+    def _parse(raw: bytes, path: Path) -> Dict[str, Any]:
+        return _parse_simple_yaml(raw.decode("utf-8"))
+
+    context = receiver_intake_context(
+        project_dir / "agents" / sender,
+        receiver=sender,
+        project=project_dir.name,
+        oacp_dir=str(project_dir.parent.parent),
+    )
     for subdir in ("inbox", "outbox"):
         search_dir = project_dir / "agents" / sender / subdir
         if not search_dir.is_dir():
             continue
         for yaml_file in search_dir.glob("*.yaml"):
             try:
-                raw = yaml_file.read_text(encoding="utf-8")
-                data = _parse_simple_yaml(raw)
+                if subdir == "inbox":
+                    read = read_verified_inbox_message(
+                        yaml_file, context, _parse
+                    )
+                    if read["held"] or read["data"] is None:
+                        continue
+                    data = read["data"]
+                else:
+                    data = _parse_simple_yaml(
+                        yaml_file.read_text(encoding="utf-8")
+                    )
                 if str(data.get("id", "")).strip() == parent_id:
                     result: Dict[str, str] = {}
                     conv_id = str(data.get("conversation_id", "")).strip()
@@ -541,20 +569,30 @@ def _load_signing_config(project_dir: Path, sender: str) -> Dict[str, Any]:
     if not config_path.is_file():
         return {}
     try:
-        import yaml  # type: ignore
+        import yaml  # type: ignore # noqa: F401 - availability probe only
     except ImportError:  # pragma: no cover - PyYAML is an install dependency
         return {}
+    # Authorized policy read: whether a send signs is policy, so the config
+    # that decides it must itself be authorized (a tampered or
+    # stripped-when-enrolled config fails the send, it never silently
+    # downgrades signing intent).
+    import policy_signing
+
     try:
-        loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    except Exception as exc:
+        loaded, _policy_auth, _raw = policy_signing.load_authorized_policy(
+            config_path,
+            project_dir.parent.parent,
+            receiver=sender,
+            kind=policy_signing.POLICY_KIND_RECEIVER_CONFIG,
+            project=project_dir.name,
+        )
+    except policy_signing.PolicyAuthError as exc:
         raise ValueError(
             f"cannot read sender config {config_path}: {exc} — refusing to "
             "guess signing intent"
         ) from exc
-    if loaded is None:
+    if not loaded:
         return {}
-    if not isinstance(loaded, dict):
-        raise ValueError(f"sender config {config_path} must be a YAML mapping")
     signing = loaded.get("signing")
     if signing is None:
         return {}

@@ -7,15 +7,21 @@ created_at_utc: "2026-07-10T23:51:00Z"
 subject: "Negated guardrails fallback"
 body: |
   ## Task
-  Clarify one documentation paragraph. Do not merge or publish it.
-  Never touch secrets.
+  Clarify one documentation paragraph.
+
+  Out of scope:
+  - merge or publish it
+  - touch secrets
 
   task_profile:
     estimated_minutes: 10
     risk_tier: P3
     expected_files_touched: 1
     destructive_ops: false
-    external_side_effects: false
+    external_side_effects: true
     touches_auth_config_or_secrets: false
     touches_dependencies: false
     public_visibility: false
+    target_repo: example-org/private-repo
+    creates_or_updates_pr: true
+    commits_changes: true

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "oacp-cli"
-version = "0.4.1"
+version = "0.4.2"
 description = "Open Agent Coordination Protocol CLI for file-based multi-agent workflows"
 readme = "README.md"
 license = "Apache-2.0"
@@ -67,6 +67,7 @@ packages = ["oacp"]
 "scripts/init_project_workspace.py" = "oacp/_scripts/init_project_workspace.py"
 "scripts/send_inbox_message.py" = "oacp/_scripts/send_inbox_message.py"
 "scripts/message_signing.py" = "oacp/_scripts/message_signing.py"
+"scripts/policy_signing.py" = "oacp/_scripts/policy_signing.py"
 "scripts/key_cli.py" = "oacp/_scripts/key_cli.py"
 "scripts/message_verify.py" = "oacp/_scripts/message_verify.py"
 "scripts/trust_root.py" = "oacp/_scripts/trust_root.py"

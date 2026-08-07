@@ -10,5 +10,6 @@ expected:
     - message_hash_recorded
     - task_profile_not_required
     - task_type_allowed
+    - risk_threshold_passed
     - hard_stops_clear
     - workspace_check_required

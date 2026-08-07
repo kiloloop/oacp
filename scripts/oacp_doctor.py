@@ -37,6 +37,7 @@ from _oacp_constants import (
     ALL_RUNTIMES,
     CANONICAL_CAPABILITIES,
     REPO_SLUG_RE,
+    is_agent_dir,
     utc_now_iso,
 )
 from memory_sync import (
@@ -278,7 +279,7 @@ def check_workspace(project_dir: Path) -> DoctorCategory:
             fix_hint=f"Run: make init PROJECT={project_dir.name}",
         ))
     else:
-        agent_count = sum(1 for d in agents_dir.iterdir() if d.is_dir())
+        agent_count = sum(1 for d in agents_dir.iterdir() if is_agent_dir(d))
         cat.results.append(DoctorResult(
             name="agents/",
             severity=Severity.ok,
@@ -318,7 +319,7 @@ def check_inbox_health(
 
     now = now_fn() if now_fn is not None else dt.datetime.now(dt.timezone.utc)
     for agent_dir in sorted(agents_dir.iterdir()):
-        if not agent_dir.is_dir():
+        if not is_agent_dir(agent_dir):
             continue
         agent_name = agent_dir.name
         inbox_dir = agent_dir / "inbox"
@@ -421,7 +422,7 @@ def check_schemas(
     agents_dir = project_dir / "agents"
     if agents_dir.is_dir():
         for agent_dir in sorted(agents_dir.iterdir()):
-            if not agent_dir.is_dir():
+            if not is_agent_dir(agent_dir):
                 continue
             status_file = agent_dir / "status.yaml"
             if not status_file.is_file():
@@ -621,7 +622,7 @@ def check_autonomy(
             loader = yaml_mod.safe_load
 
     for agent_dir in sorted(agents_dir.iterdir()):
-        if not agent_dir.is_dir():
+        if not is_agent_dir(agent_dir):
             continue
         agent_name = agent_dir.name
         audit_dir = agent_dir / "audit" / "autonomy_decisions"
@@ -679,6 +680,79 @@ def check_autonomy(
                     ),
                 ))
 
+        # Policy-file authorization status: doctor diagnoses, the
+        # authorized loaders are the enforcement. An invalid signature is
+        # an error here because every consumer will fail closed on it.
+        try:
+            import policy_signing
+        except ImportError:  # pragma: no cover - packaging guard
+            policy_signing = None  # type: ignore[assignment]
+        if policy_signing is not None:
+            policy_targets = (
+                (config_file, policy_signing.POLICY_KIND_RECEIVER_CONFIG),
+                (
+                    agent_dir / "trust" / "allowed_signers.yaml",
+                    policy_signing.POLICY_KIND_ALLOWED_SIGNERS,
+                ),
+            )
+            for target, kind in policy_targets:
+                if not target.is_file():
+                    continue
+                rel = f"{agent_name}/{target.relative_to(agent_dir)}"
+                try:
+                    auth = policy_signing.verify_policy_file(
+                        target,
+                        project_dir.parent.parent,
+                        receiver=agent_name,
+                        kind=kind,
+                    )
+                except Exception as exc:
+                    cat.results.append(DoctorResult(
+                        name=f"{rel}:policy-auth",
+                        severity=Severity.error,
+                        message=f"{rel} — policy authorization check failed: {exc}",
+                    ))
+                    continue
+                status = auth["status"]
+                if status == policy_signing.POLICY_STATUS_VERIFIED:
+                    cat.results.append(DoctorResult(
+                        name=f"{rel}:policy-auth",
+                        severity=Severity.ok,
+                        message=(
+                            f"{rel} — policy signature verified "
+                            f"(signer {auth['signer_agent']})"
+                        ),
+                    ))
+                elif status == policy_signing.POLICY_STATUS_INVALID:
+                    cat.results.append(DoctorResult(
+                        name=f"{rel}:policy-auth",
+                        severity=Severity.error,
+                        message=(
+                            f"{rel} — policy signature INVALID "
+                            f"({auth['reason']}); loaders fail closed"
+                        ),
+                        fix_hint=(
+                            f"oacp trust sign-policy --project {project_dir.name} "
+                            f"--agent {agent_name}"
+                        ),
+                    ))
+                elif status == policy_signing.POLICY_STATUS_UNSUPPORTED:
+                    cat.results.append(DoctorResult(
+                        name=f"{rel}:policy-auth",
+                        severity=Severity.warn,
+                        message=(
+                            f"{rel} — policy signature present but "
+                            "unverifiable (cryptography unavailable)"
+                        ),
+                        fix_hint="Install: pip install 'oacp-cli[crypto]'",
+                    ))
+                else:
+                    cat.results.append(DoctorResult(
+                        name=f"{rel}:policy-auth",
+                        severity=Severity.ok,
+                        message=f"{rel} — unsigned (bootstrap state)",
+                    ))
+
         orphaned: List[str] = []
         if audit_dir.is_dir() and loader is not None:
             for event_file in sorted(audit_dir.glob("*.yaml")):
@@ -733,7 +807,7 @@ def check_agent_status(
             loader = yaml_mod.safe_load
 
     for agent_dir in sorted(agents_dir.iterdir()):
-        if not agent_dir.is_dir():
+        if not is_agent_dir(agent_dir):
             continue
         agent_name = agent_dir.name
         status_file = agent_dir / "status.yaml"
@@ -807,10 +881,30 @@ def _configured_enforce_receivers(
     receivers: List[str] = []
     for agent_dir in sorted(agents_dir.iterdir()):
         config_path = agent_dir / "config.yaml"
-        if not agent_dir.is_dir() or not config_path.is_file():
+        if not is_agent_dir(agent_dir) or not config_path.is_file():
             continue
         try:
-            config = loader(config_path.read_text(encoding="utf-8"))
+            import policy_signing
+
+            config, _policy_auth, _raw = policy_signing.load_authorized_policy(
+                config_path,
+                project_dir.parent.parent,
+                receiver=agent_dir.name,
+                kind=policy_signing.POLICY_KIND_RECEIVER_CONFIG,
+                project=project_dir.name,
+            )
+        except ImportError:  # pragma: no cover - packaging guard
+            try:
+                config = loader(config_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue  # Schema checks report malformed configs separately.
+        except policy_signing.PolicyAuthError:
+            # Unauthorized bytes must not drive readiness — and an
+            # unauthorized config cannot prove it does NOT enforce, so
+            # readiness escalates conservatively (the per-receiver
+            # policy-auth check reports the failure itself).
+            receivers.append(agent_dir.name)
+            continue
         except Exception:
             continue  # Schema checks report malformed configs separately.
         if not isinstance(config, dict):
@@ -827,10 +921,11 @@ def _configured_enforce_receivers(
 def _trust_completeness(project_dir: Path) -> Optional[Dict[str, Any]]:
     """Count both gap directions for every locally profiled receiver."""
     try:
-        from message_verify import ALLOWED_SIGNERS_RELPATH, load_allowed_signers
+        from message_verify import ALLOWED_SIGNERS_RELPATH
         from trust_root import (
             CATALOG_RELPATH,
             TrustRootError,
+            _load_pins_authorized,
             load_catalog,
             receiver_pin_gaps,
         )
@@ -851,7 +946,7 @@ def _trust_completeness(project_dir: Path) -> Optional[Dict[str, Any]]:
     pin_to_catalog = 0
     receiver_gaps: Dict[str, Dict[str, int]] = {}
     for agent_dir in sorted(agents_dir.iterdir()):
-        if not agent_dir.is_dir():
+        if not is_agent_dir(agent_dir):
             continue
         pins_path = agent_dir / ALLOWED_SIGNERS_RELPATH
         # Legacy workspaces may retain bare agent directories that were never
@@ -861,7 +956,11 @@ def _trust_completeness(project_dir: Path) -> Optional[Dict[str, Any]]:
         if not (agent_dir / "config.yaml").is_file() and not pins_path.is_file():
             continue
         try:
-            pins = load_allowed_signers(pins_path)
+            # Authorized read: completeness severity is a readiness input,
+            # so unauthorized pin bytes must not feed it.
+            pins = _load_pins_authorized(
+                pins_path, project_dir=project_dir, receiver=agent_dir.name
+            )
         except TrustRootError:
             continue  # The canonical drift report emits the blocking detail.
 

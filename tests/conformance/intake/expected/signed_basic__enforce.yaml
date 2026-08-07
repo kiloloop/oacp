@@ -1,0 +1,9 @@
+case: signed_basic__enforce
+mode: enforce
+config: configs/enforce.yaml
+message: ../signing/messages/signed_basic.yaml
+expected:
+  intake_action: proceed
+  exit_code: 0
+  annotation_label: signed-verified
+  quarantined: false

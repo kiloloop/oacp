@@ -1,0 +1,9 @@
+case: tamper_body_flip__warn
+mode: warn
+config: configs/warn.yaml
+message: ../signing/messages/tamper_body_flip.yaml
+expected:
+  intake_action: proceed
+  exit_code: 0
+  annotation_label: signed-INVALID
+  quarantined: false

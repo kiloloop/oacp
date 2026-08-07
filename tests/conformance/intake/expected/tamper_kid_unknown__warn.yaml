@@ -1,0 +1,9 @@
+case: tamper_kid_unknown__warn
+mode: warn
+config: configs/warn.yaml
+message: ../signing/messages/tamper_kid_unknown.yaml
+expected:
+  intake_action: proceed
+  exit_code: 0
+  annotation_label: signed-unknown-kid
+  quarantined: false

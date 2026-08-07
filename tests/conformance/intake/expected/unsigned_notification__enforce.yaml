@@ -1,0 +1,9 @@
+case: unsigned_notification__enforce
+mode: enforce
+config: configs/enforce.yaml
+message: ../signing/messages/unsigned_notification.yaml
+expected:
+  intake_action: reject
+  exit_code: 3
+  annotation_label: unsigned
+  quarantined: true

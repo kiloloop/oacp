@@ -32,12 +32,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
-from _oacp_constants import SPEC_VERSION, utc_now_iso
+from _oacp_constants import SPEC_VERSION, locked_audit, utc_now_iso
 from autonomy_gate import (
     AutonomyConfigError,
     TaskProfileError,
     extract_task_profile,
-    load_yaml_file,
     message_sha256,
     normalize_scope_envelope,
     receiver_policy,
@@ -47,6 +46,10 @@ ENVELOPE_VERSION = 1
 ENVELOPE_SPEC_VERSION = SPEC_VERSION
 ENVELOPE_FILENAME = "active_envelope.json"
 ENVELOPE_COMPILE_ERROR = "envelope_compile_error"
+# The named none-by-rule marker for admitted public-visibility tasks whose
+# human admission approval is the runtime control: no envelope compiles,
+# and the audit record says so explicitly rather than staying silent.
+ENFORCEMENT_REASON_PUBLIC_APPROVED = "public_visibility_admission_approved"
 
 # Session-claim sidecar: the runtime hook records the compiling session's
 # identity here (it alone sees the harness session id, on the tool call that
@@ -90,6 +93,19 @@ class EnvelopeCompileError(ValueError):
     reason_code = ENVELOPE_COMPILE_ERROR
 
 
+def _parse_message_snapshot(raw: bytes, path: Path) -> Dict[str, Any]:
+    """Parse the admitted message from its verified snapshot bytes."""
+    import yaml  # type: ignore
+
+    try:
+        data = yaml.safe_load(raw.decode("utf-8"))
+    except Exception as exc:
+        raise EnvelopeCompileError(f"cannot parse message {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise EnvelopeCompileError(f"{path} must contain a YAML mapping")
+    return data
+
+
 def build_envelope(
     message: Dict[str, Any],
     config: Dict[str, Any],
@@ -99,6 +115,7 @@ def build_envelope(
     message_path: Optional[Path] = None,
     now_iso: Optional[str] = None,
     session_id: Optional[str] = None,
+    message_raw: Optional[bytes] = None,
 ) -> Dict[str, Any]:
     """Return an envelope dict for an admitted message, or raise
     :class:`EnvelopeCompileError`.
@@ -144,7 +161,7 @@ def build_envelope(
         "project": project,
         "receiver": receiver,
         "message_id": message_id,
-        "message_sha256": message_sha256(message, message_path),
+        "message_sha256": message_sha256(message, message_path, message_raw),
         "constraints": constraints,
         "counters": {
             "files_touched": [],
@@ -332,9 +349,121 @@ def _resolve_project(args: argparse.Namespace, message_path: Optional[Path]) -> 
     )
 
 
+def _resolve_admission_audit_path(
+    raw: str, oacp_root: Path, project: str, receiver: str
+) -> Path:
+    """Contain ``--audit`` to the receiver's canonical admission audit dir.
+
+    The record authorizes skipping envelope enforcement, so an arbitrary
+    readable YAML path must never qualify — only a record the admission
+    gate itself could have written.
+    """
+    canonical = (
+        oacp_root / "projects" / project / "agents" / receiver
+        / "audit" / "autonomy_decisions"
+    ).resolve()
+    resolved = Path(raw).resolve()
+    try:
+        resolved.relative_to(canonical)
+    except ValueError:
+        raise EnvelopeCompileError(
+            "--audit must name a record inside the receiver's canonical "
+            f"admission audit directory ({canonical}); got {resolved}"
+        ) from None
+    return resolved
+
+
+def _stamp_none_by_rule_approved(
+    audit_path: Path,
+    *,
+    message_id: str,
+    receiver: str,
+    message_sha256: str,
+) -> bool:
+    """Validate and stamp the approval record in ONE locked read.
+
+    Eligibility and the marker write consume the same locked snapshot — a
+    record swapped after a separate eligibility read can never be the one
+    stamped. Eligible means: an admission-PAUSED record (the gate's
+    ``decision: paused`` with ``completion_kind: admission_paused``),
+    carrying a ``schema_version``, content-matched on ``message_id`` +
+    ``receiver`` (never the filename), bound to the exact verified message
+    snapshot via ``message_sha256``, with a recorded human outcome of
+    ``approved`` or ``modified``. Returns True when stamped;
+    ``envelope_enforcement`` stays ``none`` and the named reason is what
+    makes the mode a recorded rule rather than a silent absence.
+    """
+    import yaml  # type: ignore
+
+    audit_path = Path(audit_path)
+    with locked_audit(audit_path):
+        try:
+            audit = yaml.safe_load(audit_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            return False
+        if not isinstance(audit, dict):
+            return False
+        result = audit.get("result")
+        outcome = (
+            result.get("human_outcome") if isinstance(result, dict) else None
+        )
+        eligible = (
+            bool(audit.get("schema_version"))
+            and audit.get("message_id") == message_id
+            and audit.get("receiver") == receiver
+            and audit.get("message_sha256") == message_sha256
+            and audit.get("decision") == "paused"
+            and isinstance(result, dict)
+            and result.get("completion_kind") == "admission_paused"
+            and isinstance(outcome, dict)
+            and outcome.get("recorded") is True
+            and outcome.get("decision") in ("approved", "modified")
+        )
+        if not eligible:
+            return False
+        result["envelope_enforcement"] = "none"
+        result["envelope_enforcement_reason"] = (
+            ENFORCEMENT_REASON_PUBLIC_APPROVED
+        )
+        content = yaml.safe_dump(audit, sort_keys=False, allow_unicode=True)
+        mode = audit_path.stat().st_mode
+        temp_path: Optional[Path] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=str(audit_path.parent),
+                prefix=f".{audit_path.name}.",
+                suffix=".ee.tmp",
+                delete=False,
+            ) as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+                temp_path = Path(handle.name)
+            os.chmod(temp_path, mode)
+            os.replace(temp_path, audit_path)
+            temp_path = None
+        finally:
+            if temp_path is not None and temp_path.exists():
+                temp_path.unlink()
+    return True
+
+
 def _cmd_compile(args: argparse.Namespace, oacp_root: Path) -> int:
+    from message_verify import (
+        STATUS_VERIFIED,
+        read_message_bounded,
+        verify_mode_from_config,
+    )
+
     message_path = Path(args.message)
-    message = load_yaml_file(message_path)
+    # One bounded snapshot: the bytes verified below are the bytes parsed
+    # into constraints and the bytes the envelope's message_sha256 names.
+    try:
+        message_raw = read_message_bounded(message_path)
+    except OSError as exc:
+        raise EnvelopeCompileError(f"cannot read message: {exc}") from exc
     project = _resolve_project(args, message_path)
 
     if args.config:
@@ -343,7 +472,51 @@ def _cmd_compile(args: argparse.Namespace, oacp_root: Path) -> int:
         config_path = oacp_root / "projects" / project / "agents" / args.receiver / "config.yaml"
     if not config_path.is_file():
         raise EnvelopeCompileError(f"receiver config not found: {config_path}")
-    config = load_yaml_file(config_path)
+    # Authorized policy read: the envelope's bounds come from the receiver
+    # config, so an unauthorized (tampered/stripped-when-enrolled) config
+    # must fail the compile, not silently shape the envelope.
+    import policy_signing
+
+    try:
+        config, _policy_auth, _raw = policy_signing.load_authorized_policy(
+            config_path,
+            oacp_root,
+            receiver=args.receiver,
+            kind=policy_signing.POLICY_KIND_RECEIVER_CONFIG,
+            project=project,
+        )
+    except policy_signing.PolicyAuthError as exc:
+        raise EnvelopeCompileError(str(exc)) from exc
+
+    # The runtime constraints come from the message, so the snapshot is
+    # verified under the (authorized) receiver policy before it is parsed:
+    # under enforce, an unverified message must not shape hook enforcement.
+    verify_mode = verify_mode_from_config(config)
+    if verify_mode in ("warn", "enforce"):
+        from message_verify import (
+            ALLOWED_SIGNERS_RELPATH,
+            _load_pins_policy_checked,
+            verify_message,
+        )
+
+        pins_path = config_path.parent / ALLOWED_SIGNERS_RELPATH
+        pins, trust_error, _trust_policy_auth = _load_pins_policy_checked(
+            pins_path, receiver=args.receiver, oacp_dir=str(oacp_root)
+        )
+        message_auth = verify_message(
+            message_raw,
+            pins,
+            trust_source=str(pins_path),
+            trust_error=trust_error,
+        )
+        if verify_mode == "enforce" and message_auth["status"] != STATUS_VERIFIED:
+            raise EnvelopeCompileError(
+                "message failed verification under enforce "
+                f"({message_auth['status']}: {message_auth['reason'] or 'not verified'}) "
+                "— refusing to compile an envelope from an unverified message"
+            )
+
+    message = _parse_message_snapshot(message_raw, message_path)
 
     envelope = build_envelope(
         message,
@@ -351,7 +524,71 @@ def _cmd_compile(args: argparse.Namespace, oacp_root: Path) -> int:
         receiver=args.receiver,
         project=project,
         message_path=message_path,
+        message_raw=message_raw,
     )
+
+    if envelope["constraints"]["public_visibility"] and args.audit:
+        # Admitted public-visibility tasks with recorded human admission
+        # approval run under envelope_enforcement: none BY RULE — the
+        # compiler deliberately does not compile (a compiled public
+        # envelope denies the entire approved chain), and the audit record
+        # names the mode instead of leaving an absent field. Human
+        # admission plus live supervision is the control; the exception is
+        # deliberate and recorded, and retires when a post-approval
+        # envelope path ships. Without a matching approved record the
+        # normal fail-closed compile below still runs.
+        audit_path = _resolve_admission_audit_path(
+            args.audit, oacp_root, project, args.receiver
+        )
+        target = envelope_path(oacp_root, project, args.receiver)
+        stamped = False
+        with envelope_lock(target):
+            # A none-by-rule result must MEAN no envelope governs the
+            # receiver: any active envelope fails closed and keeps its
+            # normal lifecycle (never silently deleted, never reported
+            # around).
+            if load_envelope(target) is not None:
+                raise EnvelopeCompileError(
+                    f"an active envelope already exists at {target}; a "
+                    "none-by-rule result must not coexist with an active "
+                    "envelope — clear it via `oacp envelope clear` first"
+                )
+            stamped = _stamp_none_by_rule_approved(
+                audit_path,
+                message_id=envelope["message_id"],
+                receiver=args.receiver,
+                message_sha256=envelope["message_sha256"],
+            )
+            if stamped:
+                # A deliberate no-envelope success still consumes this
+                # compile's session claim — a dangling claim would bind a
+                # later, unrelated compile.
+                consume_session_claim(target, message_path.name)
+        if stamped:
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "envelope_enforcement": "none",
+                            "envelope_enforcement_reason": (
+                                ENFORCEMENT_REASON_PUBLIC_APPROVED
+                            ),
+                            "message_id": envelope["message_id"],
+                            "audit_record": str(audit_path),
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+            else:
+                print(
+                    "OK: admitted public-visibility task with recorded human "
+                    "approval — envelope deliberately not compiled; "
+                    "envelope_enforcement: none "
+                    f"({ENFORCEMENT_REASON_PUBLIC_APPROVED}) recorded in "
+                    "the audit record"
+                )
+            return 0
 
     target = envelope_path(oacp_root, project, args.receiver)
     with envelope_lock(target):
@@ -442,6 +679,16 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "--config",
         default=None,
         help="Receiver config path (default: agents/<receiver>/config.yaml)",
+    )
+    compile_parser.add_argument(
+        "--audit",
+        default=None,
+        help=(
+            "Admission audit record for this message; on an admitted "
+            "public-visibility task with recorded human approval, the "
+            "envelope is deliberately not compiled and the record is "
+            "stamped envelope_enforcement: none by rule"
+        ),
     )
     compile_parser.add_argument(
         "--extend",

@@ -5,6 +5,129 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-08-07
+
+### Added
+
+- Profileless admitted requests now receive a documented **default scope
+  envelope** instead of running unbounded: 25 minutes / 2 files /
+  reply-only, every capability and risk flag false, `risk_tier` mirroring
+  the message's declared priority (else `P2`). `allow_without_task_profile`
+  is thereby an admission-only exemption — the sender needn't author a
+  profile, but the bound always exists, and the post-accept threshold
+  checkpoint is always evaluable. A sender-attached voluntary profile on an
+  exempt type is the documented override path and replaces the default
+  entirely. Every decision names its envelope origin in the new
+  `scope_envelope_source` field (`task_profile` / `default_profileless`),
+  and `scope_envelope: null` on an admitted record is now a schema
+  violation the audit writer refuses to persist. Protocol spec version
+  bumps to 0.4.2.
+- Admitted public-visibility tasks gain an explicit, recorded enforcement
+  branch: `oacp envelope compile --audit <admission-record>` on a
+  `public_visibility: true` task whose record carries a human admission
+  approval deliberately does **not** compile (a compiled public envelope
+  denies the entire approved chain) and instead stamps
+  `envelope_enforcement: none` with the named reason
+  `public_visibility_admission_approved` into the audit record — the
+  degradation is a documented mode with the human as the bound, not a
+  silent absence. The approval record is treated as authorization:
+  `--audit` must resolve inside the receiver's canonical admission audit
+  directory, the record must be an admission-paused record bound to the
+  exact verified message snapshot (`message_sha256`) with a recorded
+  `approved`/`modified` outcome, eligibility and the stamp consume one
+  locked read, and the branch fails closed while any envelope is active
+  for the receiver. Unapproved public tasks and all private tasks are
+  unaffected and keep the fail-closed compile path.
+- `signing.verify_mode: enforce` is now a real mode with a real caller.
+  The autonomy gate invokes verification at message intake, before any
+  evaluation: under enforce, only a `signed-verified` message proceeds —
+  every other outcome (unsigned, INVALID, unknown-kid, revoked,
+  unverifiable) quarantines a mode-600 evidence copy into the receiver's
+  `dead_letter/`, evaluates nothing, and exits `3` with an
+  `intake_rejected` decision object. Rejection is mechanism, not
+  per-receiver diligence; previously the mode silently degraded to warn
+  and nothing on the receive path consumed it. Warn and off behavior are
+  unchanged. The receive-path contract is pinned by a new executable
+  conformance corpus at `tests/conformance/intake/` (four failure classes
+  under each mode, plus a signed-verified positive control).
+- Policy-file signing: `oacp trust sign-policy` signs a receiver's
+  `config.yaml` and `trust/allowed_signers.yaml` with the receiver's own
+  local key, under a distinct JOSE profile (`oacp-policy+yaml` /
+  `urn:oacp:policy:v1`) so message and policy signatures can never be
+  exchanged. Loaders verify at load time: audit records now carry a
+  `policy_auth` block binding `policy_sha256` to an authorized signer; a
+  tampered `config.yaml` fails closed with the new pinned reason code
+  `policy_auth_invalid` before anything — including its own
+  `verify_mode` — reads it, and a tampered `allowed_signers.yaml` makes
+  the trust root unusable (under enforce, everything then rejects).
+  Unsigned policy files remain loadable with the unsigned state recorded
+  (bootstrap: init → key gen → sign-policy).
+- Policy signatures bind their target context — `{project, receiver,
+  kind}` in the protected header — so a signed policy can never be
+  replayed across projects, receivers, or between `config.yaml` and
+  `allowed_signers.yaml`. `sign-policy` also enrolls each target in a
+  machine-local registry (`$OACP_HOME/keys/policy_enrollment.json`):
+  once enrolled, a policy file without a verifiable signature is
+  `invalid`, never `unsigned` — stripping a trailer stops being a
+  downgrade path. Trust mutations (`trust import` / `revoke`)
+  atomically re-sign an enrolled trust root or refuse the write.
+- Single-read snapshot discipline on every receiver read path: the gate,
+  the trust-root load, and all policy consumers (envelope compiler, send
+  helper, trust mutations, inbox lister) verify and parse ONE bounded
+  read of each security-sensitive file, closing the window where a
+  config, message, or pins file could be swapped between its
+  verification and its use. The audit record's `message_sha256` now
+  names the verified snapshot bytes.
+- Every non-gate inbox read path goes through one shared receive
+  boundary (verify one bounded snapshot before parsing it): the `oacp
+  inbox` lister, the `oacp watch` event emitter, the send helper's
+  parent-message lookup, and the trust drift report's traffic probe.
+  Under `enforce`, an unverified message surfaces as a held row/event
+  built from filesystem metadata only (no attacker-controlled field is
+  parsed or surfaced), never donates thread identity to replies, and
+  never counts as sender liveness; under `warn` rows and events carry
+  the verification status. A receiver config that fails policy
+  authorization cannot choose a weaker mode — these paths fail closed
+  to enforce. The envelope compiler refuses to compile from a message
+  that is not signed-verified under enforce, and the envelope's
+  `message_sha256` names the verified snapshot. `oacp trust list` and
+  doctor readiness calculations load policy files through the
+  authorized loader; `oacp doctor` reports per-receiver policy-file
+  authorization status.
+
+### Fixed
+
+- Agent enumeration now consistently ignores hidden directories under
+  `agents/`, preventing runtime scaffolding such as `.claude/.cc-writes` from
+  appearing as phantom agents in doctor, inbox, profile, and trust workflows.
+- Autonomy-gate negation demotion now recognizes common scope language and
+  carries unambiguous negation headings over their immediately following,
+  bounded block. Blank lines and subsequent headings end that scope, while
+  non-demotable side-effect and content-sensitivity hard stops remain hard.
+- Claude envelope enforcement now allows a reconstructed Edit/Write change
+  confined to the project's own `[project] version` string in
+  `pyproject.toml` under `touches_dependencies: false`, while counting the
+  file and continuing to deny real dependency, mixed, ambiguous, and
+  Bash-side manifest edits.
+- The foreign-session read-only `oacp envelope show` exemption now recognizes
+  argparse-equivalent `--option=value` spellings, unambiguous long-option
+  abbreviations, and help flags without weakening its fail-closed handling of
+  unknown options.
+- Autonomy audit records now resolve `runtime.model` at the writer instead
+  of defaulting to a silent null. The serving model resolves caller-first
+  (an explicit `runtime.model` on the decision), then from the
+  `OACP_RUNTIME_MODEL` environment variable exported by the invoking
+  session, and is normalized at write time: case variants fold to
+  lowercase, and `[context]` suffixes split into the base id plus a
+  separate `model_context` field. `model_source` names the provenance and
+  `model_raw` preserves any input the normalization changed. Records with
+  no signal carry an explicit `model_unknown_reason` — never a silent
+  null — and the requested model (harness configuration) is never used as
+  a fallback. Historical records are not backfilled.
+- The autonomy audit writer now validates `result.completion_kind` against
+  the pinned enum at write time, refusing to persist decisions that carry
+  a caller-composed off-enum kind.
+
 ## [0.4.1] - 2026-08-04
 
 ### Fixed
@@ -574,6 +697,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Checkout step in github-release workflow job (#19)
 - Pre-release audit fixes: SHA-pinned actions, dangling doc refs (#15, #16)
 
+[0.4.2]: https://github.com/kiloloop/oacp/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/kiloloop/oacp/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/kiloloop/oacp/compare/v0.3.5...v0.4.0
 [0.3.5]: https://github.com/kiloloop/oacp/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/kiloloop/oacp/compare/v0.3.3...v0.3.4

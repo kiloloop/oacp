@@ -8,6 +8,16 @@ Usage:
     oacp_inbox.py <project> --all
     oacp_inbox.py <project> --agent <name> --json
 
+Verify-before-parse: inbox messages are untrusted input, and this lister
+is a receiver read path — so it honors the receiver's
+``signing.verify_mode`` before parsing anything. Under ``enforce``, a
+message that is not signed-verified is listed as HELD from its filename
+metadata only: none of its (attacker-controlled) fields are parsed or
+surfaced. Under ``warn`` the verification status is attached to each
+row; under ``off`` behavior is unchanged. Listing is read-only — the
+quarantine/reject mechanism stays with the processing path (the
+autonomy gate), which is where a held message must be dispositioned.
+
 Exit codes:
     0 — inbox listed successfully
     1 — project/agent lookup failure
@@ -28,6 +38,8 @@ try:
 except ImportError:  # pragma: no cover
     yaml = None  # type: ignore[assignment]
 
+from _oacp_constants import is_agent_dir
+
 
 def _resolve_oacp_home(explicit: Optional[str] = None) -> Path:
     from _oacp_env import resolve_oacp_home
@@ -39,14 +51,15 @@ def _coerce_oacp_home(explicit: Optional[Union[str, Path]]) -> Path:
     return _resolve_oacp_home(str(explicit)) if explicit is not None else _resolve_oacp_home()
 
 
-def _load_yaml_mapping(path: Path) -> Dict[str, Any]:
-    raw = path.read_text(encoding="utf-8")
+def _parse_yaml_mapping_bytes(raw: bytes, path: Path) -> Dict[str, Any]:
+    """Parse a mapping from an already-read snapshot (never re-reads *path*)."""
+    text = raw.decode("utf-8")
     if yaml is not None:
-        loaded = yaml.load(raw, Loader=yaml.BaseLoader)
+        loaded = yaml.load(text, Loader=yaml.BaseLoader)
     else:
         from validate_message import _parse_simple_yaml
 
-        loaded = _parse_simple_yaml(raw)
+        loaded = _parse_simple_yaml(text)
 
     if loaded is None:
         return {}
@@ -78,22 +91,67 @@ def _format_age(created_at: dt.datetime, now: Optional[dt.datetime] = None) -> s
     return f"{hours // 24}d"
 
 
-def _message_preview(path: Path, now: Optional[dt.datetime] = None) -> Dict[str, str]:
-    try:
-        data = _load_yaml_mapping(path)
-    except Exception as exc:
-        created_at = dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc)
-        created_at_raw = created_at.strftime("%Y-%m-%dT%H:%M:%SZ")
-        return {
-            "from": "?",
-            "type": "?",
-            "priority": "?",
-            "subject": "(invalid YAML)",
-            "created_at_utc": created_at_raw,
-            "age": _format_age(created_at, now=now),
-            "path": str(path),
-            "load_error": str(exc),
-        }
+def _mtime_stub(
+    path: Path,
+    subject: str,
+    now: Optional[dt.datetime] = None,
+    **extra: str,
+) -> Dict[str, str]:
+    """Preview row built from filesystem metadata only (nothing parsed)."""
+    created_at = dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc)
+    stub = {
+        "from": "?",
+        "type": "?",
+        "priority": "?",
+        "subject": subject,
+        "created_at_utc": created_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "age": _format_age(created_at, now=now),
+        "path": str(path),
+    }
+    stub.update(extra)
+    return stub
+
+
+def _message_preview(
+    path: Path,
+    now: Optional[dt.datetime] = None,
+    *,
+    verification: Optional[Dict[str, Any]] = None,
+) -> Dict[str, str]:
+    """Preview one message, honoring the receiver's verify mode.
+
+    *verification* is the receiver-level context from
+    `message_verify.receiver_intake_context`. Verification and parsing
+    consume ONE bounded read of the file; under ``enforce`` a
+    non-verified message is never parsed at all.
+    """
+    from message_verify import read_verified_inbox_message
+
+    read = read_verified_inbox_message(
+        path, verification or {"mode": "off"}, _parse_yaml_mapping_bytes
+    )
+    auth_status: Optional[str] = (
+        read["auth"]["status"] if read["auth"] is not None else None
+    )
+    if read["raw"] is None:
+        return _mtime_stub(
+            path, "(unreadable)", now=now, load_error=read["error"]
+        )
+    if read["held"]:
+        return _mtime_stub(
+            path,
+            "(held: unverified under enforce)",
+            now=now,
+            auth=auth_status,
+        )
+    if read["data"] is None:
+        stub = _mtime_stub(
+            path, "(invalid YAML)", now=now, load_error=read["error"]
+        )
+        if auth_status is not None:
+            stub["auth"] = auth_status
+        return stub
+    data = read["data"]
 
     created_at_raw = str(data.get("created_at_utc", "")).strip()
     created_at = _parse_created_at(created_at_raw)
@@ -101,7 +159,7 @@ def _message_preview(path: Path, now: Optional[dt.datetime] = None) -> Dict[str,
         created_at = dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc)
         created_at_raw = created_at.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    return {
+    preview = {
         "from": str(data.get("from", "")).strip() or "?",
         "type": str(data.get("type", "")).strip() or "?",
         "priority": str(data.get("priority", "")).strip() or "?",
@@ -110,6 +168,9 @@ def _message_preview(path: Path, now: Optional[dt.datetime] = None) -> Dict[str,
         "age": _format_age(created_at, now=now),
         "path": str(path),
     }
+    if auth_status is not None:
+        preview["auth"] = auth_status
+    return preview
 
 
 def _list_inbox_files(inbox_dir: Path) -> List[Path]:
@@ -122,15 +183,32 @@ def _agent_report(
     project_dir: Path,
     agent: str,
     now: Optional[dt.datetime] = None,
+    *,
+    oacp_root: Path,
 ) -> Dict[str, Any]:
+    from message_verify import receiver_intake_context
+
     inbox_dir = project_dir / "agents" / agent / "inbox"
-    messages = [_message_preview(path, now=now) for path in _list_inbox_files(inbox_dir)]
-    return {
+    verification = receiver_intake_context(
+        project_dir / "agents" / agent,
+        receiver=agent,
+        project=project_dir.name,
+        oacp_dir=str(oacp_root),
+    )
+    messages = [
+        _message_preview(path, now=now, verification=verification)
+        for path in _list_inbox_files(inbox_dir)
+    ]
+    report = {
         "agent": agent,
         "inbox_path": str(inbox_dir),
+        "verify_mode": verification["mode"],
         "message_count": len(messages),
         "messages": messages,
     }
+    if verification.get("policy_error"):
+        report["policy_error"] = verification["policy_error"]
+    return report
 
 
 def list_inbox(
@@ -155,7 +233,9 @@ def list_inbox(
         raise ValueError(f"project '{project}' has no agents directory")
 
     if list_all:
-        agent_names = sorted(path.name for path in agents_dir.iterdir() if path.is_dir())
+        agent_names = sorted(
+            path.name for path in agents_dir.iterdir() if is_agent_dir(path)
+        )
     else:
         if agent is None:
             raise ValueError("agent name is required when --all is not set")
@@ -163,7 +243,10 @@ def list_inbox(
             raise ValueError(f"agent '{agent}' not found in project '{project}'")
         agent_names = [agent]
 
-    reports = [_agent_report(project_dir, agent_name, now=now) for agent_name in agent_names]
+    reports = [
+        _agent_report(project_dir, agent_name, now=now, oacp_root=oacp_root)
+        for agent_name in agent_names
+    ]
     return {
         "project": project,
         "mode": "all" if list_all else "agent",

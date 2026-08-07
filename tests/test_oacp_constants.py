@@ -13,7 +13,13 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from _oacp_constants import AGENT_RE, _template_path, _write_if_missing, utc_now_iso  # noqa: E402
+from _oacp_constants import (  # noqa: E402
+    AGENT_RE,
+    _template_path,
+    _write_if_missing,
+    is_agent_dir,
+    utc_now_iso,
+)
 
 
 class TestAgentRegex(unittest.TestCase):
@@ -25,6 +31,22 @@ class TestAgentRegex(unittest.TestCase):
     def test_accepts_alphanumeric_lead(self) -> None:
         self.assertIsNotNone(AGENT_RE.fullmatch("iris"))
         self.assertIsNotNone(AGENT_RE.fullmatch("agent_1"))
+
+
+class TestAgentDirectory(unittest.TestCase):
+    def test_accepts_only_visible_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            visible = root / "claude"
+            hidden = root / ".claude"
+            visible.mkdir()
+            hidden.mkdir()
+            file_path = root / "codex"
+            file_path.touch()
+
+            self.assertTrue(is_agent_dir(visible))
+            self.assertFalse(is_agent_dir(hidden))
+            self.assertFalse(is_agent_dir(file_path))
 
 
 class TestUtcNowIso(unittest.TestCase):

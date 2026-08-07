@@ -36,7 +36,13 @@ except ImportError:  # pragma: no cover
 # Helpers
 # ---------------------------------------------------------------------------
 
-from _oacp_constants import AGENT_RE, ALL_RUNTIMES, _template_path, _write_if_missing
+from _oacp_constants import (
+    AGENT_RE,
+    ALL_RUNTIMES,
+    _template_path,
+    _write_if_missing,
+    is_agent_dir,
+)
 
 VALID_RUNTIMES = tuple(runtime for runtime in ALL_RUNTIMES if runtime != "unknown")
 NAME_RE = AGENT_RE
@@ -251,7 +257,7 @@ def cmd_list(args: argparse.Namespace, oacp_root: Path) -> int:
     global_names: set = set()
     if global_agents_dir.is_dir():
         for d in sorted(global_agents_dir.iterdir()):
-            if d.is_dir() and (d / "profile.yaml").is_file():
+            if is_agent_dir(d) and (d / "profile.yaml").is_file():
                 global_names.add(d.name)
 
     # Project agents
@@ -260,7 +266,7 @@ def cmd_list(args: argparse.Namespace, oacp_root: Path) -> int:
         project_agents_dir = oacp_root / "projects" / project / "agents"
         if project_agents_dir.is_dir():
             for d in sorted(project_agents_dir.iterdir()):
-                if d.is_dir():
+                if is_agent_dir(d):
                     project_names.add(d.name)
 
     all_names = sorted(global_names | project_names)

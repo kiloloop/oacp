@@ -1,0 +1,9 @@
+case: signed_revoked__enforce
+mode: enforce
+config: configs/enforce.yaml
+message: ../signing/messages/signed_revoked.yaml
+expected:
+  intake_action: reject
+  exit_code: 3
+  annotation_label: signed-REVOKED
+  quarantined: true

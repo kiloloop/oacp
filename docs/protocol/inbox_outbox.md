@@ -75,9 +75,11 @@ named by `kid` (RFC 7638 thumbprint) and never carried in the message.
 Sender signing is config-gated off by default (`signing.sign_messages`);
 receivers without a `verify_mode` knob treat the trailer as an ordinary
 optional field.
-Receiver verification runs in warn mode (identity recorded, no authority
-granted); the trust root — receiver pins, the zero-authority project
-catalog, `oacp trust import`, and key management — is documented in
+Receiver verification is mode-gated (`off` / `warn` / `enforce`): warn
+records identity and grants no authority; enforce rejects any message
+that does not verify, at intake, with a quarantined evidence copy. The
+modes, the trust root — receiver pins, the zero-authority project
+catalog, `oacp trust import`, and key management — are documented in
 [`message_signing.md`](message_signing.md).
 
 ## Message Types

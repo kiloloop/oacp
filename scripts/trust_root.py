@@ -41,7 +41,7 @@ from typing import Any, Dict, List, Optional, Tuple
 _scripts_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(_scripts_dir))
 
-from _oacp_constants import AGENT_RE, locked_audit  # noqa: E402
+from _oacp_constants import AGENT_RE, is_agent_dir, locked_audit  # noqa: E402
 from message_signing import (  # noqa: E402
     AGENT_URN_PREFIX,
     INSTANCE_URN_PREFIX,
@@ -325,10 +325,149 @@ def write_catalog(catalog_path: Path, entries: Dict[str, Dict[str, Any]]) -> Non
     )
 
 
-def write_pins(pins_path: Path, pins: Dict[str, Dict[str, Any]]) -> None:
-    _atomic_write_text(
-        pins_path, _render_trust_file(pins, list_key="signers", with_status=True)
+def _load_pins_authorized(
+    pins_path: Path,
+    *,
+    project_dir: Optional[Path] = None,
+    receiver: Optional[str] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Policy-checked pins load for trust mutations and diagnostics.
+
+    One snapshot: the bytes whose policy signature is verified are the
+    bytes the pins parse from. An ``invalid`` policy signature (including
+    an enrolled file with its trailer stripped) raises `TrustRootError` —
+    a mutation must never proceed from an unauthorized trust root.
+    """
+    pins_path = Path(pins_path)
+    if not pins_path.is_file():
+        return {}
+    target = _resolve_pins_policy_target(project_dir, receiver)
+    if target is None:
+        return load_allowed_signers(pins_path)
+    import policy_signing
+
+    from message_verify import parse_allowed_signers
+
+    try:
+        loaded, _policy_auth, _raw = policy_signing.load_authorized_policy(
+            pins_path,
+            target["home"],
+            receiver=receiver,
+            kind=policy_signing.POLICY_KIND_ALLOWED_SIGNERS,
+            project=target["context"]["project"],
+        )
+    except policy_signing.PolicyAuthError as exc:
+        raise TrustRootError(str(exc)) from exc
+    return parse_allowed_signers(loaded, pins_path)
+
+
+def _resolve_pins_policy_target(
+    project_dir: Optional[Path], receiver: Optional[str]
+) -> Optional[Dict[str, Any]]:
+    """Resolve the policy-signing target for a receiver's pins file.
+
+    Returns ``{home, context}`` when the canonical layout is derivable,
+    else None (non-workspace layouts fall back to unsigned semantics —
+    enrollment can never apply to a target that cannot be named).
+    """
+    if project_dir is None or receiver is None:
+        return None
+    import policy_signing
+
+    project_dir = Path(project_dir)
+    home = project_dir.parent.parent
+    if project_dir.parent.name != "projects":
+        return None
+    return {
+        "home": home,
+        "context": policy_signing.policy_context(
+            project_dir.name, receiver, policy_signing.POLICY_KIND_ALLOWED_SIGNERS
+        ),
+    }
+
+
+def prepare_pins_content(
+    pins: Dict[str, Dict[str, Any]],
+    *,
+    project_dir: Optional[Path] = None,
+    receiver: Optional[str] = None,
+) -> bytes:
+    """Render a pins document, re-signing it when its target is enrolled.
+
+    Policy WRITERS must never strip an enrolled trust file's signature as a
+    side effect (verified → unsigned is a downgrade, and the enrollment
+    check would then fail-close the receiver's whole intake). If the target
+    is enrolled and the receiver's signing key is unavailable, the mutation
+    is REFUSED — atomically re-sign or don't write.
+    """
+    rendered = _render_trust_file(
+        pins, list_key="signers", with_status=True
+    ).encode("utf-8")
+    target = _resolve_pins_policy_target(project_dir, receiver)
+    if target is None:
+        return rendered
+    import policy_signing
+
+    if not policy_signing.policy_enrolled(target["home"], target["context"]):
+        return rendered
+    from message_signing import (
+        SigningUnavailableError,
+        load_signers,
+        render_auth_line,
+        sign_payload,
     )
+
+    try:
+        signers = load_signers(receiver, target["home"])
+        auth_value = sign_payload(
+            rendered,
+            signers,
+            typ=policy_signing.POLICY_JWS_TYP,
+            domain=policy_signing.POLICY_SIG_DOMAIN,
+            extra_oacp={policy_signing.POLICY_OACP_CLAIM: target["context"]},
+        )
+    except (SigningUnavailableError, AuthFormatError) as exc:
+        raise TrustRootError(
+            f"pins file for receiver {receiver!r} is enrolled for policy "
+            f"signing but cannot be re-signed ({exc}) — refusing to write "
+            "an unsigned trust root; make the receiver's signing key "
+            "available or re-run `oacp trust sign-policy` after the change"
+        ) from exc
+    return rendered + render_auth_line(auth_value).encode("ascii")
+
+
+def write_pins(
+    pins_path: Path,
+    pins: Dict[str, Dict[str, Any]],
+    *,
+    project_dir: Optional[Path] = None,
+    receiver: Optional[str] = None,
+) -> None:
+    _atomic_write_bytes(
+        pins_path,
+        prepare_pins_content(pins, project_dir=project_dir, receiver=receiver),
+    )
+
+
+def _atomic_write_bytes(path: Path, content: bytes) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -464,7 +603,9 @@ def import_public_stub(
         if catalog_only:
             return report
 
-        pins = load_allowed_signers(pins_path)
+        pins = _load_pins_authorized(
+            pins_path, project_dir=project_dir, receiver=receiver
+        )
         current = pins.get(kid)
         if current is None:
             pins[kid] = {
@@ -474,7 +615,9 @@ def import_public_stub(
                 "jwk": entry["jwk"],
                 "status": PIN_STATUS_ACTIVE,
             }
-            write_pins(pins_path, pins)
+            write_pins(
+                pins_path, pins, project_dir=project_dir, receiver=receiver
+            )
             report["pins"] = "added"
         elif current.get("status") == PIN_STATUS_REVOKED:
             raise TrustImportError(
@@ -483,7 +626,9 @@ def import_public_stub(
             )
         elif _entries_equal(current, entry):
             if _merge_reserved_columns(current, entry):
-                write_pins(pins_path, pins)
+                write_pins(
+                    pins_path, pins, project_dir=project_dir, receiver=receiver
+                )
                 report["pins"] = "updated"
             else:
                 report["pins"] = "unchanged"
@@ -512,7 +657,7 @@ def _agents_with_pins(project_dir: Path) -> List[str]:
     return sorted(
         entry.name
         for entry in agents_root.iterdir()
-        if entry.is_dir() and (entry / ALLOWED_SIGNERS_RELPATH).is_file()
+        if is_agent_dir(entry) and (entry / ALLOWED_SIGNERS_RELPATH).is_file()
     )
 
 
@@ -562,16 +707,20 @@ def revoke_pin(
         else:
             targets = _agents_with_pins(project_dir)
 
-        # Load and integrity-validate every target before writing any of
-        # them: a compromise response that fails must leave zero pins
-        # changed — a partial fleet revocation would leave later receivers
-        # silently trusting the compromised kid behind an error exit.
-        pending: List[Tuple[Path, Dict[str, Dict[str, Any]], str]] = []
+        # Load, integrity-validate, and fully RENDER every target before
+        # writing any of them: a compromise response that fails must leave
+        # zero pins changed — a partial fleet revocation would leave later
+        # receivers silently trusting the compromised kid behind an error
+        # exit. Rendering up front includes the re-sign of enrolled trust
+        # files, so a missing signing key aborts before the first write.
+        pending: List[Tuple[Path, bytes, str]] = []
         for target in targets:
             pins_path = _receiver_pins_path(project_dir, target)
             if all_receivers and not pins_path.is_file():
                 continue
-            pins = load_allowed_signers(pins_path)
+            pins = _load_pins_authorized(
+                pins_path, project_dir=project_dir, receiver=target
+            )
             entry = pins.get(kid)
             if entry is None:
                 if all_receivers:
@@ -584,10 +733,13 @@ def revoke_pin(
                 receivers_report[target] = "unchanged"
                 continue
             entry["status"] = PIN_STATUS_REVOKED
-            pending.append((pins_path, pins, target))
+            content = prepare_pins_content(
+                pins, project_dir=project_dir, receiver=target
+            )
+            pending.append((pins_path, content, target))
 
-        for pins_path, pins, target in pending:
-            write_pins(pins_path, pins)
+        for pins_path, content, target in pending:
+            _atomic_write_bytes(pins_path, content)
             receivers_report[target] = "revoked"
 
     if not receivers_report:
@@ -682,14 +834,16 @@ def drift_report(project_dir: Path) -> List[Dict[str, str]]:
     # can see cross-receiver state (who else pins an identity).
     loaded_pins: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for agent_dir in sorted(agents_dir.iterdir()):
-        if not agent_dir.is_dir():
+        if not is_agent_dir(agent_dir):
             continue
         pins_path = agent_dir / ALLOWED_SIGNERS_RELPATH
         if not pins_path.is_file():
             continue
         agent = agent_dir.name
         try:
-            loaded_pins[agent] = load_allowed_signers(pins_path)
+            loaded_pins[agent] = _load_pins_authorized(
+                pins_path, project_dir=project_dir, receiver=agent
+            )
         except TrustRootError as exc:
             findings.append(
                 _drift(DRIFT_ERROR, "pins-unreadable", f"{agent}: {exc}")
@@ -772,7 +926,10 @@ def _inbox_has_traffic_from(inbox_dir: Path, agent: Optional[str]) -> bool:
     both contain underscores, so the filename grammar is not parseable —
     the message's own `from` field is the attribution. Malformed or
     oversized files are skipped (this feeds an advisory, never
-    enforcement).
+    enforcement). Reads go through the shared receive boundary: under
+    the receiver's ``enforce`` mode an unverified message is held and
+    never counts as liveness (forged `from:` lines must not manufacture
+    a traffic signal).
     """
     if not agent or not inbox_dir.is_dir():
         return False
@@ -780,11 +937,30 @@ def _inbox_has_traffic_from(inbox_dir: Path, agent: Optional[str]) -> bool:
         import yaml  # type: ignore
     except Exception:
         return False
+    from message_verify import (
+        read_verified_inbox_message,
+        receiver_intake_context,
+    )
+
+    def _parse(raw: bytes, path: Path) -> Any:
+        return yaml.safe_load(raw.decode("utf-8"))
+
+    receiver_dir = Path(inbox_dir).parent
+    project_dir = receiver_dir.parent.parent
+    context = receiver_intake_context(
+        receiver_dir,
+        receiver=receiver_dir.name,
+        project=project_dir.name,
+        oacp_dir=str(project_dir.parent.parent),
+    )
     for path in inbox_dir.glob("*.yaml"):
         try:
             if path.stat().st_size > _TRAFFIC_PROBE_MAX_BYTES:
                 continue
-            loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+            read = read_verified_inbox_message(path, context, _parse)
+            if read["held"] or read["data"] is None:
+                continue
+            loaded = read["data"]
         except Exception:
             continue
         if isinstance(loaded, dict) and loaded.get("from") == agent:
@@ -803,5 +979,5 @@ def has_trust_root(project_dir: Path) -> bool:
     return any(
         (agent_dir / ALLOWED_SIGNERS_RELPATH).is_file()
         for agent_dir in agents_dir.iterdir()
-        if agent_dir.is_dir()
+        if is_agent_dir(agent_dir)
     )
