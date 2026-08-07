@@ -23,6 +23,7 @@ SCRIPTS_DIR = Path(__file__).parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import autonomy_gate  # noqa: E402
+from message_signing import CRYPTO_AVAILABLE  # noqa: E402
 
 FIXTURE_ROOT = Path(__file__).parent / "conformance" / "intake"
 SIGNING_ROOT = Path(__file__).parent / "conformance" / "signing"
@@ -63,6 +64,12 @@ def test_intake_matches_conformance_golden(
 ) -> None:
     fixture = yaml.safe_load(expected_path.read_text(encoding="utf-8"))
     expected = fixture["expected"]
+    label = expected["annotation_label"]
+    if not CRYPTO_AVAILABLE and (label or "").startswith("signed-"):
+        pytest.skip(
+            "golden pins a signature-evaluation outcome; "
+            "needs the [crypto] extra"
+        )
     workspace = _build_workspace(tmp_path, fixture)
 
     original_bytes = workspace["message_path"].read_bytes()
@@ -79,7 +86,6 @@ def test_intake_matches_conformance_golden(
 
     assert exit_code == expected["exit_code"], stderr.getvalue()
 
-    label = expected["annotation_label"]
     if label is None:
         assert "[oacp-auth]" not in stderr.getvalue()
     else:

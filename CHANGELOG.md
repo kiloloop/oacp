@@ -97,6 +97,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Intake conformance tests now skip goldens that pin a
+  signature-evaluation outcome when the optional cryptography dependency
+  is not installed, restoring the suite's graceful degradation without
+  the `[crypto]` extra. The release quality gate installs the extra so
+  the full signing matrix runs before publishing.
 - Agent enumeration now consistently ignores hidden directories under
   `agents/`, preventing runtime scaffolding such as `.claude/.cc-writes` from
   appearing as phantom agents in doctor, inbox, profile, and trust workflows.
