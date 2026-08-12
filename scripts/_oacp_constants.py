@@ -15,9 +15,10 @@ REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 # The protocol spec version the tooling implements. Stamped into audit
 # records, compiled envelopes, and workspace.json at init so every artifact
 # names the contract it was produced under.
-SPEC_VERSION = "0.4.2"
+SPEC_VERSION = "0.4.3"
 CREATABLE_RUNTIMES = ("claude", "codex", "cursor", "gemini")
 ALL_RUNTIMES = ("claude", "codex", "cursor", "gemini", "human", "unknown")
+CODEX_SESSION_START_CONTEXT_LIMIT = 2_500
 CANONICAL_CAPABILITIES = {
     "headless",
     "mcp_tools",

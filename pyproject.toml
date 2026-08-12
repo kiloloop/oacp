@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "oacp-cli"
-version = "0.4.2"
+version = "0.4.3"
 description = "Open Agent Coordination Protocol CLI for file-based multi-agent workflows"
 readme = "README.md"
 license = "Apache-2.0"
@@ -51,6 +51,12 @@ dev = [
   "ruff>=0.11.0",
 ]
 
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "/.claude",
+  "/.codex",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["oacp"]
 
@@ -78,6 +84,7 @@ packages = ["oacp"]
 "scripts/agent_profile.py" = "oacp/_scripts/agent_profile.py"
 "scripts/oacp_inbox.py" = "oacp/_scripts/oacp_inbox.py"
 "scripts/oacp_watch.py" = "oacp/_scripts/oacp_watch.py"
+"scripts/retention.py" = "oacp/_scripts/retention.py"
 "scripts/memory_cli.py" = "oacp/_scripts/memory_cli.py"
 "scripts/memory_sync.py" = "oacp/_scripts/memory_sync.py"
 "scripts/memory_archive_common.py" = "oacp/_scripts/memory_archive_common.py"
@@ -86,6 +93,9 @@ packages = ["oacp"]
 "scripts/setup_runtime.py" = "oacp/_scripts/setup_runtime.py"
 "scripts/init_org_memory.py" = "oacp/_scripts/init_org_memory.py"
 "scripts/write_event.py" = "oacp/_scripts/write_event.py"
+"docs/protocol/agent_safety_defaults.md" = "oacp/_protocol/agent_safety_defaults.md"
+"docs/protocol/dispatch_states.yaml" = "oacp/_protocol/dispatch_states.yaml"
+"docs/protocol/session_init.md" = "oacp/_protocol/session_init.md"
 "templates/runtime_capabilities.yaml" = "oacp/_templates/runtime_capabilities.yaml"
 "templates/org-memory/recent.md" = "oacp/_templates/org-memory/recent.md"
 "templates/org-memory/decisions.md" = "oacp/_templates/org-memory/decisions.md"

@@ -7,8 +7,10 @@ Point-to-point async messaging between agents. Complements the packet-based revi
 ## Directory Layout
 
 ```
-agents/<agent_name>/inbox/    # other agents write here
-agents/<agent_name>/outbox/   # this agent's sent messages (copies)
+agents/<agent_name>/inbox/          # pending messages; other agents write here
+agents/<agent_name>/inbox/archive/  # byte-preserved processed inbound history
+agents/<agent_name>/outbox/         # this agent's sent messages (copies)
+agents/<agent_name>/dead_letter/    # rejected or failed-delivery evidence
 ```
 
 ## Message Format
@@ -100,6 +102,15 @@ catalog, `oacp trust import`, and key management — are documented in
 | `brainstorm_followup` | Amend scope of an in-progress brainstorm (references parent brainstorm_request) | Incorporated into next round |
 
 See `docs/protocol/review_loop.md` for the full review loop protocol specification.
+
+Review lifecycle admission: by default each `review_request` requires
+explicit human confirmation at the receiver. When receiver config enables
+continuation grants, a prior human-approved `review_loop` grant may
+auto-continue in-scope same-thread follow-up rounds — see
+`docs/protocol/autonomy.md` → "Review-loop continuation". Reviewer-output
+types (`review_feedback`, `review_lgtm`) are context-only at the receiver
+and never start reviewer work; `review_addressed` is context folded into a
+newer `review_request` unless a grant explicitly lists it.
 
 ## Type-Specific Body Schemas
 
@@ -283,8 +294,11 @@ Full receiver policy and audit rules are in
    message waits for human confirmation. In `auto_review`, the receiver may
    move `received -> accepted` only after the four-gate autonomy evaluator
    passes and an audit event is written.
-6. Recipient deletes from inbox after processing.
-7. Replies are new messages in the original sender's inbox.
+6. Recipient completes any required reply and terminal audit update.
+7. Recipient atomically moves the exact processed inbox file, without
+   overwriting, to `inbox/archive/` under its original filename. If archival
+   fails or the live bytes changed, the message stays pending in `inbox/`.
+8. Replies are new messages in the original sender's inbox.
 
 ## Polling Convention
 
@@ -298,11 +312,56 @@ Agents should check their inbox:
 
 When multiple messages are pending in an agent's inbox, process by priority: P0 first, then P1, then P2/P3. Within the same priority, process in arrival order (oldest first by filename timestamp). `task_request` and `review_request` types take precedence over `notification` and `follow_up` at the same priority level.
 
-## Inbox Cleanup
+## Processed Inbound Archive
 
-- Delete messages from inbox immediately after processing (see Lifecycle step 6).
-- Outbox files: retain for 30 days, then may be pruned by the sending agent.
-- Dispatcher cleanup: when archiving a completed dispatch, also delete any intermediate WIP/ack notifications for that dispatch from the dispatcher's own inbox.
+All runtimes use `inbox/archive/`; the legacy `processed/` directory is not a
+protocol location. Archival is the receiver-side claim that processing reached
+a terminal state. The move preserves the original filename, bytes, mode, and
+mtime so signed-message evidence remains byte-identical and retention age does
+not reset at processing time. Pending, malformed, expired, held, or
+approval-gated messages remain in `inbox/`.
+
+Before the move, the receiver must recheck the live message against the accepted
+snapshot. The destination must not already exist; a collision or concurrent
+replacement is a retained error, never permission to overwrite history.
+
+## Message History Retention
+
+`oacp retention <project>` applies one non-recursive pass across every visible
+agent's `outbox/`, `dead_letter/`, and `inbox/archive/`. A direct regular file is
+eligible when it is older than `max_age_days` **or** falls outside the newest
+`max_count` files. Age uses filesystem mtime. Hidden entries, metadata markers,
+directories, and symlinks are ignored, and each candidate's identity is
+rechecked immediately before unlinking.
+
+The protocol defaults for all three targets are 30 days and 1,000 files per
+agent. Projects may deep-override either dimension in `workspace.json`; `null`
+disables that dimension, omitted targets or keys inherit the defaults, and
+values otherwise must be positive integers:
+
+```json
+{
+  "retention": {
+    "outbox": {"max_age_days": 30, "max_count": 1000},
+    "dead_letter": {"max_age_days": 30, "max_count": 1000},
+    "inbox_archive": {"max_age_days": 30, "max_count": 1000}
+  }
+}
+```
+
+Run `oacp retention <project> --dry-run --json` before an interactive cleanup;
+omit `--dry-run` to apply the exact reported policy.
+
+Quarantine evidence is outside automatic retention by construction. Files
+written by the intake quarantine format
+`<original>.<sha256-prefix>.<UTC-stamp>[.<counter>]` never count toward age or
+count pruning. A manually managed dead-letter fixture can opt into the same
+protection with an adjacent empty `<filename>.retain` marker. Retention never
+parses dead-letter contents and never bulk-cleans protected evidence.
+
+Dispatcher cleanup archives completed inbound dispatch traffic under the same
+rule. Intermediate WIP/ack notifications are ordinary archived messages and
+expire through `inbox_archive` retention rather than runtime-specific deletion.
 
 ## Conversation Threading
 

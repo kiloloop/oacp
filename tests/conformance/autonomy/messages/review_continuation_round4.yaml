@@ -1,0 +1,17 @@
+id: msg-20260526121500-alice-rr4
+from: alice
+to: codex
+type: review_request
+priority: P1
+created_at_utc: "2026-05-26T12:15:00Z"
+related_pr: "88"
+conversation_id: conv-20260526-widget-088
+parent_message_id: msg-20260526090000-alice-parent
+subject: "Re-review: round 4 (PR 88)"
+body: |
+  pr: 88
+  repo: example-org/widget
+  round: 4
+  branch: alice/widget-logging
+  diff_summary: |
+    Round 4 re-review request beyond the granted round ceiling.

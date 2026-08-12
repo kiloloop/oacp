@@ -263,7 +263,7 @@ Every autonomy decision writes one YAML file:
 
 ```yaml
 schema_version: 2
-spec_version: "0.4.2"
+spec_version: "0.4.3"
 created_at_utc: "2026-05-12T13:23:25Z"
 receiver: codex
 sender: iris
@@ -363,7 +363,8 @@ signer_kid, reason}` — the policy-file authorization outcome (see
 `policy_sha256` the record commits to an *authorized* policy identity,
 not just which bytes ran. An `invalid` status fails closed with reason
 code `policy_auth_invalid` before any gate consumes the config.
-`spec_version: "0.4.2"` pins everything 0.4.1 pinned — Gate 1 integrity
+`spec_version: "0.4.3"` preserves every autonomy field and rule pinned by
+0.4.2 — Gate 1 integrity
 enforcement, the recalibrated Gate 2/3 policy, full task-profile capture, the
 explicit `breached` list, the outcome block shown above, session-scoped
 envelope enforcement, the enforce-mode trust-pin completeness gate, and
@@ -372,7 +373,9 @@ plus intake verification as mechanism (`verify_mode: enforce` rejects at
 the gate), the `policy_auth` authorized-policy block, the default scope
 envelope for profileless admissions (with `scope_envelope_source` and the
 null-on-admitted writer refusal), and the recorded none-by-rule
-enforcement branch for approved public-visibility tasks. Audit
+enforcement branch for approved public-visibility tasks. The spec version
+advances because 0.4.3 adds the project-wide message-retention policy and the
+processed-inbound archive convention; autonomy semantics are unchanged. Audit
 `schema_version: 2` adds thread identity and
 the structured `result.human_outcome` block. Recorders may upgrade a v1 audit
 to v2 when the first human outcome is written; standing grants trust only v2
@@ -546,10 +549,20 @@ families are:
   `continuation_grant_missing_approval`,
   `continuation_grant_missing_scope`, `continuation_grant_missing_thread`,
   `continuation_grant_scope_exceeded`, `threshold_checkpoint_breached`,
+  `checkpoint_reauthorized`, `checkpoint_reauthorization_stale`,
   `message_valid`, `message_not_expired`, `message_hash_recorded`,
   `task_profile_present`, `task_profile_not_required`, `task_type_allowed`,
   `risk_threshold_passed`, `hard_stops_clear`, and
-  `workspace_check_required`.
+  `workspace_check_required`;
+- review-loop continuation codes (see "Review-loop continuation"):
+  `review_continuation_accepted`,
+  `review_continuation_confirmation_required`,
+  `review_continuation_context_only`, `review_continuation_expired`,
+  `review_continuation_head_mismatch`,
+  `review_continuation_ignored_disabled`,
+  `review_continuation_missing_approval`, `review_continuation_revoked`,
+  `review_continuation_round_exceeded`,
+  `review_continuation_scope_exceeded`, and `review_loop_invalid`.
 
 ## State Transition Metadata
 
@@ -688,6 +701,174 @@ explicit `breach_basis` inconsistent with the input (`realized` alongside
 intent fields, `declared_intent` without them). A mixed situation records
 the realized breach on its own, then re-evaluates the correction.
 
+### Re-authorization channels and arbitration
+
+A paused checkpoint can be answered from more than one channel. Three are
+defined, highest precedence first:
+
+| Channel | Surface | Authority |
+|---------|---------|-----------|
+| `receiver_human` | The receiver-side human decision recorded on the audit record (`oacp autonomy-outcome`) | Authoritative |
+| `sender_reply` | A signature-verified sender message threaded to the checkpoint notification | Bounded by the receiver's admission policy |
+| `gh_comment` | A comment on the related PR or issue | Advisory only — never authoritative |
+
+Consultation order follows precedence: the receiver consults its own audit
+record first, then the checkpoint thread in its inbox, then the related
+PR/issue. Provenance verification for each channel — the signature and
+thread binding of a sender reply, the recorded outcome on the audit record —
+happens at the receiver before an answer may be presented for arbitration;
+the arbitration input is a decision surface, not a trust boundary.
+
+Arbitration rules:
+
+- The **governing answer** is the one on the highest-precedence channel that
+  carries an answer. Precedence is by channel rank, never arrival order: a
+  lower-ranked answer arriving after a higher-ranked ruling is recorded as
+  advisory and never re-opens the decision — in both directions. A
+  receiver-side human approval stands against a later sender decline, and a
+  receiver-side human decline stands against any sender approval.
+- **Sender authority is bounded by the receiver's own admission policy.** A
+  sender re-authorization can never authorize more than the receiver's
+  policy would have auto-accepted at admission: numeric extensions are
+  honored only up to the receiver's caps, and a boundary action is granted
+  only when an envelope declaring that capability would itself auto-accept
+  under the receiver's external-side-effect policy — for
+  `allow_pr_artifacts`, an artifact-class anchor (`creates_or_updates_pr`,
+  `comments_on_github`, or `files_issues`) on a private target present in
+  the receiver's `private_repo_allowlist`; a standalone `commits_changes`
+  or an unlisted/public target stays paused. Merge authority is never
+  sender-grantable, whatever the policy (merge always passes the
+  receiver-side human, mirroring the admission rule), and neither is any
+  field outside the coverable boundary-action vocabulary: the legacy risk
+  fields (destructive ops, auth/config/secrets, dependency changes, public
+  visibility) are receiver-side authority only, on the scoped and
+  scope-less paths alike. The party whose under-declaration caused the
+  breach cannot self-serve unlimited scope. Without a resolvable receiver
+  policy the sender channel extends nothing (fail closed).
+- **GH comments never clear a checkpoint.** They sit outside the protocol's
+  identity and verification boundary; any decision they carry is recorded as
+  advisory, and a checkpoint answered only by a GH comment stays paused.
+- A sender withdrawal of the task is a lifecycle event (`superseded`), not a
+  checkpoint answer; it is not arbitrated here.
+
+The receiver presents the answers it has observed as checkpoint input under
+`actuals.reauthorization`, and the evaluation records the arbitration under
+`threshold_checkpoint.reauthorization`:
+
+```yaml
+actuals:
+  actual_minutes: 25
+  actual_files_touched: 1
+  paused_at_utc: "2026-05-12T12:30:00Z"
+  reauthorization:
+    receiver_human:
+      decision: approved            # approved | modified | declined
+      decided_at_utc: "2026-05-12T12:50:00Z"
+      actor: alice
+      scope:                        # optional: budget extension and/or
+        max_actual_minutes: 30      # boundary-action grants
+    sender_reply:
+      decision: approved
+      decided_at_utc: "2026-05-12T12:45:00Z"
+      source_message_id: msg-20260512124500-sender-reauth1
+    gh_comment:
+      decision: approved            # advisory only; cannot carry scope
+      author: driveby-collaborator
+```
+
+```yaml
+threshold_checkpoint:
+  action: resumed_after_reauthorization
+  reauthorization:
+    presented: true
+    channel: receiver_human         # governing channel
+    decision: approved
+    decided_at_utc: "2026-05-12T12:50:00Z"
+    actor: alice
+    requested_scope:                # the raw request, kept as provenance
+      max_actual_minutes: 30
+    scope:                          # the effective grant — policy-capped;
+      max_actual_minutes: 30        # the durable value later checkpoints
+    disposition: resumed            # and envelope recompiles consume
+    cleared_paused_at_utc: "2026-05-12T12:30:00Z"
+    advisory:
+      - channel: sender_reply
+        decision: approved
+        reason: overridden_by_receiver_human
+      - channel: gh_comment
+        decision: approved
+        reason: never_authoritative
+```
+
+`requested_scope` preserves the answer exactly as asked; `scope` records
+what was actually granted after channel bounds — sender numerics capped at
+the receiver's thresholds, sender booleans filtered to the admission
+predicate. The two diverge exactly when a sender asked past the receiver's
+policy, and only `scope` may ever be consumed downstream.
+
+`disposition` is pinned to: `resumed` (breach cleared — the accept records
+`checkpoint_reauthorized` and the action `resumed_after_reauthorization`),
+`declined` (governing channel declined — action `reauthorization_declined`),
+`stale` (the reuse rejection below — adds `checkpoint_reauthorization_stale`),
+`insufficient` (a current answer that does not cover the breach),
+`advisory_only` (only non-authoritative answers exist), `unanswered`
+(breach with no input), and `not_required` (answers presented but nothing
+breached). `modified` behaves as approved with a replacement scope and
+requires an explicit `scope`, matching the outcome recorder.
+
+### Consumption
+
+What one answer clears is pinned by its scope shape:
+
+- **A scope-less approval** authorizes exactly the extent recorded at the
+  pause it answers (`decided_at_utc` at or after that pause's
+  `paused_at_utc`) — the numeric actuals and the boundary fields of that
+  pause alike, within the answering channel's grant bounds. It creates
+  nothing durable (`scope` stays null) and is consumed by that checkpoint:
+  presented against any later pause, it clears nothing.
+- **A scoped numeric budget** authorizes up to the granted budget for the
+  remainder of the task. A later checkpoint whose actuals stay within the
+  budget is cleared by the same standing answer — nothing new is consumed —
+  while growth beyond the budget is a new breach requiring a fresh answer.
+- **A boundary-action grant** (scope boolean) is durable for the remainder
+  of the task; see below.
+- **No answer shape clears the whole task unbounded.** Nothing waives future
+  checkpoints wholesale.
+
+An answer that neither postdates the current pause nor covers the breach
+through a standing granted scope is spent. Presenting it against a new
+breach is a reuse attempt and fails with `checkpoint_reauthorization_stale`.
+
+Consumption state lives on the audit record: the
+`threshold_checkpoint.reauthorization` block binds the governing answer to
+the pause it cleared (`cleared_paused_at_utc`) and preserves the granted
+scope for later checkpoints. A new checkpoint re-stamps `paused_at_utc`;
+whether prior answers still cover it is decided by the arbitration above,
+never by implicit trust.
+
+### Boundary-action grants
+
+A re-authorization may be scoped to a specific boundary action instead of —
+or in addition to — numeric budgets: a scope boolean naming one declarable
+granular capability (`creates_or_updates_pr`, `comments_on_github`,
+`commits_changes`, `merges_pr`, `files_issues`).
+
+- A granted boundary action behaves as if declared true for the remainder of
+  the task: the same action class does not re-fire the checkpoint, and an
+  envelope recompile picks it up. It is not consumed per use; it expires at
+  task completion.
+- Numeric budgets stay per-checkpoint as above: granting an action never
+  extends time or file budgets, and vice versa.
+- Channel bounds apply. The receiver-side human may grant any action; a
+  sender re-authorization may grant only an action the receiver's admission
+  policy would itself auto-accept (the exact `allow_pr_artifacts`
+  conditions above — never a standalone `commits_changes`, never an
+  unlisted or public target), and never `merges_pr`.
+- Standing authority across tasks is out of scope for a boundary-action
+  grant — that is the continuation-grants mechanism (see Continuation
+  Grants), which resolves only from prior human-approved audits in the same
+  thread.
+
 ## Envelope Compilation (Phase 2)
 
 Phase 2 turns the declared `task_profile` from reviewed intent into enforced
@@ -746,7 +927,7 @@ The envelope is written to
 ```json
 {
   "envelope_version": 1,
-  "spec_version": "0.4.2",
+  "spec_version": "0.4.3",
   "compiler": "envelope_compiler.py",
   "compiled_at_utc": "2026-07-12T02:00:00Z",
   "project": "my-project",
@@ -1045,6 +1226,126 @@ added (a banked message-signing proposal), same-sender parent-ID reuse is an
 accepted residual
 trust boundary; it does not bypass hard stops or the grant's declared/actual
 scope checks.
+
+### Review-loop continuation
+
+Review lifecycle messages (`review_request`, `review_feedback`,
+`review_addressed`, `review_lgtm`) carry no `task_profile` and do not run
+the four task gates. Without a grant, every reviewer invocation requires
+explicit human confirmation — that default is unchanged. A human may
+instead grant a bounded, revocable continuation for **one PR review
+thread**, so follow-up rounds in that thread auto-invoke the reviewer.
+
+The grant authorizes *running* a review round, never its verdict: the
+reviewer still fetches and validates the live PR head, runs the quality
+gate, and independently chooses `review_feedback` or `review_lgtm` (see
+`review_loop.md` → "Exact-Head Validation").
+
+The grant is the same `approved_thread_continuation` kind, extended with a
+`review_loop` block inside its scope. A review-only grant may omit the
+task budget keys — they default to `0`, so the grant carries no
+task-continuation authority:
+
+```yaml
+grant:
+  decision: approved
+  granted_scope:
+    review_loop:
+      repository: example-org/widget       # pinned repo slug
+      pr_number: 88                        # pinned pull request
+      allowed_types:                       # inbound types that may trigger
+        - review_request                   #   a round (review_addressed only
+      max_round: 3                         #   if listed explicitly)
+      expires_at_utc: "2026-06-30T00:00:00Z"
+      permitted_side_effects:
+        writes_findings_packet: true
+        sends_oacp_reply: true
+        comments_on_github: false
+        submits_github_review: false
+```
+
+Recognition and authority are separate: receiver config
+(`autonomy.continuation_grants.enabled: true`) only enables grant
+*recognition*. Authority exists only in a prior schema-v2 audit whose
+`human_outcome` records a task decision of `approved` or `modified` plus a
+grant decision of `approved` or `modified` with a valid
+`granted_scope.review_loop`. A sender-declared grant claim is a request,
+never proof — with no matching prior human decision it pauses with
+`review_continuation_missing_approval`.
+
+A fresh `review_request` auto-continues only when **all** of these hold,
+checked in pinned order with early-out:
+
+1. the receiver recognizes grants (`enabled: true`; else
+   `review_continuation_ignored_disabled`) and the message has same-thread
+   evidence (`conversation_id` or `parent_message_id`) matching the grant
+   audit's sender and thread — cross-sender, cross-thread, and
+   cross-receiver requests fall back to the explicit-confirmation default
+   (`review_continuation_confirmation_required`);
+2. the message type is listed in `allowed_types` — `review_addressed`
+   stays context-only unless listed (the manual-continuation shape), and
+   reviewer-output types (`review_feedback`, `review_lgtm`) are always
+   context-only (`review_continuation_context_only`);
+3. the declared `repo` and `pr` match the pinned `repository` and
+   `pr_number`, the declared fields parse, and the round's requested side
+   effects stay inside `permitted_side_effects` — any excess or
+   unverifiable declaration pauses with
+   `review_continuation_scope_exceeded` (fail closed: a request that does
+   not declare its repository cannot be confirmed in-scope);
+4. the effective round stays within `max_round`
+   (`review_continuation_round_exceeded` otherwise). The effective round
+   is `max(declared round, 1 + prior round-consuming audits in the
+   thread)`, where an audit consumes one unit only when its invocation
+   actually ran: an `auto_accepted` continuation round, or a pause whose
+   recorded human outcome authorized the manual round
+   (`approved`/`modified`). Declined, unanswered, and context-only
+   records consume nothing — a dead ask can never exhaust the budget a
+   later re-grant promises. The receiver's own audit trail is the floor,
+   so a sender cannot under-declare the round number to stay inside the
+   ceiling, and grant-listed `review_addressed` invocations cannot
+   repeat unbounded;
+5. the grant is unexpired on **both clocks**: neither the message's
+   `created_at_utc` nor the evaluation time may pass `expires_at_utc`
+   (`review_continuation_expired` otherwise). `created_at_utc` is
+   sender-controlled, so the evaluation-time check is the binding one —
+   a request queued before expiry does not run after it.
+
+Authorization and revocation arbitrate on different clocks. An approval
+governs only requests created after it — authority is never retroactive.
+A denial takes effect the moment it is recorded: a denial decided before
+*evaluation* revokes queued work even when the request predates it
+(`review_continuation_revoked`), and on a tie the denial wins. A denial
+is not a tombstone — a newer approval that still predates the request
+re-establishes standing continuation.
+
+The decision records a `review_continuation` block alongside
+`continuation_grant`: the governing scope, the declared request context,
+the `effective_round`, `exceeded_fields` on drift, the grant's
+`source_audit`/`source_message_id`, and a `head_check`
+(`declared_head`, `live_head`, `status:
+match|mismatch|undeclared|unverified`). A head mismatch — including a
+declared value that only shares a prefix with the live head, or a
+truncated declaration — is recorded with
+`review_continuation_head_mismatch` and never blocks the round: the live
+head is authoritative, and the reviewer must resolve the declared value
+against a live fetch before any terminal verdict. Head drift after
+approval still invalidates completion per the review-loop protocol.
+
+`permitted_side_effects` binds execution, not just admission: the
+dispatching runtime passes the accepted scope's permitted set to the
+reviewer invocation as its bound, and the reviewer withholds any outward
+action whose entry is `false` (recording what was withheld) — a granted
+round never performs a GitHub comment or review submission the grant did
+not permit. A round that cannot complete without a forbidden effect
+pauses instead of performing it.
+
+Lexical hard-stop scanning deliberately does not run on review lifecycle
+bodies: a granted reviewer invocation executes a pinned workflow whose
+side effects are bounded by `permitted_side_effects`, not by sender prose,
+and review bodies quote diffs and commands by design. Admission here is
+scope matching against a human-granted bound, not body classification.
+An admitted review decision carries no task `scope_envelope`; its bound is
+the accepted `review_continuation.scope`.
 
 ## Taxonomy Pin
 

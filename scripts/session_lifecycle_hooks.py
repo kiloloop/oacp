@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Kiloloop
 # SPDX-License-Identifier: Apache-2.0
-"""Persist init/close session hooks into OACP workspace state."""
+"""Persist init/close session telemetry into OACP workspace state."""
 
 from __future__ import annotations
 
@@ -511,7 +511,7 @@ def close_session(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Persist init/close session lifecycle hooks into OACP workspace state.",
+        description="Persist init/close session telemetry into OACP workspace state.",
     )
     parser.add_argument(
         "--hub-dir",

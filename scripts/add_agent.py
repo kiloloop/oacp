@@ -23,7 +23,13 @@ from _oacp_constants import (
     utc_now_iso,
 )
 
-AGENT_SUBDIRS = ("inbox", "outbox", "dead_letter", "audit/autonomy_decisions")
+AGENT_SUBDIRS = (
+    "inbox",
+    "inbox/archive",
+    "outbox",
+    "dead_letter",
+    "audit/autonomy_decisions",
+)
 
 
 def _load_runtime_capabilities() -> Dict[str, Any]:

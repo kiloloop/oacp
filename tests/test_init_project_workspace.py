@@ -42,6 +42,9 @@ class TestInitializeWorkspace(unittest.TestCase):
 
             project_root = Path(result["project_root"])
             self.assertTrue((project_root / "agents" / "codex" / "inbox").is_dir())
+            self.assertTrue(
+                (project_root / "agents" / "codex" / "inbox" / "archive").is_dir()
+            )
             self.assertTrue((project_root / "agents" / "claude" / "inbox").is_dir())
             self.assertTrue((project_root / "agents" / "cursor" / "inbox").is_dir())
             self.assertFalse((project_root / "agents" / "gemini").exists())
@@ -74,6 +77,16 @@ class TestInitializeWorkspace(unittest.TestCase):
             project_root = Path(result["project_root"])
             self.assertTrue((project_root / "agents" / "alice" / "inbox").is_dir())
             self.assertTrue((project_root / "agents" / "bob" / "inbox").is_dir())
+            self.assertTrue(
+                (
+                    project_root
+                    / "agents"
+                    / "alice"
+                    / "inbox"
+                    / "archive"
+                    / ".gitkeep"
+                ).is_file()
+            )
             self.assertTrue(
                 (
                     project_root

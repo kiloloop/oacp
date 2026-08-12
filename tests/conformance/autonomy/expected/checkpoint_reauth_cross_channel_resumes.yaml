@@ -1,0 +1,37 @@
+case: checkpoint_reauth_cross_channel_resumes
+config: configs/auto_review_standard.yaml
+message: messages/clean_task.yaml
+actuals: actuals/reauth_cross_channel.yaml
+expected:
+  decision: auto_accepted
+  mode: auto_review
+  reason_codes:
+    - message_valid
+    - message_not_expired
+    - message_hash_recorded
+    - task_profile_present
+    - task_type_allowed
+    - risk_threshold_passed
+    - hard_stops_clear
+    - workspace_check_required
+    - checkpoint_reauthorized
+  result:
+    final_state: done
+    completion_kind: auto_accepted
+    threshold_checkpoint:
+      evaluated: true
+      breached: true
+      breached_fields:
+        - actual_files_touched
+      breach_basis: realized
+      paused_at_utc: "2026-05-12T12:30:00Z"
+      action: resumed_after_reauthorization
+      reauthorization:
+        presented: true
+        channel: receiver_human
+        decision: approved
+        decided_at_utc: "2026-05-12T12:50:00Z"
+        actor: alice
+        disposition: resumed
+        cleared_paused_at_utc: "2026-05-12T12:30:00Z"
+        advisory: []

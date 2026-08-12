@@ -82,7 +82,8 @@ The top-level files in `memory/` are the active working set. `memory/archive/` i
 **Location:** `$OACP_HOME/projects/<project>/agents/<agent_name>/inbox/`
 
 **Action:**
-- List YAML files in the inbox directory (excluding `.gitkeep` and `processed/` subdirectory)
+- List top-level YAML files in the inbox directory (excluding `.gitkeep` and
+  the protocol `archive/` subdirectory)
 - If messages exist, summarize count and types to the user
 - Do NOT auto-process messages during init — let the user decide when to act on them
 
@@ -91,7 +92,9 @@ The top-level files in `memory/` are the active working set. `memory/archive/` i
 - The user explicitly asks (`/check-inbox`)
 - A dispatcher or orchestrator has sent the agent a task
 
-**Deferral behavior:** If skipped at init, the agent can check inbox at any point during the session. The inbox is durable — messages persist until explicitly deleted.
+**Deferral behavior:** If skipped at init, the agent can check inbox at any
+point during the session. The inbox is durable — pending messages persist until
+terminal processing moves their exact files into `inbox/archive/`.
 
 ### Step 5: Load Skills / Tools
 
@@ -152,33 +155,38 @@ This section provides guidance for per-runtime implementations.
 
 Steps 1-2 are handled automatically by Claude Code (CLAUDE.md loading). Step 3 requires explicit file reads or auto-memory. Step 4 uses `/check-inbox`. Step 5 is automatic (skill discovery). Step 6 requires a startup hook or explicit script call.
 
-**Key gap:** Step 6 (status reporting) is not automated in Claude Code today. Options: (a) startup hook in `.claude/hooks/`, (b) `scripts/session_lifecycle_hooks.py init_session` at conversation start, (c) CLAUDE.md instruction to update status.yaml.
-
-Example Claude Code hook config:
-
-```json
-{ "hooks": { "session-start": [{ "command": "python3 scripts/session_lifecycle_hooks.py --hub-dir \"$OACP_HOME\" init_session <project> --agent claude" }] } }
-```
-
-This example assumes `$OACP_HOME` is set in the Claude runtime environment.
+`oacp setup claude` registers the marker-gated memory pull at `SessionStart`.
+It intentionally does not publish memory at `SessionEnd`; wrap-up owns the
+single explicit `oacp memory push` path. Claude status reporting remains an
+explicit runtime responsibility. `scripts/session_lifecycle_hooks.py` records
+separate coordinator telemetry and must not be treated as a `status.yaml`
+writer.
 
 ### Codex
 
-Steps 1-2 are handled by AGENTS.md loading. Steps 3 and 6 can be handled by `scripts/codex_session_init.py`, which loads protocol docs + durable memory and creates/updates `status.yaml`.
+Steps 1-2 are handled by AGENTS.md loading. Running `oacp setup codex
+--project <project>` installs one repo-local `SessionStart` handler in
+`.codex/hooks.json`. After the user reviews and trusts it with `/hooks`, the
+handler sequentially pulls shared memory and runs `oacp session-init`. No
+Codex `SessionEnd` hook is installed.
 
-Run at session start:
+The init command verifies that protocol and durable-memory files are readable,
+updates `status.yaml`, and emits bounded developer context naming the required
+ordered reads. It does not claim that the full file contents were injected.
+Use this manual fallback when the project hook is unavailable or untrusted:
 
 ```bash
-python3 scripts/codex_session_init.py --project <project>
+oacp session-init --pull-memory --project <project>
 ```
 
 The script emits a deterministic acknowledgement payload suitable for first-response confirmation:
 
 ```text
-SESSION_INIT_ACK: project=<project>;protocol=...;memory=...;status_yaml=...
+SESSION_INIT_ACK: project=<project>;protocol=...;memory=...;status_yaml=...;context=manifest
 ```
 
-**Current limitation:** `/check-inbox` integration is intentionally deferred so high-frequency inbox behavior does not change midstream. Session-start init is the required baseline.
+`/check-inbox` integration remains intentionally separate so startup never
+processes queued work before the user sees it.
 
 ### Gemini
 
@@ -202,4 +210,6 @@ Steps 1-2 are handled by system prompts and `.agent/rules/`. Steps 3-6 can be im
 - **Inbox Protocol**: `docs/protocol/inbox_outbox.md` — message format for Step 4
 - **Runtime Capabilities**: `docs/protocol/runtime_capabilities.md` — status schema and capability keys for Step 6
 - **Cross-Runtime Sync**: `docs/protocol/cross_runtime_sync.md` — durable memory files loaded at Step 3
-- **Session Lifecycle**: `scripts/session_lifecycle_hooks.py` — reference script for init/close hooks
+- **Session telemetry**: `scripts/session_lifecycle_hooks.py` — compatibility
+  state consumed by the coordinator; not a runtime startup or `status.yaml`
+  implementation

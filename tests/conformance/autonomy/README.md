@@ -25,10 +25,23 @@ Consumers may add implementation-specific trace fields, but `decision`, `mode`,
 
 These fixtures may also include:
 
+- `now:` — the evaluation time (`YYYY-MM-DDTHH:MM:SSZ`) passed to the
+  evaluator as `now_utc`. Required on any fixture whose decision depends
+  on the clock (review-grant expiry, revoke-before-processing); fixtures
+  without it evaluate at the real current time
 - `actuals:` pointing at checkpoint input under `actuals/`
+- `actuals.reauthorization` for checkpoint re-authorization arbitration:
+  channel answers (`receiver_human` / `sender_reply` / `gh_comment`) judged
+  against the pause being re-evaluated (same-channel, cross-channel,
+  conflicting, reuse, and boundary-action cases)
+- `actuals.review.live_head` for review-loop head checks: the live PR head
+  the runtime observed, compared against the request's `declared_head`
 - `audits:` pointing at prior same-thread audit records under `audits/`
 - `expected.logged_notes` for demoted side-effect verb matches
 - `expected.continuation_grant` for default-off and enabled grant behavior
+- `expected.review_continuation` for review-loop continuation decisions
+  (accepted, missing-approval, disabled, drifted, revoked, later-round,
+  and the head-mismatch / prefix-collision recording cases)
 - `expected.result.threshold_checkpoint` for envelope drift decisions
 - `expected.breached` for the pinned top-level breach list
 - `expected.task_profile` for full declared-profile capture

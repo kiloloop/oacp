@@ -21,4 +21,8 @@ autonomy:
   continuation_grants:
     # Default-off. When enabled, receivers may honor explicit same-thread
     # continuation grants that stay inside the granted scope envelope.
+    # Also governs recognition of review-loop grants (a granted_scope
+    # review_loop block auto-continues in-scope follow-up review rounds).
+    # Enabling recognition never creates standing authority by itself:
+    # authority exists only in a prior human-approved grant audit.
     enabled: false

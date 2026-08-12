@@ -59,6 +59,19 @@ class TestOacpCli(unittest.TestCase):
         )
 
     @mock.patch("oacp.cli._run_script", return_value=0)
+    def test_dispatches_session_init(self, run_script) -> None:
+        code, stdout, stderr = self._run(
+            ["session-init", "--hook", "--pull-memory", "--project", "demo"]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "")
+        run_script.assert_called_once_with(
+            "codex_session_init.py",
+            ["--hook", "--pull-memory", "--project", "demo"],
+        )
+
+    @mock.patch("oacp.cli._run_script", return_value=0)
     def test_dispatches_inbox(self, run_script) -> None:
         code, stdout, stderr = self._run(["inbox", "demo", "--agent", "codex"])
         self.assertEqual(code, 0)

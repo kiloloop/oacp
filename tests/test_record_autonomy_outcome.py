@@ -146,6 +146,38 @@ def test_modified_grant_requires_explicit_scope() -> None:
         )
 
 
+def test_review_only_grant_scope_records_with_zero_task_budgets() -> None:
+    # A review-loop grant recorded at a review_request confirmation pause:
+    # no task budget keys, so the grant carries no task-continuation
+    # authority, and the review_loop block survives normalization.
+    review_scope = {
+        "review_loop": {
+            "repository": "example-org/widget",
+            "pr_number": 88,
+            "allowed_types": ["review_request"],
+            "max_round": 3,
+            "expires_at_utc": "2026-07-20T00:00:00Z",
+            "permitted_side_effects": {
+                "writes_findings_packet": True,
+                "sends_oacp_reply": True,
+            },
+        }
+    }
+    updated = record_human_outcome(
+        _audit(),
+        decision="approved",
+        grant_decision="approved",
+        granted_scope=review_scope,
+        decided_at_utc="2026-07-11T01:01:00Z",
+    )
+
+    granted = updated["result"]["human_outcome"]["grant"]["granted_scope"]
+    assert granted["max_actual_minutes"] == 0
+    assert granted["max_actual_files_touched"] == 0
+    assert granted["review_loop"]["pr_number"] == 88
+    assert granted["review_loop"]["allowed_types"] == ["review_request"]
+
+
 def test_grant_request_requires_explicit_grant_decision() -> None:
     with pytest.raises(ValueError, match="explicit --grant-decision"):
         build_human_outcome(

@@ -86,14 +86,17 @@ log_action() {
 # ── Phase 1: Ensure directories ─────────────────────────────────────────
 EXPECTED_DIRS=(
   "agents/codex/inbox"
+  "agents/codex/inbox/archive"
   "agents/codex/outbox"
   "agents/codex/dead_letter"
   "agents/codex/audit/autonomy_decisions"
   "agents/claude/inbox"
+  "agents/claude/inbox/archive"
   "agents/claude/outbox"
   "agents/claude/dead_letter"
   "agents/claude/audit/autonomy_decisions"
   "agents/gemini/inbox"
+  "agents/gemini/inbox/archive"
   "agents/gemini/outbox"
   "agents/gemini/dead_letter"
   "agents/gemini/audit/autonomy_decisions"
@@ -131,14 +134,17 @@ done
 # NOT in memory/, state/, logs/ — those get real content.
 GITKEEP_DIRS=(
   "agents/codex/inbox"
+  "agents/codex/inbox/archive"
   "agents/codex/outbox"
   "agents/codex/dead_letter"
   "agents/codex/audit/autonomy_decisions"
   "agents/claude/inbox"
+  "agents/claude/inbox/archive"
   "agents/claude/outbox"
   "agents/claude/dead_letter"
   "agents/claude/audit/autonomy_decisions"
   "agents/gemini/inbox"
+  "agents/gemini/inbox/archive"
   "agents/gemini/outbox"
   "agents/gemini/dead_letter"
   "agents/gemini/audit/autonomy_decisions"
@@ -176,7 +182,35 @@ if [[ -d "$PROJECT_ROOT/agents" ]]; then
     [[ -d "$agent_dir" ]] || continue
     agent_name="$(basename "$agent_dir")"
     audit_dir="$agent_dir/audit/autonomy_decisions"
+    archive_dir="$agent_dir/inbox/archive"
     config_file="$agent_dir/config.yaml"
+
+    if [[ -d "$archive_dir" ]]; then
+      log_action "~" "dir  agents/$agent_name/inbox/archive"
+      ((UNCHANGED+=1))
+    else
+      if [[ "$DRY_RUN" == true ]]; then
+        log_action "+" "dir  agents/$agent_name/inbox/archive (dry-run)"
+      else
+        mkdir -p "$archive_dir"
+        log_action "+" "dir  agents/$agent_name/inbox/archive"
+      fi
+      ((CREATED+=1))
+    fi
+
+    if [[ -f "$archive_dir/.gitkeep" ]]; then
+      log_action "~" "file agents/$agent_name/inbox/archive/.gitkeep"
+      ((UNCHANGED+=1))
+    else
+      if [[ "$DRY_RUN" == true ]]; then
+        log_action "+" "file agents/$agent_name/inbox/archive/.gitkeep (dry-run)"
+      else
+        mkdir -p "$archive_dir"
+        touch "$archive_dir/.gitkeep"
+        log_action "+" "file agents/$agent_name/inbox/archive/.gitkeep"
+      fi
+      ((CREATED+=1))
+    fi
 
     if [[ -d "$audit_dir" ]]; then
       log_action "~" "dir  agents/$agent_name/audit/autonomy_decisions"

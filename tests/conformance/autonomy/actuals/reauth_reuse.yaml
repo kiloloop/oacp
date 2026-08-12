@@ -1,0 +1,14 @@
+actual_minutes: 35
+actual_files_touched: 1
+paused_at_utc: "2026-05-12T13:10:00Z"
+side_effects_actual:
+  creates_or_updates_pr: false
+  comments_on_github: false
+  commits_changes: false
+reauthorization:
+  receiver_human:
+    decision: approved
+    decided_at_utc: "2026-05-12T12:45:00Z"
+    actor: alice
+    scope:
+      max_actual_minutes: 30

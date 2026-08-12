@@ -1,0 +1,17 @@
+case: review_continuation_expired_pauses
+config: configs/auto_review_continuation_enabled.yaml
+message: messages/review_continuation_request.yaml
+now: "2026-07-01T00:00:00Z"
+audits:
+  - audits/prior_review_grant_approved.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - review_continuation_expired
+  review_continuation:
+    decision: expired
+    grant_found: true
+  result:
+    final_state: paused
+    completion_kind: admission_paused

@@ -8,7 +8,7 @@ Shared, cross-project memory for multi-agent organizations. Agents across projec
 
 ```
 $OACP_HOME/org-memory/
-  recent.md           # always-loaded rolling summary (~150 lines guideline)
+  recent.md           # always-loaded rolling summary (~60K chars / ~15K tokens)
   decisions.md        # topical: org-wide decisions (illustrative default)
   rules.md            # topical: standing conventions (illustrative default)
   events/             # chronological: timestamped entries
@@ -16,6 +16,12 @@ $OACP_HOME/org-memory/
 ```
 
 `decisions.md` and `rules.md` are illustrative defaults, not protocol requirements. Adopters choose which topical files to create (e.g., `agents.md`, `architecture.md`).
+
+Keep `recent.md` to approximately 60,000 characters (roughly 15,000 tokens),
+because its context cost is paid at every session start. Approximately 150
+lines remain a secondary readability hint only; when the measures disagree,
+the character budget governs. Collapse older detail into topical files or
+history so the file remains a rolling summary rather than a complete log.
 
 ## Event File Schema
 

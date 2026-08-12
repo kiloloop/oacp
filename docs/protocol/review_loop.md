@@ -75,6 +75,10 @@ body: |
 | `pr` | Yes | Pull request number |
 | `branch` | Yes | Branch name under review |
 | `diff_summary` | Yes | Brief summary of the changes |
+| `repo` | No* | Repository slug (`owner/repo`). *Required when the request relies on a continuation grant — scope matching fails closed without it |
+| `round` | No* | 1-based review round of this request (default `1`). *Declare explicitly on granted follow-up rounds; the receiver floors it against its own audit trail |
+| `declared_head` | No | Full commit SHA the author believes is the PR head. Advisory only — the reviewer never trusts it (see Exact-Head Validation) |
+| `side_effects` | No | Review side effects this round needs beyond the defaults (`writes_findings_packet`, `sends_oacp_reply`); entries from `comments_on_github`, `submits_github_review` |
 | `handoff_ref` | No | Reference to a handoff packet if this review follows a handoff |
 | `max_turns_reviewer` | No | Hard turn budget for reviewer invocation (default `8`) |
 | `max_runtime_s_reviewer` | No | Hard runtime budget in seconds for reviewer invocation (default `600`) |
@@ -219,6 +223,54 @@ body: |
 - Reviewer runtime **MUST** terminate after producing one terminal response (`review_feedback` or `review_lgtm`).
 - Reviewer runtime **MUST NOT** wait in-session for `review_addressed`.
 - Author runtime **SHOULD** coordinate multi-round progression by re-invoking reviewer for round N+1.
+
+### Exact-Head Validation
+
+The live PR head is authoritative in every round; a sender-declared head is
+context, never evidence:
+
+- The reviewer **MUST** fetch the live PR ref and resolve the actual head
+  commit before reviewing. The reviewed head recorded in the findings
+  packet is taken verbatim from that live resolution, never from the
+  request.
+- A missing or mismatched `declared_head` **MUST** be recorded and resolved
+  through the exact-head fetch before any terminal verdict
+  (`review_feedback` or `review_lgtm`). Comparison is exact full-string
+  equality of complete SHAs — a declared value that shares a prefix with
+  the live head, or a truncated declaration, is a mismatch, not a match.
+- A mismatch does not abort the round: the reviewer reviews the live head
+  and approves only what it actually validated.
+- Head drift after approval or PR comment invalidates completion: an LGTM
+  binds to the exact head it validated, and any later head change requires
+  a fresh round.
+
+### Continuation Grants (Auto-Continued Rounds)
+
+By default every reviewer invocation requires explicit human confirmation
+per round. A human may grant a bounded, revocable
+`approved_thread_continuation` with a `review_loop` scope for one PR
+review thread; a fresh in-scope same-thread `review_request` then
+auto-invokes the reviewer. The grant authorizes running the round — never
+its verdict, and never trust in the declared head. Scope shape,
+arbitration order, revocation, and audit recording are specified in
+`autonomy.md` → "Review-loop continuation"; grant recognition is enabled
+by receiver config (`autonomy.continuation_grants.enabled`), which by
+itself never creates standing authority.
+
+All guards in this protocol are unchanged under a grant: stateless
+one-round invocations, exact-head validation, head-drift invalidation,
+round limits, and budget controls. For rounds beyond the protocol default
+below, a valid in-scope continuation grant counts as recorded current
+human direction; without one, the escalation gate applies unchanged.
+
+The grant's `permitted_side_effects` binds the invocation, not just its
+admission: the dispatcher passes the accepted permitted set to the
+reviewer as its bound, and the reviewer **MUST NOT** perform an outward
+action whose entry is `false` — GitHub status comments and GitHub review
+submission are skipped (and recorded as withheld in the OACP reply) when
+not permitted; findings packets and signed OACP replies are the baseline
+a grant is expected to permit. A round that cannot complete without a
+forbidden effect pauses instead of performing it.
 
 ### Round Limits
 

@@ -4,7 +4,8 @@
 AGENTS.md
 CLAUDE.md
 GEMINI.md
-.claude/skills/
+.claude/
+.codex/
 .worktrees/
 __pycache__/
 *.pyc
