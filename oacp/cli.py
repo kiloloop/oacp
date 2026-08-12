@@ -24,7 +24,9 @@ Commands:
   agent          Manage global agent profiles (init, show, list)
   inbox          List pending inbox messages
   watch          Emit inbox delta events for Monitor-friendly polling
+  retention      Prune project message history by age and count
   memory         Archive, restore, or sync memory files
+  session-init   Verify Codex startup inputs and emit SessionStart context
   setup          Generate runtime-specific config files in a repo
   send           Send a protocol-compliant inbox message
   key            Generate and inspect message-signing keys
@@ -43,8 +45,10 @@ Examples:
   oacp add-agent my-project alice --runtime claude
   oacp inbox my-project --agent claude
   oacp watch --agent claude --project my-project --json
+  oacp retention my-project --dry-run
   oacp memory init --remote git@github.com:<YOUR_ORG>/oacp-memory.git
   oacp memory archive my-project research_notes.md
+  oacp session-init --pull-memory --project my-project
   oacp setup claude --project my-project
   oacp send my-project --to iris --type notification --subject "Done" --body "Completed"
   oacp key gen --agent claude
@@ -66,7 +70,9 @@ SCRIPT_NAMES = {
     "agent": "agent_profile.py",
     "inbox": "oacp_inbox.py",
     "watch": "oacp_watch.py",
+    "retention": "retention.py",
     "memory": "memory_cli.py",
+    "session-init": "codex_session_init.py",
     "setup": "setup_runtime.py",
     "send": "send_inbox_message.py",
     "key": "key_cli.py",

@@ -70,7 +70,13 @@ STATIC_GITKEEP_PATHS = (
     "artifacts/.gitkeep",
 )
 
-AGENT_SUBDIRS = ("inbox", "outbox", "dead_letter", "audit/autonomy_decisions")
+AGENT_SUBDIRS = (
+    "inbox",
+    "inbox/archive",
+    "outbox",
+    "dead_letter",
+    "audit/autonomy_decisions",
+)
 
 
 def _agent_dirs(agents: Sequence[str]) -> List[str]:

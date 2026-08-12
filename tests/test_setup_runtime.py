@@ -27,23 +27,20 @@ class TestSetupRuntime(unittest.TestCase):
 
             agent_file = repo_dir / ".claude" / "agents" / "myproj.md"
             pull_hook = repo_dir / ".claude" / "hooks" / "oacp-memory-pull.sh"
-            push_hook = repo_dir / ".claude" / "hooks" / "oacp-memory-push.sh"
             settings_file = repo_dir / ".claude" / "settings.json"
             self.assertTrue(agent_file.is_file())
             self.assertTrue((repo_dir / ".claude" / "skills").is_dir())
             self.assertTrue(pull_hook.is_file())
-            self.assertTrue(push_hook.is_file())
+            self.assertFalse(
+                (repo_dir / ".claude" / "hooks" / "oacp-memory-push.sh").exists()
+            )
             self.assertTrue(settings_file.is_file())
             pull_content = pull_hook.read_text(encoding="utf-8")
-            push_content = push_hook.read_text(encoding="utf-8")
             self.assertIn("Claude hook event: SessionStart", pull_content)
             self.assertIn("oacp memory pull", pull_content)
-            self.assertIn("Claude hook event: SessionEnd", push_content)
-            self.assertIn("oacp memory push", push_content)
-            self.assertIn("|| true", push_content)
             settings = json.loads(settings_file.read_text(encoding="utf-8"))
             self.assertIn("SessionStart", settings["hooks"])
-            self.assertIn("SessionEnd", settings["hooks"])
+            self.assertNotIn("SessionEnd", settings["hooks"])
             self.assertIn("PreToolUse", settings["hooks"])
             envelope_entry = settings["hooks"]["PreToolUse"][0]
             self.assertEqual(envelope_entry["matcher"], "Bash|Edit|Write|NotebookEdit")
@@ -53,7 +50,6 @@ class TestSetupRuntime(unittest.TestCase):
             self.assertIn(".claude/agents/myproj.md", result["created_files"])
             self.assertIn(".claude/skills/", result["created_files"])
             self.assertIn(".claude/hooks/oacp-memory-pull.sh", result["created_files"])
-            self.assertIn(".claude/hooks/oacp-memory-push.sh", result["created_files"])
             self.assertIn(".claude/settings.json", result["created_files"])
 
     def test_claude_envelope_hook_registration_is_idempotent(self) -> None:
@@ -75,14 +71,35 @@ class TestSetupRuntime(unittest.TestCase):
     def test_codex_creates_agents_md(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_dir = Path(tmpdir)
-            result = setup_runtime("codex", repo_dir=repo_dir)
+            oacp_root = repo_dir / "oacp-home"
+            result = setup_runtime(
+                "codex",
+                repo_dir=repo_dir,
+                project_name="demo",
+                oacp_root=oacp_root,
+            )
 
             agents_md = repo_dir / "AGENTS.md"
+            hooks_file = repo_dir / ".codex" / "hooks.json"
             self.assertTrue(agents_md.is_file())
+            self.assertTrue(hooks_file.is_file())
             content = agents_md.read_text(encoding="utf-8")
             self.assertIn("OACP", content)
             self.assertIn("oacp send", content)
+            self.assertIn("oacp session-init --pull-memory", content)
+            hooks = json.loads(hooks_file.read_text(encoding="utf-8"))
+            entry = hooks["hooks"]["SessionStart"][0]
+            self.assertEqual(entry["matcher"], "^startup$")
+            self.assertEqual(len(entry["hooks"]), 1)
+            handler = entry["hooks"][0]
+            self.assertEqual(handler["type"], "command")
+            self.assertIn("oacp session-init --hook --pull-memory", handler["command"])
+            self.assertIn("--project demo", handler["command"])
+            self.assertIn(f"--hub-dir {oacp_root}", handler["command"])
+            self.assertEqual(handler["additionalContextLimit"], 2500)
+            self.assertEqual(handler["timeout"], 60)
             self.assertIn("AGENTS.md", result["created_files"])
+            self.assertIn(".codex/hooks.json", result["created_files"])
 
     def test_gemini_creates_rules_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -240,15 +257,217 @@ class TestSetupRuntime(unittest.TestCase):
                 json.dumps({"env": {"EXISTING": "1"}, "hooks": {"Stop": []}}),
                 encoding="utf-8",
             )
-
             result = setup_runtime("claude", repo_dir=repo_dir, project_name="demo")
             data = json.loads(settings.read_text(encoding="utf-8"))
 
             self.assertEqual(data["env"]["EXISTING"], "1")
             self.assertIn("Stop", data["hooks"])
             self.assertIn("SessionStart", data["hooks"])
-            self.assertIn("SessionEnd", data["hooks"])
+            self.assertNotIn("SessionEnd", data["hooks"])
             self.assertIn(".claude/settings.json", result["created_files"])
+
+    def test_claude_removes_only_generated_session_end_push(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            settings = repo_dir / ".claude" / "settings.json"
+            settings.parent.mkdir(parents=True)
+            settings.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "SessionEnd": [
+                                {
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": ".claude/hooks/oacp-memory-push.sh",
+                                        },
+                                        {
+                                            "type": "command",
+                                            "command": ".claude/hooks/custom-session-end.sh",
+                                        },
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            legacy_hook = repo_dir / ".claude" / "hooks" / "oacp-memory-push.sh"
+            legacy_hook.parent.mkdir(parents=True)
+            legacy_hook.write_text("user-visible legacy file\n", encoding="utf-8")
+
+            result = setup_runtime("claude", repo_dir=repo_dir, project_name="demo")
+            data = json.loads(settings.read_text(encoding="utf-8"))
+            commands = [
+                hook["command"]
+                for entry in data["hooks"]["SessionEnd"]
+                for hook in entry.get("hooks", [])
+            ]
+            self.assertNotIn(".claude/hooks/oacp-memory-push.sh", commands)
+            self.assertIn(".claude/hooks/custom-session-end.sh", commands)
+            self.assertEqual(
+                legacy_hook.read_text(encoding="utf-8"), "user-visible legacy file\n"
+            )
+            self.assertIn(".claude/settings.json", result["created_files"])
+
+    def test_codex_hooks_merge_preserves_existing_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            hooks_file = repo_dir / ".codex" / "hooks.json"
+            hooks_file.parent.mkdir(parents=True)
+            hooks_file.write_text(
+                json.dumps(
+                    {
+                        "description": "custom",
+                        "hooks": {"Stop": [{"hooks": []}]},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = setup_runtime(
+                "codex",
+                repo_dir=repo_dir,
+                project_name="demo",
+                oacp_root=repo_dir / "oacp",
+            )
+            data = json.loads(hooks_file.read_text(encoding="utf-8"))
+            self.assertEqual(data["description"], "custom")
+            self.assertIn("Stop", data["hooks"])
+            self.assertIn("SessionStart", data["hooks"])
+            self.assertIn(".codex/hooks.json", result["created_files"])
+
+    def test_codex_hook_registration_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            oacp_root = repo_dir / "oacp"
+            setup_runtime(
+                "codex",
+                repo_dir=repo_dir,
+                project_name="demo",
+                oacp_root=oacp_root,
+            )
+            result = setup_runtime(
+                "codex",
+                repo_dir=repo_dir,
+                project_name="demo",
+                oacp_root=oacp_root,
+            )
+
+            data = json.loads(
+                (repo_dir / ".codex" / "hooks.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(len(data["hooks"]["SessionStart"]), 1)
+            self.assertIn(".codex/hooks.json", result["skipped_files"])
+
+    def test_codex_hook_registration_replaces_changed_managed_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            first_root = repo_dir / "first-oacp"
+            second_root = repo_dir / "second-oacp"
+            setup_runtime(
+                "codex",
+                repo_dir=repo_dir,
+                project_name="first",
+                oacp_root=first_root,
+            )
+            result = setup_runtime(
+                "codex",
+                repo_dir=repo_dir,
+                project_name="second",
+                oacp_root=second_root,
+            )
+
+            data = json.loads(
+                (repo_dir / ".codex" / "hooks.json").read_text(encoding="utf-8")
+            )
+            entries = data["hooks"]["SessionStart"]
+            commands = [
+                hook["command"]
+                for entry in entries
+                for hook in entry.get("hooks", [])
+                if hook.get("command", "").startswith("oacp session-init --hook")
+            ]
+            self.assertEqual(len(commands), 1)
+            self.assertIn("--project second", commands[0])
+            self.assertIn(f"--hub-dir {second_root}", commands[0])
+            self.assertNotIn("--project first", commands[0])
+            self.assertNotIn(str(first_root), commands[0])
+            self.assertIn(".codex/hooks.json", result["created_files"])
+
+    def test_codex_hook_replacement_preserves_custom_session_start_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            hooks_file = repo_dir / ".codex" / "hooks.json"
+            hooks_file.parent.mkdir(parents=True)
+            hooks_file.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "SessionStart": [
+                                {
+                                    "matcher": "^startup$",
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": (
+                                                "oacp session-init --hook --pull-memory "
+                                                "--project old --hub-dir /old/oacp"
+                                            ),
+                                        },
+                                        {
+                                            "type": "command",
+                                            "command": ".codex/hooks/custom-startup.sh",
+                                        },
+                                    ],
+                                }
+                            ]
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            setup_runtime(
+                "codex",
+                repo_dir=repo_dir,
+                project_name="new",
+                oacp_root=repo_dir / "oacp",
+            )
+
+            data = json.loads(hooks_file.read_text(encoding="utf-8"))
+            commands = [
+                hook["command"]
+                for entry in data["hooks"]["SessionStart"]
+                for hook in entry.get("hooks", [])
+            ]
+            self.assertEqual(commands.count(".codex/hooks/custom-startup.sh"), 1)
+            managed = [
+                command
+                for command in commands
+                if command.startswith("oacp session-init --hook")
+            ]
+            self.assertEqual(len(managed), 1)
+            self.assertIn("--project new", managed[0])
+
+    def test_codex_hooks_warns_when_existing_file_is_not_object(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            hooks_file = repo_dir / ".codex" / "hooks.json"
+            hooks_file.parent.mkdir(parents=True)
+            hooks_file.write_text("[]", encoding="utf-8")
+
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                result = setup_runtime(
+                    "codex", repo_dir=repo_dir, project_name="demo"
+                )
+
+            self.assertIn(".codex/hooks.json", result["warning_files"])
+            self.assertIn("expected a JSON object", stderr.getvalue())
+            self.assertEqual(hooks_file.read_text(encoding="utf-8"), "[]")
 
     def test_claude_settings_warns_when_existing_settings_is_not_object(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

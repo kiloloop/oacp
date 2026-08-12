@@ -90,7 +90,6 @@ This creates or updates:
 - `.claude/agents/my-first-project.md`
 - `.claude/skills/`
 - `.claude/hooks/oacp-memory-pull.sh`
-- `.claude/hooks/oacp-memory-push.sh`
 - `.claude/settings.json`
 
 For other supported runtimes, use the same shape:
@@ -100,6 +99,17 @@ oacp setup codex --project my-first-project
 oacp setup cursor --project my-first-project
 oacp setup gemini --project my-first-project
 ```
+
+Codex setup creates or merges `.codex/hooks.json` with one startup-only hook.
+Review and trust it with `/hooks`; it runs memory pull and startup verification
+sequentially. If hooks are unavailable, run the manual fallback:
+
+```bash
+oacp session-init --pull-memory --project my-first-project
+```
+
+Runtime setup does not install an automatic memory push. Publish durable memory
+explicitly during wrap-up with `oacp memory push`.
 
 Cursor support is scaffold-only until Cursor-owned rules land. Cursor sessions
 must set `OACP_RUNTIME=cursor` or pass `--from` explicitly when sending messages.

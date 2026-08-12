@@ -1,0 +1,36 @@
+case: checkpoint_reauth_conflict_declines
+config: configs/auto_review_standard.yaml
+message: messages/clean_task.yaml
+actuals: actuals/reauth_conflict.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - threshold_checkpoint_breached
+  breached:
+    - actual_files_touched
+  result:
+    final_state: paused
+    completion_kind: checkpoint_paused
+    threshold_checkpoint:
+      evaluated: true
+      breached: true
+      breached_fields:
+        - actual_files_touched
+      breach_basis: realized
+      paused_at_utc: "2026-05-12T12:30:00Z"
+      action: reauthorization_declined
+      reauthorization:
+        presented: true
+        channel: receiver_human
+        decision: declined
+        decided_at_utc: "2026-05-12T12:50:00Z"
+        actor: alice
+        disposition: declined
+        advisory:
+          - channel: sender_reply
+            decision: approved
+            reason: overridden_by_receiver_human
+          - channel: gh_comment
+            decision: approved
+            reason: never_authoritative

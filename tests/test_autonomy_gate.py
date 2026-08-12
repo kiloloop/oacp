@@ -10,6 +10,7 @@ import json
 import re
 import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
@@ -27,6 +28,7 @@ from autonomy_gate import (  # noqa: E402
     evaluate_autonomy,
     evaluate_threshold_checkpoint,
     main as autonomy_main,
+    normalize_continuation_scope,
     normalize_runtime_model,
     normalize_scope_envelope,
     resolve_runtime_block,
@@ -72,12 +74,17 @@ def test_autonomy_gate_matches_conformance_fixtures(tmp_path: Path) -> None:
                 source = FIXTURE_ROOT / audit_ref
                 shutil.copy2(source, audit_dir / source.name)
 
+        now_utc = None
+        if fixture.get("now"):
+            now_utc = datetime.strptime(fixture["now"], "%Y-%m-%dT%H:%M:%SZ")
+
         decision = evaluate_autonomy(
             message,
             config,
             actuals=actuals,
             audit_dir=audit_dir,
             receiver="codex",
+            now_utc=now_utc,
         )
         expected = fixture["expected"]
 
@@ -97,6 +104,11 @@ def test_autonomy_gate_matches_conformance_fixtures(tmp_path: Path) -> None:
 
         if "continuation_grant" in expected:
             _assert_subset(expected["continuation_grant"], decision["continuation_grant"])
+
+        if "review_continuation" in expected:
+            _assert_subset(
+                expected["review_continuation"], decision["review_continuation"]
+            )
 
         if "result" in expected:
             _assert_subset(expected["result"], decision["result"])
@@ -1204,3 +1216,1138 @@ def test_resolve_runtime_block_preserves_whitespace_only_raw_change() -> None:
     assert runtime["model"] == "gpt-5"
     assert runtime["model_source"] == "caller"
     assert runtime["model_raw"] == " gpt-5 "
+
+
+# --- Checkpoint re-authorization arbitration ---
+
+
+_REAUTH_POLICY = {
+    "thresholds": {
+        "max_estimated_minutes": 45,
+        "max_expected_files_touched": 5,
+        "external_side_effects": "allow_pr_artifacts",
+    },
+    "private_repo_allowlist": ["example-org/private-repo"],
+}
+
+
+def _reauth_actuals(**overrides: Any) -> Dict[str, Any]:
+    actuals: Dict[str, Any] = {
+        "actual_minutes": 25,
+        "actual_files_touched": 1,
+        "paused_at_utc": "2026-05-12T12:30:00Z",
+    }
+    actuals.update(overrides)
+    return actuals
+
+
+def test_reauth_gh_comment_alone_never_clears() -> None:
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(estimated_minutes=20),
+        {"present": False},
+        _reauth_actuals(
+            reauthorization={"gh_comment": {"decision": "approved", "author": "x"}},
+        ),
+        policy=_REAUTH_POLICY,
+    )
+    assert checkpoint["breached"] is True
+    assert checkpoint["action"] == "paused_for_reauthorization"
+    reauth = checkpoint["reauthorization"]
+    assert reauth["disposition"] == "advisory_only"
+    assert reauth["channel"] is None
+    assert reauth["advisory"] == [
+        {"channel": "gh_comment", "decision": "approved", "reason": "never_authoritative"},
+    ]
+
+
+def test_reauth_receiver_human_decline_overrides_sender_approval() -> None:
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(estimated_minutes=20),
+        {"present": False},
+        _reauth_actuals(
+            reauthorization={
+                "receiver_human": {
+                    "decision": "declined",
+                    "decided_at_utc": "2026-05-12T12:50:00Z",
+                },
+                "sender_reply": {
+                    "decision": "approved",
+                    "decided_at_utc": "2026-05-12T12:40:00Z",
+                    "source_message_id": "msg-reauth",
+                    "scope": {"max_actual_minutes": 30},
+                },
+            },
+        ),
+        policy=_REAUTH_POLICY,
+    )
+    assert checkpoint["action"] == "reauthorization_declined"
+    reauth = checkpoint["reauthorization"]
+    assert reauth["channel"] == "receiver_human"
+    assert reauth["disposition"] == "declined"
+    assert reauth["advisory"] == [
+        {
+            "channel": "sender_reply",
+            "decision": "approved",
+            "reason": "overridden_by_receiver_human",
+        },
+    ]
+
+
+def test_reauth_receiver_human_approval_wins_over_sender_decline() -> None:
+    # Precedence is by channel rank in both directions: a later or earlier
+    # sender decline never re-opens the receiver-side human's ruling.
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(estimated_minutes=20),
+        {"present": False},
+        _reauth_actuals(
+            reauthorization={
+                "receiver_human": {
+                    "decision": "approved",
+                    "decided_at_utc": "2026-05-12T12:50:00Z",
+                    "scope": {"max_actual_minutes": 30},
+                },
+                "sender_reply": {
+                    "decision": "declined",
+                    "decided_at_utc": "2026-05-12T12:55:00Z",
+                    "source_message_id": "msg-reauth",
+                },
+            },
+        ),
+        policy=_REAUTH_POLICY,
+    )
+    assert checkpoint["action"] == "resumed_after_reauthorization"
+    assert checkpoint["reauthorization"]["disposition"] == "resumed"
+
+
+def test_reauth_sender_scope_bounded_by_receiver_thresholds() -> None:
+    # 12 files exceeds the receiver's 5-file admission cap: a sender
+    # re-authorization cannot self-serve past the receiver's own policy.
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(estimated_minutes=20),
+        {"present": False},
+        _reauth_actuals(
+            actual_files_touched=12,
+            reauthorization={
+                "sender_reply": {
+                    "decision": "approved",
+                    "decided_at_utc": "2026-05-12T12:40:00Z",
+                    "source_message_id": "msg-reauth",
+                    "scope": {"max_actual_minutes": 30, "max_actual_files_touched": 12},
+                },
+            },
+        ),
+        policy=_REAUTH_POLICY,
+    )
+    assert checkpoint["breached"] is True
+    assert checkpoint["reauthorization"]["disposition"] == "insufficient"
+    assert checkpoint["action"] == "paused_for_reauthorization"
+
+
+def test_reauth_sender_cannot_grant_merges_pr() -> None:
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(),
+        {"present": False},
+        {
+            "actual_minutes": 1,
+            "actual_files_touched": 0,
+            "paused_at_utc": "2026-05-12T12:30:00Z",
+            "declared_intent_fields": ["task_profile.merges_pr"],
+            "reauthorization": {
+                "sender_reply": {
+                    "decision": "approved",
+                    "decided_at_utc": "2026-05-12T12:40:00Z",
+                    "source_message_id": "msg-reauth",
+                    "scope": {"merges_pr": True},
+                },
+            },
+        },
+        policy=_REAUTH_POLICY,
+    )
+    assert checkpoint["reauthorization"]["disposition"] == "insufficient"
+    assert checkpoint["action"] == "paused_for_reauthorization"
+
+
+def test_reauth_boundary_action_grant_is_durable_across_pauses() -> None:
+    # A stale answer cannot clear a numeric breach (per-checkpoint
+    # consumption), but the boundary action it granted stays granted for
+    # the remainder of the task.
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(),
+        {"present": False},
+        {
+            "actual_minutes": 1,
+            "actual_files_touched": 0,
+            "paused_at_utc": "2026-05-12T13:10:00Z",
+            "declared_intent_fields": ["task_profile.merges_pr"],
+            "reauthorization": {
+                "receiver_human": {
+                    "decision": "approved",
+                    "decided_at_utc": "2026-05-12T12:50:00Z",
+                    "scope": {"merges_pr": True},
+                },
+            },
+        },
+        policy=_REAUTH_POLICY,
+    )
+    assert checkpoint["reauthorization"]["disposition"] == "resumed"
+    assert checkpoint["action"] == "resumed_after_reauthorization"
+
+
+def test_reauth_fresh_scopeless_receiver_approval_clears_pause_extent() -> None:
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(estimated_minutes=20),
+        {"present": False},
+        _reauth_actuals(
+            actual_files_touched=12,
+            reauthorization={
+                "receiver_human": {
+                    "decision": "approved",
+                    "decided_at_utc": "2026-05-12T12:50:00Z",
+                },
+            },
+        ),
+        policy=_REAUTH_POLICY,
+    )
+    assert checkpoint["reauthorization"]["disposition"] == "resumed"
+    assert checkpoint["reauthorization"]["cleared_paused_at_utc"] == "2026-05-12T12:30:00Z"
+
+
+def test_reauth_without_breach_records_not_required() -> None:
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(estimated_minutes=45),
+        {"present": False},
+        _reauth_actuals(
+            reauthorization={
+                "receiver_human": {
+                    "decision": "approved",
+                    "decided_at_utc": "2026-05-12T12:50:00Z",
+                },
+            },
+        ),
+        policy=_REAUTH_POLICY,
+    )
+    assert checkpoint["breached"] is False
+    assert checkpoint["reauthorization"]["disposition"] == "not_required"
+
+
+def test_reauth_modified_requires_explicit_scope() -> None:
+    with pytest.raises(ValueError, match="modified"):
+        evaluate_threshold_checkpoint(
+            _envelope(estimated_minutes=20),
+            {"present": False},
+            _reauth_actuals(
+                reauthorization={
+                    "receiver_human": {
+                        "decision": "modified",
+                        "decided_at_utc": "2026-05-12T12:50:00Z",
+                    },
+                },
+            ),
+            policy=_REAUTH_POLICY,
+        )
+
+
+def test_reauth_rejects_unknown_channel() -> None:
+    with pytest.raises(ValueError, match="unknown channel"):
+        evaluate_threshold_checkpoint(
+            _envelope(estimated_minutes=20),
+            {"present": False},
+            _reauth_actuals(reauthorization={"slack_dm": {"decision": "approved"}}),
+            policy=_REAUTH_POLICY,
+        )
+
+
+def test_reauth_gh_comment_scope_rejected() -> None:
+    with pytest.raises(ValueError, match="advisory"):
+        evaluate_threshold_checkpoint(
+            _envelope(estimated_minutes=20),
+            {"present": False},
+            _reauth_actuals(
+                reauthorization={
+                    "gh_comment": {
+                        "decision": "approved",
+                        "scope": {"max_actual_minutes": 60},
+                    },
+                },
+            ),
+            policy=_REAUTH_POLICY,
+        )
+
+
+def test_reauth_without_policy_fails_closed_for_sender() -> None:
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(estimated_minutes=20),
+        {"present": False},
+        _reauth_actuals(
+            reauthorization={
+                "sender_reply": {
+                    "decision": "approved",
+                    "decided_at_utc": "2026-05-12T12:40:00Z",
+                    "source_message_id": "msg-reauth",
+                    "scope": {"max_actual_minutes": 30},
+                },
+            },
+        ),
+    )
+    assert checkpoint["reauthorization"]["disposition"] == "insufficient"
+
+
+def test_reauth_scopeless_human_approval_clears_boundary_pause() -> None:
+    # A fresh scope-less approval clears the CURRENT pause in full —
+    # boundary fields included — without creating anything durable.
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(),
+        {"present": False},
+        {
+            "actual_minutes": 1,
+            "actual_files_touched": 0,
+            "paused_at_utc": "2026-05-12T12:30:00Z",
+            "declared_intent_fields": ["task_profile.comments_on_github"],
+            "reauthorization": {
+                "receiver_human": {
+                    "decision": "approved",
+                    "decided_at_utc": "2026-05-12T12:50:00Z",
+                },
+            },
+        },
+        policy=_REAUTH_POLICY,
+    )
+    reauth = checkpoint["reauthorization"]
+    assert reauth["disposition"] == "resumed"
+    assert checkpoint["action"] == "resumed_after_reauthorization"
+    assert reauth["scope"] is None
+    assert reauth["requested_scope"] is None
+
+
+def test_reauth_stale_scopeless_answer_does_not_clear_boundary_pause() -> None:
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(),
+        {"present": False},
+        {
+            "actual_minutes": 1,
+            "actual_files_touched": 0,
+            "paused_at_utc": "2026-05-12T13:10:00Z",
+            "declared_intent_fields": ["task_profile.comments_on_github"],
+            "reauthorization": {
+                "receiver_human": {
+                    "decision": "approved",
+                    "decided_at_utc": "2026-05-12T12:50:00Z",
+                },
+            },
+        },
+        policy=_REAUTH_POLICY,
+    )
+    assert checkpoint["reauthorization"]["disposition"] == "stale"
+
+
+def test_reauth_sender_cannot_grant_artifact_on_unlisted_repo() -> None:
+    # target_repo is empty/unlisted: the admission predicate would pause
+    # this shape, so the sender channel cannot grant it at a checkpoint.
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(),
+        {"present": False},
+        {
+            "actual_minutes": 1,
+            "actual_files_touched": 0,
+            "paused_at_utc": "2026-05-12T12:30:00Z",
+            "declared_intent_fields": ["task_profile.creates_or_updates_pr"],
+            "reauthorization": {
+                "sender_reply": {
+                    "decision": "approved",
+                    "decided_at_utc": "2026-05-12T12:40:00Z",
+                    "source_message_id": "msg-reauth",
+                    "scope": {"creates_or_updates_pr": True},
+                },
+            },
+        },
+        policy=_REAUTH_POLICY,
+    )
+    assert checkpoint["reauthorization"]["disposition"] == "insufficient"
+
+
+def test_reauth_sender_cannot_grant_commit_only_action() -> None:
+    # A standalone commits_changes carries no artifact-class anchor, so
+    # allow_pr_artifacts would pause it at admission — the sender cannot
+    # grant it at a checkpoint either, even on an allowlisted target.
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(target_repo="example-org/private-repo"),
+        {"present": False},
+        {
+            "actual_minutes": 1,
+            "actual_files_touched": 0,
+            "paused_at_utc": "2026-05-12T12:30:00Z",
+            "declared_intent_fields": ["task_profile.commits_changes"],
+            "reauthorization": {
+                "sender_reply": {
+                    "decision": "approved",
+                    "decided_at_utc": "2026-05-12T12:40:00Z",
+                    "source_message_id": "msg-reauth",
+                    "scope": {"commits_changes": True},
+                },
+            },
+        },
+        policy=_REAUTH_POLICY,
+    )
+    assert checkpoint["reauthorization"]["disposition"] == "insufficient"
+
+
+def test_reauth_sender_grants_artifact_on_allowlisted_repo() -> None:
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(target_repo="example-org/private-repo"),
+        {"present": False},
+        {
+            "actual_minutes": 1,
+            "actual_files_touched": 0,
+            "paused_at_utc": "2026-05-12T12:30:00Z",
+            "declared_intent_fields": ["task_profile.creates_or_updates_pr"],
+            "reauthorization": {
+                "sender_reply": {
+                    "decision": "approved",
+                    "decided_at_utc": "2026-05-12T12:40:00Z",
+                    "source_message_id": "msg-reauth",
+                    "scope": {"creates_or_updates_pr": True},
+                },
+            },
+        },
+        policy=_REAUTH_POLICY,
+    )
+    reauth = checkpoint["reauthorization"]
+    assert reauth["disposition"] == "resumed"
+    assert reauth["scope"]["creates_or_updates_pr"] is True
+
+
+def test_reauth_scopeless_sender_cannot_clear_ungrantable_boundary() -> None:
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(),
+        {"present": False},
+        {
+            "actual_minutes": 1,
+            "actual_files_touched": 0,
+            "paused_at_utc": "2026-05-12T12:30:00Z",
+            "declared_intent_fields": ["task_profile.merges_pr"],
+            "reauthorization": {
+                "sender_reply": {
+                    "decision": "approved",
+                    "decided_at_utc": "2026-05-12T12:40:00Z",
+                    "source_message_id": "msg-reauth",
+                },
+            },
+        },
+        policy=_REAUTH_POLICY,
+    )
+    assert checkpoint["reauthorization"]["disposition"] == "insufficient"
+
+
+def test_reauth_sender_record_preserves_effective_capped_scope() -> None:
+    # The durable audit surface records what was actually granted (capped
+    # at the receiver's policy), with the raw request kept as provenance.
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(estimated_minutes=20),
+        {"present": False},
+        {
+            "actual_minutes": 40,
+            "actual_files_touched": 1,
+            "paused_at_utc": "2026-05-12T12:30:00Z",
+            "reauthorization": {
+                "sender_reply": {
+                    "decision": "approved",
+                    "decided_at_utc": "2026-05-12T12:40:00Z",
+                    "source_message_id": "msg-reauth",
+                    "scope": {"max_actual_minutes": 100},
+                },
+            },
+        },
+        policy=_REAUTH_POLICY,
+    )
+    reauth = checkpoint["reauthorization"]
+    assert reauth["disposition"] == "resumed"
+    assert reauth["scope"]["max_actual_minutes"] == 45
+    assert reauth["requested_scope"]["max_actual_minutes"] == 100
+
+
+@pytest.mark.parametrize(
+    "legacy_field",
+    [
+        "destructive_ops",
+        "touches_auth_config_or_secrets",
+        "touches_dependencies",
+        "public_visibility",
+    ],
+)
+def test_reauth_scopeless_sender_cannot_clear_legacy_risk_boundary(
+    legacy_field: str,
+) -> None:
+    # Legacy risk fields are receiver-side authority only: even a fresh
+    # scope-less sender approval on an envelope that already qualifies as
+    # an allowlisted PR artifact must not clear them.
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(
+            target_repo="example-org/private-repo",
+            external_side_effects=True,
+            creates_or_updates_pr=True,
+        ),
+        {"present": False},
+        {
+            "actual_minutes": 1,
+            "actual_files_touched": 0,
+            "paused_at_utc": "2026-05-12T12:30:00Z",
+            "declared_intent_fields": [f"task_profile.{legacy_field}"],
+            "reauthorization": {
+                "sender_reply": {
+                    "decision": "approved",
+                    "decided_at_utc": "2026-05-12T12:40:00Z",
+                    "source_message_id": "msg-reauth",
+                },
+            },
+        },
+        policy=_REAUTH_POLICY,
+    )
+    assert checkpoint["reauthorization"]["disposition"] == "insufficient"
+
+
+def test_reauth_scopeless_human_clears_legacy_risk_boundary() -> None:
+    # The receiver-side human retains full coverage of the current pause,
+    # legacy risk fields included — nothing durable is recorded.
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(),
+        {"present": False},
+        {
+            "actual_minutes": 1,
+            "actual_files_touched": 0,
+            "paused_at_utc": "2026-05-12T12:30:00Z",
+            "declared_intent_fields": ["task_profile.destructive_ops"],
+            "reauthorization": {
+                "receiver_human": {
+                    "decision": "approved",
+                    "decided_at_utc": "2026-05-12T12:50:00Z",
+                },
+            },
+        },
+        policy=_REAUTH_POLICY,
+    )
+    reauth = checkpoint["reauthorization"]
+    assert reauth["disposition"] == "resumed"
+    assert reauth["scope"] is None
+
+
+# --- Review-loop continuation grants ---
+
+
+# Fixture grants expire 2026-06-30; accept-path tests evaluate at a pinned
+# in-window moment so the real clock can never flip them to expired.
+_REVIEW_NOW = datetime.strptime("2026-05-26T12:30:00Z", "%Y-%m-%dT%H:%M:%SZ")
+
+
+def _review_config() -> Dict[str, Any]:
+    return _load_yaml(
+        FIXTURE_ROOT / "configs" / "auto_review_continuation_enabled.yaml"
+    )
+
+
+def _review_body(**overrides: Any) -> str:
+    data: Dict[str, Any] = {
+        "pr": 88,
+        "repo": "example-org/widget",
+        "round": 2,
+        "branch": "alice/widget-logging",
+        "diff_summary": "Round 2 re-review.",
+    }
+    data.update(overrides)
+    return yaml.safe_dump(data, sort_keys=False)
+
+
+def _review_message(**overrides: Any) -> Dict[str, Any]:
+    message = _load_yaml(
+        FIXTURE_ROOT / "messages" / "review_continuation_request.yaml"
+    )
+    message.update(overrides)
+    return message
+
+
+def _write_review_grant_audit(
+    tmp_path: Path,
+    name: str = "grant.yaml",
+    **mutations: Any,
+) -> Dict[str, Any]:
+    audit = _load_yaml(
+        FIXTURE_ROOT / "audits" / "prior_review_grant_approved.yaml"
+    )
+    scope_mutations = mutations.pop("review_loop", None)
+    audit.update(mutations)
+    if scope_mutations is not None:
+        audit["result"]["human_outcome"]["grant"]["granted_scope"][
+            "review_loop"
+        ].update(scope_mutations)
+    (tmp_path / name).write_text(
+        yaml.safe_dump(audit, sort_keys=False), encoding="utf-8"
+    )
+    return audit
+
+
+def test_review_feedback_is_context_only() -> None:
+    message = _review_message(
+        type="review_feedback",
+        body="findings_packet: packets/findings/example_r1.yaml\nround: 1\nblocking_count: 1\n",
+    )
+    decision = evaluate_autonomy(message, _review_config())
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["review_continuation_context_only"]
+    assert decision["review_continuation"]["decision"] == "context_only"
+
+
+def test_review_lgtm_is_context_only(tmp_path: Path) -> None:
+    # Reviewer-output types never start reviewer work, grant or no grant.
+    _write_review_grant_audit(tmp_path)
+    message = _review_message(
+        type="review_lgtm",
+        body="quality_gate_result: pass\nmerge_ready: true\n",
+    )
+    decision = evaluate_autonomy(
+        message, _review_config(), audit_dir=tmp_path, receiver="codex"
+    )
+    assert decision["decision"] == "paused"
+    assert decision["review_continuation"]["decision"] == "context_only"
+
+
+def test_review_addressed_context_only_without_explicit_type_grant(
+    tmp_path: Path,
+) -> None:
+    _write_review_grant_audit(tmp_path)
+    message = _review_message(
+        type="review_addressed",
+        body=_review_body(commit_sha="a" * 40, changes_summary="fixes"),
+    )
+    decision = evaluate_autonomy(
+        message, _review_config(), audit_dir=tmp_path, receiver="codex"
+    )
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["review_continuation_context_only"]
+
+
+def test_review_addressed_auto_continues_when_grant_lists_it(
+    tmp_path: Path,
+) -> None:
+    _write_review_grant_audit(
+        tmp_path,
+        review_loop={"allowed_types": ["review_request", "review_addressed"]},
+    )
+    message = _review_message(
+        type="review_addressed",
+        body=_review_body(commit_sha="a" * 40, changes_summary="fixes"),
+    )
+    decision = evaluate_autonomy(
+        message,
+        _review_config(),
+        audit_dir=tmp_path,
+        receiver="codex",
+        now_utc=_REVIEW_NOW,
+    )
+    assert decision["decision"] == "auto_accepted"
+    assert decision["review_continuation"]["decision"] == "accepted"
+
+
+def test_review_request_without_thread_requires_confirmation(
+    tmp_path: Path,
+) -> None:
+    _write_review_grant_audit(tmp_path)
+    message = _review_message()
+    message.pop("conversation_id", None)
+    message.pop("parent_message_id", None)
+    decision = evaluate_autonomy(
+        message, _review_config(), audit_dir=tmp_path, receiver="codex"
+    )
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == [
+        "review_continuation_confirmation_required"
+    ]
+
+
+def test_review_grant_does_not_cross_senders(tmp_path: Path) -> None:
+    _write_review_grant_audit(tmp_path)
+    message = _review_message(
+        **{"from": "bob", "id": "msg-20260526123000-bob-rr2"}
+    )
+    decision = evaluate_autonomy(
+        message, _review_config(), audit_dir=tmp_path, receiver="codex"
+    )
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == [
+        "review_continuation_confirmation_required"
+    ]
+
+
+def test_review_grant_does_not_cross_receivers(tmp_path: Path) -> None:
+    _write_review_grant_audit(tmp_path)
+    decision = evaluate_autonomy(
+        _review_message(), _review_config(), audit_dir=tmp_path, receiver="claude"
+    )
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == [
+        "review_continuation_confirmation_required"
+    ]
+
+
+def test_review_grant_decided_after_message_cannot_govern(
+    tmp_path: Path,
+) -> None:
+    _write_review_grant_audit(tmp_path)
+    message = _review_message(created_at_utc="2026-05-26T09:04:00Z")
+    decision = evaluate_autonomy(
+        message, _review_config(), audit_dir=tmp_path, receiver="codex"
+    )
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == [
+        "review_continuation_confirmation_required"
+    ]
+
+
+def test_review_grant_expired_pauses(tmp_path: Path) -> None:
+    _write_review_grant_audit(
+        tmp_path, review_loop={"expires_at_utc": "2026-05-26T11:00:00Z"}
+    )
+    decision = evaluate_autonomy(
+        _review_message(), _review_config(), audit_dir=tmp_path, receiver="codex"
+    )
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["review_continuation_expired"]
+
+
+def test_review_grant_cross_repo_pauses(tmp_path: Path) -> None:
+    _write_review_grant_audit(tmp_path)
+    message = _review_message(body=_review_body(repo="example-org/other"))
+    decision = evaluate_autonomy(
+        message, _review_config(), audit_dir=tmp_path, receiver="codex"
+    )
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["review_continuation_scope_exceeded"]
+    assert decision["review_continuation"]["exceeded_fields"] == ["repository"]
+
+
+def test_review_request_without_repo_declaration_pauses(tmp_path: Path) -> None:
+    # Scope matching fails closed: a request that does not declare its
+    # repository cannot be confirmed in-scope.
+    _write_review_grant_audit(tmp_path)
+    body = _review_body()
+    message = _review_message(
+        body="\n".join(
+            line for line in body.splitlines() if not line.startswith("repo:")
+        )
+    )
+    decision = evaluate_autonomy(
+        message, _review_config(), audit_dir=tmp_path, receiver="codex"
+    )
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["review_continuation_scope_exceeded"]
+    assert "repository" in decision["review_continuation"]["exceeded_fields"]
+
+
+def test_review_side_effect_expansion_pauses(tmp_path: Path) -> None:
+    _write_review_grant_audit(tmp_path)
+    message = _review_message(
+        body=_review_body(
+            side_effects=[
+                "writes_findings_packet",
+                "sends_oacp_reply",
+                "submits_github_review",
+            ]
+        )
+    )
+    decision = evaluate_autonomy(
+        message, _review_config(), audit_dir=tmp_path, receiver="codex"
+    )
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["review_continuation_scope_exceeded"]
+    assert decision["review_continuation"]["exceeded_fields"] == [
+        "permitted_side_effects.submits_github_review"
+    ]
+
+
+def test_review_round_floor_comes_from_receiver_audit_trail(
+    tmp_path: Path,
+) -> None:
+    # Three earlier review_request audits exist in the thread; a sender
+    # re-declaring "round: 1" cannot reset the count below the receiver's
+    # own floor of 4.
+    _write_review_grant_audit(tmp_path)
+    for index in range(2):
+        _write_review_grant_audit(
+            tmp_path,
+            name=f"round{index}.yaml",
+            message_id=f"msg-20260526100{index}00-alice-r{index}",
+        )
+    message = _review_message(body=_review_body(round=1))
+    decision = evaluate_autonomy(
+        message, _review_config(), audit_dir=tmp_path, receiver="codex"
+    )
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["review_continuation_round_exceeded"]
+    assert decision["review_continuation"]["effective_round"] == 4
+
+
+def test_review_grant_invalid_scope_pauses(tmp_path: Path) -> None:
+    _write_review_grant_audit(
+        tmp_path, review_loop={"allowed_types": ["review_lgtm"]}
+    )
+    decision = evaluate_autonomy(
+        _review_message(), _review_config(), audit_dir=tmp_path, receiver="codex"
+    )
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["review_loop_invalid"]
+    assert decision["review_continuation"]["decision"] == "invalid"
+
+
+def test_review_task_grant_without_review_scope_keeps_confirmation(
+    tmp_path: Path,
+) -> None:
+    # A standing task-continuation grant carries no review authority.
+    audit = _load_yaml(
+        FIXTURE_ROOT / "audits" / "prior_review_grant_approved.yaml"
+    )
+    del audit["result"]["human_outcome"]["grant"]["granted_scope"]["review_loop"]
+    (tmp_path / "grant.yaml").write_text(
+        yaml.safe_dump(audit, sort_keys=False), encoding="utf-8"
+    )
+    decision = evaluate_autonomy(
+        _review_message(), _review_config(), audit_dir=tmp_path, receiver="codex"
+    )
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == [
+        "review_continuation_confirmation_required"
+    ]
+
+
+def test_review_undeclared_head_is_recorded_not_blocking(tmp_path: Path) -> None:
+    _write_review_grant_audit(tmp_path)
+    decision = evaluate_autonomy(
+        _review_message(),
+        _review_config(),
+        actuals={"review": {"live_head": "b" * 40}},
+        audit_dir=tmp_path,
+        receiver="codex",
+        now_utc=_REVIEW_NOW,
+    )
+    assert decision["decision"] == "auto_accepted"
+    assert "review_continuation_head_mismatch" not in decision["reason_codes"]
+    head_check = decision["review_continuation"]["head_check"]
+    assert head_check["status"] == "undeclared"
+    assert head_check["live_head"] == "b" * 40
+
+
+def test_review_short_prefix_declaration_is_mismatch(tmp_path: Path) -> None:
+    # A truncated declaration can never satisfy the exact-head guard even
+    # when the live head starts with it.
+    _write_review_grant_audit(tmp_path)
+    live = "c" * 40
+    message = _review_message(body=_review_body(declared_head=live[:12]))
+    decision = evaluate_autonomy(
+        message,
+        _review_config(),
+        actuals={"review": {"live_head": live}},
+        audit_dir=tmp_path,
+        receiver="codex",
+        now_utc=_REVIEW_NOW,
+    )
+    assert decision["decision"] == "auto_accepted"
+    assert "review_continuation_head_mismatch" in decision["reason_codes"]
+    assert decision["review_continuation"]["head_check"]["status"] == "mismatch"
+
+
+def test_review_replayed_request_pauses(tmp_path: Path) -> None:
+    _write_review_grant_audit(tmp_path)
+    message = _review_message()
+    replay = _load_yaml(
+        FIXTURE_ROOT / "audits" / "prior_review_grant_approved.yaml"
+    )
+    replay["message_id"] = message["id"]
+    replay["decision"] = "auto_accepted"
+    (tmp_path / "replay.yaml").write_text(
+        yaml.safe_dump(replay, sort_keys=False), encoding="utf-8"
+    )
+    decision = evaluate_autonomy(
+        message, _review_config(), audit_dir=tmp_path, receiver="codex"
+    )
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["message_replayed"]
+
+
+def test_review_only_scope_normalizes_with_zero_task_budgets() -> None:
+    scope, error = normalize_continuation_scope(
+        {
+            "review_loop": {
+                "repository": "example-org/widget",
+                "pr_number": 88,
+                "allowed_types": ["review_request"],
+                "max_round": 3,
+                "expires_at_utc": "2026-06-30T00:00:00Z",
+                "permitted_side_effects": {
+                    "writes_findings_packet": True,
+                    "sends_oacp_reply": True,
+                },
+            }
+        }
+    )
+    assert error is None
+    assert scope["max_actual_minutes"] == 0
+    assert scope["max_actual_files_touched"] == 0
+    assert scope["review_loop"]["repository"] == "example-org/widget"
+    assert scope["review_loop"]["permitted_side_effects"][
+        "submits_github_review"
+    ] is False
+
+
+def test_review_scope_without_review_loop_still_requires_budgets() -> None:
+    scope, error = normalize_continuation_scope({"creates_or_updates_pr": True})
+    assert scope is None
+    assert error == "max_actual_minutes_invalid"
+
+
+def test_review_accepted_audit_record_writes_without_task_envelope(
+    tmp_path: Path,
+) -> None:
+    audit_source = tmp_path / "audits"
+    audit_source.mkdir()
+    _write_review_grant_audit(audit_source)
+    config = _review_config()
+    message = _review_message()
+    decision = evaluate_autonomy(
+        message, config, audit_dir=audit_source, receiver="codex",
+        now_utc=_REVIEW_NOW,
+    )
+    assert decision["decision"] == "auto_accepted"
+    audit_path = write_audit_record(
+        tmp_path / "out",
+        decision,
+        config=config,
+        message=message,
+        message_path=tmp_path / "message.yaml",
+        policy_path=tmp_path / "config.yaml",
+        receiver="codex",
+    )
+    written = yaml.safe_load(audit_path.read_text(encoding="utf-8"))
+    assert written["review_continuation"]["decision"] == "accepted"
+    assert written["scope_envelope"] is None
+
+
+def test_review_grant_expired_at_evaluation_time_pauses(tmp_path: Path) -> None:
+    # Delayed delivery: the request predates expiry, but the grant is dead
+    # by the time the receiver evaluates it. created_at_utc is
+    # sender-controlled and must not be able to dodge expiry.
+    _write_review_grant_audit(tmp_path)
+    decision = evaluate_autonomy(
+        _review_message(),
+        _review_config(),
+        audit_dir=tmp_path,
+        receiver="codex",
+        now_utc=datetime.strptime("2026-07-01T00:00:00Z", "%Y-%m-%dT%H:%M:%SZ"),
+    )
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["review_continuation_expired"]
+
+
+def test_review_forward_dated_message_cannot_dodge_expiry(
+    tmp_path: Path,
+) -> None:
+    # Both clocks bound the grant: a message stamped past expiry is expired
+    # even when evaluation time is still inside the window.
+    _write_review_grant_audit(
+        tmp_path, review_loop={"expires_at_utc": "2026-05-26T12:10:00Z"}
+    )
+    message = _review_message(created_at_utc="2026-05-26T12:15:00Z")
+    decision = evaluate_autonomy(
+        message,
+        _review_config(),
+        audit_dir=tmp_path,
+        receiver="codex",
+        now_utc=datetime.strptime("2026-05-26T12:05:00Z", "%Y-%m-%dT%H:%M:%SZ"),
+    )
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["review_continuation_expired"]
+
+
+def test_review_denial_before_evaluation_revokes_queued_work(
+    tmp_path: Path,
+) -> None:
+    # Revoke-before-processing: the denial postdates the request but
+    # predates evaluation — queued work must not run on the old approval.
+    _write_review_grant_audit(tmp_path)
+    denial = _load_yaml(
+        FIXTURE_ROOT / "audits" / "prior_review_grant_denied_postmessage.yaml"
+    )
+    (tmp_path / "denial.yaml").write_text(
+        yaml.safe_dump(denial, sort_keys=False), encoding="utf-8"
+    )
+    decision = evaluate_autonomy(
+        _review_message(),
+        _review_config(),
+        audit_dir=tmp_path,
+        receiver="codex",
+        now_utc=datetime.strptime("2026-05-26T12:10:00Z", "%Y-%m-%dT%H:%M:%SZ"),
+    )
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["review_continuation_revoked"]
+
+
+def test_review_regrant_after_denial_restores_continuation(
+    tmp_path: Path,
+) -> None:
+    # A denial is not a tombstone: a newer human approval (still predating
+    # the request) re-establishes standing continuation.
+    denial = _load_yaml(
+        FIXTURE_ROOT / "audits" / "prior_review_grant_denied_later.yaml"
+    )
+    denial["result"]["human_outcome"]["decided_at_utc"] = "2026-05-26T08:00:00Z"
+    (tmp_path / "denial.yaml").write_text(
+        yaml.safe_dump(denial, sort_keys=False), encoding="utf-8"
+    )
+    _write_review_grant_audit(tmp_path)  # approval decided 09:05
+    decision = evaluate_autonomy(
+        _review_message(),
+        _review_config(),
+        audit_dir=tmp_path,
+        receiver="codex",
+        now_utc=_REVIEW_NOW,
+    )
+    assert decision["decision"] == "auto_accepted"
+    assert decision["review_continuation"]["decision"] == "accepted"
+
+
+def test_review_addressed_admissions_consume_round_budget(
+    tmp_path: Path,
+) -> None:
+    # Every admitted invocation consumes a round unit — grant-listed
+    # review_addressed rounds included, so they cannot repeat unbounded.
+    _write_review_grant_audit(
+        tmp_path,
+        review_loop={
+            "allowed_types": ["review_request", "review_addressed"],
+            "max_round": 2,
+        },
+    )
+    accepted_addr = _load_yaml(
+        FIXTURE_ROOT / "audits" / "prior_review_addressed_accepted.yaml"
+    )
+    (tmp_path / "addr1.yaml").write_text(
+        yaml.safe_dump(accepted_addr, sort_keys=False), encoding="utf-8"
+    )
+    message = _review_message(
+        type="review_addressed",
+        body=_review_body(commit_sha="a" * 40, changes_summary="again"),
+    )
+    decision = evaluate_autonomy(
+        message,
+        _review_config(),
+        audit_dir=tmp_path,
+        receiver="codex",
+        now_utc=_REVIEW_NOW,
+    )
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["review_continuation_round_exceeded"]
+    assert decision["review_continuation"]["effective_round"] == 3
+
+
+def test_review_denial_then_regrant_does_not_burn_rounds(tmp_path: Path) -> None:
+    # A declined request never ran a reviewer — it must not charge
+    # max_round, so the newer approval re-establishes the full two-round
+    # grant it promised.
+    denial = _load_yaml(
+        FIXTURE_ROOT / "audits" / "prior_review_grant_denied_later.yaml"
+    )
+    denial["result"]["human_outcome"]["decided_at_utc"] = "2026-05-26T08:00:00Z"
+    (tmp_path / "denial.yaml").write_text(
+        yaml.safe_dump(denial, sort_keys=False), encoding="utf-8"
+    )
+    _write_review_grant_audit(tmp_path, review_loop={"max_round": 2})
+    decision = evaluate_autonomy(
+        _review_message(),
+        _review_config(),
+        audit_dir=tmp_path,
+        receiver="codex",
+        now_utc=_REVIEW_NOW,
+    )
+    assert decision["decision"] == "auto_accepted"
+    assert decision["review_continuation"]["effective_round"] == 2
+
+
+def test_review_unanswered_pause_does_not_burn_rounds(tmp_path: Path) -> None:
+    # A paused review_request with no recorded human outcome started
+    # nothing — it consumes no round budget.
+    _write_review_grant_audit(tmp_path, review_loop={"max_round": 2})
+    unanswered = _load_yaml(
+        FIXTURE_ROOT / "audits" / "prior_review_grant_approved.yaml"
+    )
+    unanswered["message_id"] = "msg-20260526100000-alice-unanswered"
+    del unanswered["result"]["human_outcome"]
+    (tmp_path / "unanswered.yaml").write_text(
+        yaml.safe_dump(unanswered, sort_keys=False), encoding="utf-8"
+    )
+    decision = evaluate_autonomy(
+        _review_message(),
+        _review_config(),
+        audit_dir=tmp_path,
+        receiver="codex",
+        now_utc=_REVIEW_NOW,
+    )
+    assert decision["decision"] == "auto_accepted"
+    assert decision["review_continuation"]["effective_round"] == 2
+
+
+def test_review_aware_utc_now_accepts(tmp_path: Path) -> None:
+    # The clock parameter accepts ordinary timezone-aware UTC datetimes,
+    # matching message_expired.
+    from datetime import timezone
+
+    _write_review_grant_audit(tmp_path)
+    decision = evaluate_autonomy(
+        _review_message(),
+        _review_config(),
+        audit_dir=tmp_path,
+        receiver="codex",
+        now_utc=_REVIEW_NOW.replace(tzinfo=timezone.utc),
+    )
+    assert decision["decision"] == "auto_accepted"
+
+
+def test_review_aware_utc_now_arbitrates_revocation(tmp_path: Path) -> None:
+    from datetime import timezone
+
+    _write_review_grant_audit(tmp_path)
+    denial = _load_yaml(
+        FIXTURE_ROOT / "audits" / "prior_review_grant_denied_postmessage.yaml"
+    )
+    (tmp_path / "denial.yaml").write_text(
+        yaml.safe_dump(denial, sort_keys=False), encoding="utf-8"
+    )
+    decision = evaluate_autonomy(
+        _review_message(),
+        _review_config(),
+        audit_dir=tmp_path,
+        receiver="codex",
+        now_utc=datetime.strptime(
+            "2026-05-26T12:10:00Z", "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc),
+    )
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["review_continuation_revoked"]
+
+
+def test_review_context_only_addressed_audits_do_not_consume_rounds(
+    tmp_path: Path,
+) -> None:
+    _write_review_grant_audit(tmp_path)
+    context_only = _load_yaml(
+        FIXTURE_ROOT / "audits" / "prior_review_addressed_accepted.yaml"
+    )
+    context_only["decision"] = "paused"
+    context_only["reason_codes"] = ["review_continuation_context_only"]
+    (tmp_path / "ctx.yaml").write_text(
+        yaml.safe_dump(context_only, sort_keys=False), encoding="utf-8"
+    )
+    decision = evaluate_autonomy(
+        _review_message(),
+        _review_config(),
+        audit_dir=tmp_path,
+        receiver="codex",
+        now_utc=_REVIEW_NOW,
+    )
+    assert decision["decision"] == "auto_accepted"
+    assert decision["review_continuation"]["effective_round"] == 2

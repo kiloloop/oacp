@@ -7,12 +7,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from add_agent import add_agent
-from _oacp_constants import CREATABLE_RUNTIMES, _template_path, _write_if_missing
+from _oacp_constants import (
+    CODEX_SESSION_START_CONTEXT_LIMIT,
+    CREATABLE_RUNTIMES,
+    _template_path,
+    _write_if_missing,
+)
 
 # ── Inline defaults (used when no template file exists) ──────────────────────
 
@@ -26,15 +32,20 @@ coordination. Your inbox is at `$OACP_HOME/projects/<project>/agents/codex/inbox
 
 ## Workflow
 
-1. **Check inbox** at session start — process any pending messages.
-2. **Send messages** via `oacp send <project> --from codex --to <agent> --type <type> --subject "..." --body "..."`.
-3. **Update status** in `agents/codex/status.yaml` when starting/finishing tasks.
-4. **Follow guardrails** in `docs/protocol/agent_safety_defaults.md`.
+1. **Load startup context** — after trusting the generated project hook with
+   `/hooks`, it pulls OACP memory and verifies the required startup files in one
+   ordered `SessionStart` command. Read the files named in its developer context
+   before normal work and include its `SESSION_INIT_ACK` in the first response.
+2. **Check inbox when requested** — surface pending state before processing work.
+3. **Send messages** via `oacp send <project> --from codex --to <agent> --type <type> --subject "..." --body "..."`.
+4. **Update status** in `agents/codex/status.yaml` when starting/finishing tasks.
+5. **Follow guardrails** in `docs/protocol/agent_safety_defaults.md`.
 
 ## Key Commands
 
 ```bash
 oacp doctor --project <project>          # health check
+oacp session-init --pull-memory --project <project>  # manual hook fallback
 oacp send <project> --from codex ...     # send a message
 oacp validate <message.yaml>             # validate a message
 ```
@@ -89,20 +100,8 @@ fi
 oacp memory pull --oacp-dir "$OACP_ROOT" || true
 """
 
-CLAUDE_MEMORY_PUSH_HOOK = """\
-#!/usr/bin/env bash
-# Claude hook event: SessionEnd / wrap-up
-set -u
-
-OACP_ROOT="${OACP_HOME:-$HOME/oacp}"
-if [[ ! -f "$OACP_ROOT/.oacp-memory-repo" ]]; then
-  exit 0
-fi
-
-oacp memory push --oacp-dir "$OACP_ROOT" || true
-"""
-
 CLAUDE_SETTINGS_SCHEMA = "https://json.schemastore.org/claude-code-settings.json"
+CLAUDE_LEGACY_MEMORY_PUSH_COMMAND = ".claude/hooks/oacp-memory-push.sh"
 CLAUDE_HOOK_COMMANDS = {
     "SessionStart": {
         "matcher": "startup",
@@ -110,15 +109,6 @@ CLAUDE_HOOK_COMMANDS = {
             {
                 "type": "command",
                 "command": ".claude/hooks/oacp-memory-pull.sh",
-                "timeout": 30,
-            }
-        ],
-    },
-    "SessionEnd": {
-        "hooks": [
-            {
-                "type": "command",
-                "command": ".claude/hooks/oacp-memory-push.sh",
                 "timeout": 30,
             }
         ],
@@ -137,6 +127,14 @@ CLAUDE_HOOK_COMMANDS = {
         ],
     },
 }
+
+CODEX_HOOKS_DESCRIPTION = "OACP startup verification for this workspace."
+CODEX_SESSION_START_COMMAND_PREFIX = (
+    "oacp",
+    "session-init",
+    "--hook",
+    "--pull-memory",
+)
 
 
 def _make_executable(path: Path) -> None:
@@ -165,12 +163,96 @@ def _hook_command_exists(entries: List[Any], command: str) -> bool:
     return False
 
 
+def _is_codex_session_start_command(command: Any) -> bool:
+    if not isinstance(command, str):
+        return False
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    prefix = list(CODEX_SESSION_START_COMMAND_PREFIX)
+    return argv[: len(prefix)] == prefix
+
+
+def _replace_codex_session_start_entry(
+    entries: List[Any], replacement: Dict[str, Any]
+) -> bool:
+    """Replace all OACP-managed startup hooks while preserving custom entries."""
+    updated_entries: List[Any] = []
+    replacement_added = False
+
+    for existing in entries:
+        if not isinstance(existing, dict):
+            updated_entries.append(existing)
+            continue
+        hooks = existing.get("hooks")
+        if not isinstance(hooks, list):
+            updated_entries.append(existing)
+            continue
+        retained_hooks = [
+            hook
+            for hook in hooks
+            if not (
+                isinstance(hook, dict)
+                and _is_codex_session_start_command(hook.get("command"))
+            )
+        ]
+        if len(retained_hooks) == len(hooks):
+            updated_entries.append(existing)
+            continue
+
+        if not replacement_added:
+            updated_entries.append(replacement)
+            replacement_added = True
+        if retained_hooks:
+            retained_entry = dict(existing)
+            retained_entry["hooks"] = retained_hooks
+            updated_entries.append(retained_entry)
+
+    if not replacement_added:
+        updated_entries.append(replacement)
+    if updated_entries == entries:
+        return False
+    entries[:] = updated_entries
+    return True
+
+
+def _remove_hook_command(entries: List[Any], command: str) -> bool:
+    """Remove one exact generated command while preserving all custom hooks."""
+    changed = False
+    retained_entries: List[Any] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            retained_entries.append(entry)
+            continue
+        hooks = entry.get("hooks")
+        if not isinstance(hooks, list):
+            retained_entries.append(entry)
+            continue
+        retained_hooks = [
+            hook
+            for hook in hooks
+            if not (isinstance(hook, dict) and hook.get("command") == command)
+        ]
+        if len(retained_hooks) == len(hooks):
+            retained_entries.append(entry)
+            continue
+        changed = True
+        if retained_hooks:
+            updated = dict(entry)
+            updated["hooks"] = retained_hooks
+            retained_entries.append(updated)
+    if changed:
+        entries[:] = retained_entries
+    return changed
+
+
 def _warn_claude_settings(settings_file: Path, message: str) -> None:
     print(f"Warning: {settings_file}: {message}", file=sys.stderr)
 
 
 def _write_claude_memory_settings(repo_dir: Path) -> Optional[bool]:
-    """Create or update .claude/settings.json with memory hook registrations."""
+    """Register startup/envelope hooks and retire the generated auto-push hook."""
     settings_file = repo_dir / ".claude" / "settings.json"
     if settings_file.is_file():
         try:
@@ -199,6 +281,14 @@ def _write_claude_memory_settings(repo_dir: Path) -> Optional[bool]:
         return None
 
     changed = False
+    session_end = hooks.get("SessionEnd")
+    if isinstance(session_end, list) and _remove_hook_command(
+        session_end, CLAUDE_LEGACY_MEMORY_PUSH_COMMAND
+    ):
+        changed = True
+        if not session_end:
+            del hooks["SessionEnd"]
+
     for event_name, entry in CLAUDE_HOOK_COMMANDS.items():
         entries = hooks.setdefault(event_name, [])
         if not isinstance(entries, list):
@@ -219,6 +309,96 @@ def _write_claude_memory_settings(repo_dir: Path) -> Optional[bool]:
             encoding="utf-8",
         )
     return changed
+
+
+def _codex_session_start_command(
+    *, project_name: Optional[str], oacp_root: Optional[Path]
+) -> str:
+    argv = ["oacp", "session-init", "--hook", "--pull-memory"]
+    if project_name:
+        argv.extend(["--project", project_name])
+    if oacp_root is not None:
+        argv.extend(["--hub-dir", str(oacp_root)])
+    return shlex.join(argv)
+
+
+def _codex_session_start_entry(
+    *, project_name: Optional[str], oacp_root: Optional[Path]
+) -> Dict[str, Any]:
+    return {
+        "matcher": "^startup$",
+        "hooks": [
+            {
+                "type": "command",
+                "command": _codex_session_start_command(
+                    project_name=project_name,
+                    oacp_root=oacp_root,
+                ),
+                "timeout": 60,
+                "statusMessage": "Checking OACP startup context",
+                "additionalContextLimit": CODEX_SESSION_START_CONTEXT_LIMIT,
+            }
+        ],
+    }
+
+
+def _warn_codex_hooks(hooks_file: Path, message: str) -> None:
+    print(f"Warning: {hooks_file}: {message}", file=sys.stderr)
+
+
+def _write_codex_hooks(
+    repo_dir: Path,
+    *,
+    project_name: Optional[str],
+    oacp_root: Optional[Path],
+) -> Optional[bool]:
+    """Create or merge the repo-local Codex SessionStart hook definition."""
+    hooks_file = repo_dir / ".codex" / "hooks.json"
+    if hooks_file.is_file():
+        try:
+            data = json.loads(hooks_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            _warn_codex_hooks(
+                hooks_file,
+                f"invalid JSON ({exc.msg}); skipping hook registration.",
+            )
+            return None
+        if not isinstance(data, dict):
+            _warn_codex_hooks(
+                hooks_file,
+                "expected a JSON object; skipping hook registration.",
+            )
+            return None
+    else:
+        data = {"description": CODEX_HOOKS_DESCRIPTION}
+
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        _warn_codex_hooks(
+            hooks_file,
+            "expected hooks to be a JSON object; skipping hook registration.",
+        )
+        return None
+    entries = hooks.setdefault("SessionStart", [])
+    if not isinstance(entries, list):
+        _warn_codex_hooks(
+            hooks_file,
+            "expected hooks.SessionStart to be a list; skipping hook registration.",
+        )
+        return None
+
+    entry = _codex_session_start_entry(
+        project_name=project_name,
+        oacp_root=oacp_root,
+    )
+    if not _replace_codex_session_start_entry(entries, entry):
+        return False
+    hooks_file.parent.mkdir(parents=True, exist_ok=True)
+    hooks_file.write_text(
+        json.dumps(data, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return True
 
 
 def _detect_repo_root(start: Path) -> Optional[Path]:
@@ -331,13 +511,6 @@ def setup_runtime(
         else:
             skipped_files.append(str(pull_hook.relative_to(repo_dir)))
 
-        push_hook = repo_dir / ".claude" / "hooks" / "oacp-memory-push.sh"
-        if _write_if_missing(push_hook, CLAUDE_MEMORY_PUSH_HOOK):
-            _make_executable(push_hook)
-            created_files.append(str(push_hook.relative_to(repo_dir)))
-        else:
-            skipped_files.append(str(push_hook.relative_to(repo_dir)))
-
         settings_file = repo_dir / ".claude" / "settings.json"
         settings_result = _write_claude_memory_settings(repo_dir)
         if settings_result is True:
@@ -353,6 +526,19 @@ def setup_runtime(
             created_files.append("AGENTS.md")
         else:
             skipped_files.append("AGENTS.md")
+
+        hooks_file = repo_dir / ".codex" / "hooks.json"
+        hooks_result = _write_codex_hooks(
+            repo_dir,
+            project_name=project_name,
+            oacp_root=oacp_root,
+        )
+        if hooks_result is True:
+            created_files.append(str(hooks_file.relative_to(repo_dir)))
+        elif hooks_result is False:
+            skipped_files.append(str(hooks_file.relative_to(repo_dir)))
+        else:
+            warning_files.append(str(hooks_file.relative_to(repo_dir)))
 
     elif runtime == "gemini":
         rules_file = repo_dir / ".agent" / "rules" / "oacp.md"
@@ -434,6 +620,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"  ~ {f} (already exists, skipped)")
     for f in result["warning_files"]:
         print(f"  ! {f} (warning, skipped)")
+    if args.runtime == "codex" and ".codex/hooks.json" not in result["warning_files"]:
+        print("  Review and trust the project hook with `/hooks` before relying on it.")
     if result["project_created_files"] or result["project_skipped_files"]:
         print(f"Project agent '{args.runtime}' setup in {oacp_root / 'projects' / str(project_name)}:")
         for f in result["project_created_files"]:

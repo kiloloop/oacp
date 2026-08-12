@@ -101,8 +101,52 @@ PINNED_COMPLETION_KINDS = frozenset({
 # prospectively — the undeclared action was caught before it materialized
 # (§E: mandatory before performing ANY newly discovered outward action).
 BREACH_BASES = ("declared_intent", "realized")
+# Checkpoint re-authorization channels, highest precedence first. Precedence
+# is by channel rank, never arrival order. GH comments are consultable but
+# never authoritative: they sit outside the protocol's identity and
+# verification boundary, so any decision they carry is recorded as advisory.
+REAUTH_CHANNEL_PRECEDENCE = ("receiver_human", "sender_reply", "gh_comment")
+REAUTH_GOVERNING_CHANNELS = ("receiver_human", "sender_reply")
+REAUTH_DECISIONS = frozenset({"approved", "modified", "declined"})
+# Merge authority is never sender-grantable at a checkpoint, regardless of
+# the receiver's external-side-effect policy: it always passes the
+# receiver-side human (mirrors merges_pr_pause at admission). Every other
+# boundary action a sender may grant is derived from the receiver's own
+# admission predicate, never from a standalone vocabulary.
+SENDER_UNGRANTABLE_REAUTH_FIELDS = frozenset({"merges_pr"})
+# Review-loop lifecycle traffic. Reviewer-output types (`review_feedback`,
+# `review_lgtm`) never start reviewer work — they are context-only at the
+# receiver. Continuation grants can authorize only the trigger types, and
+# `review_addressed` only when a grant lists it explicitly (the
+# manual-continuation shape); by default it folds into a newer
+# `review_request` as context.
+REVIEW_LIFECYCLE_TYPES = (
+    "review_request",
+    "review_feedback",
+    "review_addressed",
+    "review_lgtm",
+)
+REVIEW_CONTINUATION_GRANTABLE_TYPES = frozenset({
+    "review_request",
+    "review_addressed",
+})
+# Side effects a granted review invocation may produce. This is the review
+# surface's own vocabulary — a review round never commits, merges, or files
+# issues, so the task-side COVERABLE_CONTINUATION_FIELDS do not apply here.
+REVIEW_SIDE_EFFECT_FIELDS = (
+    "writes_findings_packet",
+    "sends_oacp_reply",
+    "comments_on_github",
+    "submits_github_review",
+)
+# The review side effects a round performs when the request declares none:
+# every reviewer invocation writes a findings packet and answers on the
+# OACP channel. Anything beyond that must be requested and granted.
+DEFAULT_REVIEW_SIDE_EFFECTS = ("writes_findings_packet", "sends_oacp_reply")
 PINNED_REASON_CODES = frozenset({
     "auth_config_or_secrets_pause",
+    "checkpoint_reauthorization_stale",
+    "checkpoint_reauthorized",
     "comments_on_github_invalid",
     "comments_on_github_pause",
     "commits_changes_invalid",
@@ -147,6 +191,17 @@ PINNED_REASON_CODES = frozenset({
     "mode_always_pause",
     "policy_auth_invalid",
     "public_visibility_pause",
+    "review_continuation_accepted",
+    "review_continuation_confirmation_required",
+    "review_continuation_context_only",
+    "review_continuation_expired",
+    "review_continuation_head_mismatch",
+    "review_continuation_ignored_disabled",
+    "review_continuation_missing_approval",
+    "review_continuation_revoked",
+    "review_continuation_round_exceeded",
+    "review_continuation_scope_exceeded",
+    "review_loop_invalid",
     "risk_obvious_no_profile",
     "risk_threshold_passed",
     "task_profile_missing",
@@ -390,13 +445,22 @@ def write_audit_record(
     if decision.get("decision") == "auto_accepted" and decision.get("scope_envelope") is None:
         # An admitted decision always carries a bound: profiled admissions
         # envelope from the profile, profileless admissions from the
-        # documented default. Null-on-admitted is a schema violation, not a
-        # persistable state.
-        raise ValueError(
-            "refusing to write audit record: an admitted decision must "
-            "carry a scope envelope (scope_envelope: null on an admitted "
-            "record is a schema violation)"
+        # documented default, and review-loop continuations the granted
+        # review_loop scope. Null-on-admitted with no bound at all is a
+        # schema violation, not a persistable state.
+        review_block = decision.get("review_continuation")
+        review_bound = (
+            isinstance(review_block, dict)
+            and review_block.get("decision") == "accepted"
+            and isinstance(review_block.get("scope"), dict)
         )
+        if not review_bound:
+            raise ValueError(
+                "refusing to write audit record: an admitted decision must "
+                "carry a scope bound — a task scope_envelope or an accepted "
+                "review_continuation scope (null with neither is a schema "
+                "violation)"
+            )
     audit_dir.mkdir(parents=True, exist_ok=True)
     created_at = utc_now_iso(now_utc)
     autonomy = config.get("autonomy")
@@ -903,6 +967,70 @@ def obvious_no_profile_risk(body: str) -> bool:
     return first_match(patterns, body) is not None
 
 
+def normalize_review_loop_scope(
+    block: Any,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Normalize a grant scope's ``review_loop`` sub-block.
+
+    Every bound is explicit: the repository and PR pin the thread's subject,
+    ``allowed_types`` pins which inbound lifecycle types may trigger a round,
+    ``max_round`` and ``expires_at_utc`` bound depth and wall clock, and
+    ``permitted_side_effects`` pins what the granted invocation may produce.
+    A malformed block invalidates the whole grant surface — a partially
+    understood authority is never honored.
+    """
+    if not isinstance(block, dict):
+        return None, "review_loop_invalid"
+    repository = block.get("repository")
+    if not isinstance(repository, str) or not REPO_SLUG_RE.fullmatch(repository):
+        return None, "review_loop_invalid"
+    pr_number = block.get("pr_number")
+    if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number < 1:
+        return None, "review_loop_invalid"
+    allowed = block.get("allowed_types")
+    if (
+        not isinstance(allowed, list)
+        or not allowed
+        or any(
+            not isinstance(item, str)
+            or item not in REVIEW_CONTINUATION_GRANTABLE_TYPES
+            for item in allowed
+        )
+    ):
+        return None, "review_loop_invalid"
+    max_round = block.get("max_round")
+    if not isinstance(max_round, int) or isinstance(max_round, bool) or max_round < 1:
+        return None, "review_loop_invalid"
+    expires = block.get("expires_at_utc")
+    if not isinstance(expires, str):
+        return None, "review_loop_invalid"
+    try:
+        dt.datetime.strptime(expires, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None, "review_loop_invalid"
+    effects_in = block.get("permitted_side_effects", {})
+    if effects_in is None:
+        effects_in = {}
+    if not isinstance(effects_in, dict) or any(
+        key not in REVIEW_SIDE_EFFECT_FIELDS for key in effects_in
+    ):
+        return None, "review_loop_invalid"
+    effects: Dict[str, bool] = {}
+    for key in REVIEW_SIDE_EFFECT_FIELDS:
+        value = effects_in.get(key, False)
+        if not isinstance(value, bool):
+            return None, "review_loop_invalid"
+        effects[key] = value
+    return {
+        "repository": repository.lower(),
+        "pr_number": pr_number,
+        "allowed_types": sorted(set(allowed)),
+        "max_round": max_round,
+        "expires_at_utc": expires,
+        "permitted_side_effects": effects,
+    }, None
+
+
 def normalize_continuation_scope(
     scope: Any,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -910,8 +1038,15 @@ def normalize_continuation_scope(
         return None, "continuation_grant_missing_scope"
 
     normalized: Dict[str, Any] = {}
+    has_review_loop = "review_loop" in scope
     for key in ("max_actual_minutes", "max_actual_files_touched"):
         value = scope.get(key)
+        if value is None and has_review_loop:
+            # A review-only grant may omit the task budget keys; they
+            # default to zero so the grant carries no task-continuation
+            # authority (any task follow-up breaches immediately).
+            normalized[key] = 0
+            continue
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             return None, f"{key}_invalid"
         normalized[key] = value
@@ -920,6 +1055,11 @@ def normalize_continuation_scope(
         if not isinstance(value, bool):
             return None, f"{key}_invalid"
         normalized[key] = value
+    if has_review_loop:
+        review_scope, error = normalize_review_loop_scope(scope.get("review_loop"))
+        if error:
+            return None, error
+        normalized["review_loop"] = review_scope
     return normalized, None
 
 
@@ -1098,6 +1238,416 @@ def evaluate_continuation_grant(
     return result
 
 
+_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _aware_utc(value: Optional[dt.datetime]) -> dt.datetime:
+    """Normalize an optional caller-supplied clock to timezone-aware UTC.
+
+    Mirrors ``message_expired``: a missing clock reads the real time, a
+    naive one is taken as already-UTC, and an aware one is converted — so
+    every comparison in the review path happens on one timeline.
+    """
+    now = value if value is not None else dt.datetime.now(dt.timezone.utc)
+    if now.tzinfo is None:
+        return now.replace(tzinfo=dt.timezone.utc)
+    return now.astimezone(dt.timezone.utc)
+
+
+def _parse_utc_z(text: str) -> dt.datetime:
+    return dt.datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=dt.timezone.utc
+    )
+
+
+def _extract_review_context(message: Dict[str, Any]) -> Dict[str, Any]:
+    """Parse the review-loop declaration out of a lifecycle message body.
+
+    Review bodies are YAML mappings by schema (``pr:``, ``branch:``,
+    ``diff_summary:`` …). Declarations a grant match consumes are collected
+    here; anything unreadable lands in ``errors`` so scope matching fails
+    closed instead of guessing.
+    """
+    body = str(message.get("body") or "")
+    try:
+        parsed = yaml.safe_load(body)
+    except yaml.YAMLError:
+        parsed = None
+    data = parsed if isinstance(parsed, dict) else {}
+
+    context: Dict[str, Any] = {
+        "repository": None,
+        "pr_number": None,
+        "round": None,
+        "declared_head": None,
+        "side_effects": list(DEFAULT_REVIEW_SIDE_EFFECTS),
+        "grant_claim_present": "continuation_grants" in data,
+        "errors": [],
+    }
+
+    repo = data.get("repo")
+    if isinstance(repo, str) and REPO_SLUG_RE.fullmatch(repo.strip()):
+        context["repository"] = repo.strip().lower()
+    elif repo is not None:
+        context["errors"].append("repo")
+
+    pr_value = data.get("pr", message.get("related_pr"))
+    if isinstance(pr_value, bool):
+        context["errors"].append("pr")
+    elif isinstance(pr_value, int) and pr_value >= 1:
+        context["pr_number"] = pr_value
+    elif isinstance(pr_value, str) and pr_value.strip().isdigit():
+        context["pr_number"] = int(pr_value.strip())
+    elif pr_value not in (None, ""):
+        context["errors"].append("pr")
+
+    round_value = data.get("round", 1)
+    if isinstance(round_value, int) and not isinstance(round_value, bool) and round_value >= 1:
+        context["round"] = round_value
+    else:
+        context["errors"].append("round")
+
+    declared_head = data.get("declared_head")
+    if isinstance(declared_head, str) and declared_head.strip():
+        context["declared_head"] = declared_head.strip()
+    elif declared_head not in (None, ""):
+        context["errors"].append("declared_head")
+
+    side_effects = data.get("side_effects")
+    if side_effects is not None:
+        if isinstance(side_effects, list) and all(
+            isinstance(item, str) and item in REVIEW_SIDE_EFFECT_FIELDS
+            for item in side_effects
+        ):
+            context["side_effects"] = sorted(set(side_effects))
+        else:
+            context["errors"].append("side_effects")
+
+    return context
+
+
+def _review_head_check(
+    declared_head: Optional[str],
+    actuals: Optional[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], bool]:
+    """Compare the sender-declared head against the observed live head.
+
+    The declared value is never trusted: equality is exact full-string
+    comparison of complete SHAs, so a declared value sharing a prefix with
+    the live head is still a mismatch. A mismatch (or a missing
+    declaration) is recorded and the live head stays authoritative — the
+    round still runs, because the guard is that the reviewer validates the
+    live ref, not that the sender declared it correctly.
+    """
+    review_observed = (actuals or {}).get("review")
+    live_head = None
+    if isinstance(review_observed, dict):
+        value = review_observed.get("live_head")
+        if isinstance(value, str) and value.strip():
+            live_head = value.strip().lower()
+
+    declared = declared_head.lower() if isinstance(declared_head, str) else None
+    if declared is None:
+        status = "undeclared" if live_head else "unverified"
+    elif live_head is None:
+        status = "unverified"
+    elif declared == live_head and _FULL_SHA_RE.fullmatch(declared):
+        status = "match"
+    else:
+        status = "mismatch"
+    return {
+        "declared_head": declared_head,
+        "live_head": live_head,
+        "status": status,
+    }, status == "mismatch"
+
+
+def _audit_consumed_round(audit: Dict[str, Any]) -> bool:
+    """True when this audit records a reviewer invocation that actually ran.
+
+    Only executed rounds charge the grant's round budget: an auto-admitted
+    continuation, or a pause whose recorded human outcome authorized the
+    manual round. A declined or never-answered request started nothing —
+    charging it would let dead asks exhaust ``max_round`` and defeat the
+    promised re-grant path.
+    """
+    if audit.get("decision") == "auto_accepted":
+        return True
+    result = audit.get("result")
+    outcome = result.get("human_outcome") if isinstance(result, dict) else None
+    return (
+        isinstance(outcome, dict)
+        and outcome.get("recorded") is True
+        and str(outcome.get("decision") or "") in {"approved", "modified"}
+    )
+
+
+def _prior_review_grant(
+    message: Dict[str, Any],
+    audit_dir: Optional[Path],
+    receiver: str,
+    now_utc: Optional[dt.datetime] = None,
+) -> Tuple[Optional[Dict[str, Any]], int]:
+    """Locate the governing review-loop grant for this thread.
+
+    Returns ``(grant_state, prior_round_audits)``. Authorization and
+    revocation are arbitrated on different clocks: an approval can govern
+    only requests created after it (authority is never retroactive), while
+    a denial takes effect the moment it is recorded — a denial decided
+    before *evaluation* revokes queued work even when the request predates
+    it. On a tie or a newer denial, the denial wins. ``prior_round_audits``
+    counts this receiver's earlier round-consuming audit records in the
+    thread — invocations that actually ran: an ``auto_accepted``
+    continuation round, or a pause whose recorded human outcome authorized
+    the manual round. Declined, unanswered, and context-only records
+    consume nothing. This is the receiver-side floor for the effective
+    round, so a sender cannot under-declare the round number to stay
+    inside ``max_round`` — while a denied or never-answered request can
+    never burn budget a later re-grant was promised to have.
+    """
+    if audit_dir is None or not audit_dir.is_dir():
+        return None, 0
+
+    approvals: List[Tuple[str, str, Dict[str, Any]]] = []
+    denials: List[Tuple[str, str, Dict[str, Any]]] = []
+    prior_round_audits = 0
+    current_message_id = str(message.get("id") or "")
+    message_created_at = _parse_utc_z(str(message.get("created_at_utc") or ""))
+    now = _aware_utc(now_utc)
+    for audit_path in audit_dir.glob("*.yaml"):
+        try:
+            audit = yaml.safe_load(audit_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            continue
+        if not isinstance(audit, dict):
+            continue
+        if audit.get("schema_version") != AUTONOMY_AUDIT_SCHEMA_VERSION:
+            continue
+        if audit.get("receiver") != receiver:
+            continue
+        if audit.get("message_id") == current_message_id:
+            continue
+        if not _audit_thread_matches(message, audit):
+            continue
+        audit_type = str(audit.get("message_type") or "")
+        if (
+            audit_type in REVIEW_CONTINUATION_GRANTABLE_TYPES
+            and _audit_consumed_round(audit)
+        ):
+            prior_round_audits += 1
+
+        result = audit.get("result")
+        outcome = result.get("human_outcome") if isinstance(result, dict) else None
+        grant = outcome.get("grant") if isinstance(outcome, dict) else None
+        if not isinstance(outcome, dict) or outcome.get("recorded") is not True:
+            continue
+        if not isinstance(grant, dict):
+            continue
+        if str(grant.get("decision") or "") not in {"approved", "modified", "denied"}:
+            continue
+        decided_at = str(outcome.get("decided_at_utc") or "")
+        try:
+            decision_time = _parse_utc_z(decided_at)
+        except ValueError:
+            continue
+        is_denial = str(grant.get("decision")) == "denied" or str(
+            outcome.get("decision") or ""
+        ) not in {"approved", "modified"}
+        if is_denial:
+            if decision_time <= now:
+                denials.append((decided_at, audit_path.name, audit))
+        elif decision_time <= message_created_at:
+            approvals.append((decided_at, audit_path.name, audit))
+
+    governing = sorted(approvals)[-1] if approvals else None
+    latest_denial = sorted(denials)[-1] if denials else None
+    if latest_denial is not None and (
+        governing is None or latest_denial[0] >= governing[0]
+    ):
+        _decided_at, audit_name, audit = latest_denial
+        return {
+            "source_audit": audit_name,
+            "source_message_id": audit.get("message_id"),
+            "state": "revoked",
+            "scope": None,
+        }, prior_round_audits
+    if governing is None:
+        return None, prior_round_audits
+
+    _decided_at, audit_name, audit = governing
+    outcome = audit["result"]["human_outcome"]
+    grant = outcome["grant"]
+    source = {
+        "source_audit": audit_name,
+        "source_message_id": audit.get("message_id"),
+    }
+    granted_scope = grant.get("granted_scope")
+    review_block = (
+        granted_scope.get("review_loop") if isinstance(granted_scope, dict) else None
+    )
+    if review_block is None:
+        # A standing task-continuation grant with no review_loop block
+        # carries no review authority — the explicit-confirmation default
+        # applies, it is not a drift.
+        return {**source, "state": "absent", "scope": None}, prior_round_audits
+    scope, error = normalize_review_loop_scope(review_block)
+    if error:
+        return {**source, "state": "invalid", "scope": None}, prior_round_audits
+    return {**source, "state": "accepted", "scope": scope}, prior_round_audits
+
+
+# Maps the review_continuation block decision to its pinned pause reason.
+_REVIEW_PAUSE_CODES = {
+    "confirmation_required": "review_continuation_confirmation_required",
+    "context_only": "review_continuation_context_only",
+    "ignored_disabled": "review_continuation_ignored_disabled",
+    "missing_approval": "review_continuation_missing_approval",
+    "revoked": "review_continuation_revoked",
+    "invalid": "review_loop_invalid",
+    "scope_exceeded": "review_continuation_scope_exceeded",
+    "round_exceeded": "review_continuation_round_exceeded",
+    "expired": "review_continuation_expired",
+}
+
+
+def evaluate_review_continuation(
+    message: Dict[str, Any],
+    continuation_enabled: bool,
+    audit_dir: Optional[Path] = None,
+    receiver: str = "codex",
+    actuals: Optional[Dict[str, Any]] = None,
+    now_utc: Optional[dt.datetime] = None,
+) -> Dict[str, Any]:
+    """Evaluate a review-lifecycle message against standing review grants.
+
+    The verdict authorizes *running* one reviewer round, never its outcome:
+    the reviewer still fetches and validates the live PR head, runs the
+    quality gate, and independently chooses feedback or LGTM. Check order
+    is pinned (type → repo → PR → declared context → side effects → round →
+    wall clock) with early-out on the first failure, mirroring the task
+    gates. Lexical hard-stop scanning deliberately does not run here: a
+    granted reviewer invocation executes a pinned workflow whose side
+    effects are bounded by ``permitted_side_effects``, and review bodies
+    quote diffs and commands by design.
+    """
+    msg_type = str(message.get("type") or "")
+    context = _extract_review_context(message)
+    head_check, head_mismatch = _review_head_check(
+        context["declared_head"], actuals
+    )
+    block: Dict[str, Any] = {
+        "enabled": continuation_enabled,
+        "kind": "approved_thread_continuation",
+        "surface": "review_loop",
+        "decision": "confirmation_required",
+        "grant_found": False,
+        "requested": {
+            "message_type": msg_type,
+            "repository": context["repository"],
+            "pr_number": context["pr_number"],
+            "round": context["round"],
+            "side_effects": context["side_effects"],
+            "declared_head": context["declared_head"],
+        },
+        "scope": None,
+        "effective_round": None,
+        "exceeded_fields": [],
+        "head_check": head_check,
+        "source_audit": None,
+        "source_message_id": None,
+    }
+    if head_mismatch:
+        block["head_mismatch"] = True
+
+    if msg_type in {"review_feedback", "review_lgtm"}:
+        # Reviewer-output types carry results, never work to start.
+        block["decision"] = "context_only"
+        return block
+
+    if not continuation_enabled:
+        block["decision"] = "ignored_disabled"
+        return block
+
+    has_thread = bool(
+        message.get("parent_message_id") or message.get("conversation_id")
+    )
+    if not has_thread:
+        return block
+
+    prior, prior_round_audits = _prior_review_grant(
+        message, audit_dir, receiver, now_utc=now_utc
+    )
+    if prior is None:
+        if context["grant_claim_present"]:
+            # A sender-declared grant claim is a request, never proof.
+            block["decision"] = "missing_approval"
+        return block
+
+    block["source_audit"] = prior["source_audit"]
+    block["source_message_id"] = prior["source_message_id"]
+    if prior["state"] == "revoked":
+        block["decision"] = "revoked"
+        return block
+    if prior["state"] == "absent":
+        if context["grant_claim_present"]:
+            block["decision"] = "missing_approval"
+        return block
+    if prior["state"] == "invalid":
+        block["decision"] = "invalid"
+        return block
+
+    scope = prior["scope"]
+    block["grant_found"] = True
+    block["scope"] = scope
+
+    if msg_type not in scope["allowed_types"]:
+        # review_addressed stays context-only unless the grant explicitly
+        # lists it (the manual-continuation shape); an unlisted
+        # review_request is outside the granted scope.
+        block["decision"] = (
+            "context_only" if msg_type == "review_addressed" else "scope_exceeded"
+        )
+        if msg_type != "review_addressed":
+            block["exceeded_fields"].append("allowed_types")
+        return block
+
+    exceeded: List[str] = []
+    if context["repository"] != scope["repository"]:
+        exceeded.append("repository")
+    if context["pr_number"] != scope["pr_number"]:
+        exceeded.append("pr_number")
+    exceeded.extend(f"declared.{field}" for field in context["errors"])
+    permitted = scope["permitted_side_effects"]
+    for effect in context["side_effects"]:
+        if permitted.get(effect) is not True:
+            exceeded.append(f"permitted_side_effects.{effect}")
+    if exceeded:
+        block["decision"] = "scope_exceeded"
+        block["exceeded_fields"] = exceeded
+        return block
+
+    declared_round = context["round"] or 1
+    effective_round = max(declared_round, 1 + prior_round_audits)
+    block["effective_round"] = effective_round
+    if effective_round > scope["max_round"]:
+        block["decision"] = "round_exceeded"
+        return block
+
+    # The grant must be live when the work would RUN, not merely when the
+    # sender stamped the request: created_at_utc is sender-controlled, so
+    # expiry is checked against evaluation time as well. Either clock past
+    # the bound expires the grant.
+    message_created_at = _parse_utc_z(str(message.get("created_at_utc") or ""))
+    now = _aware_utc(now_utc)
+    expires_at = _parse_utc_z(scope["expires_at_utc"])
+    if message_created_at > expires_at or now > expires_at:
+        block["decision"] = "expired"
+        return block
+
+    block["decision"] = "accepted"
+    return block
+
+
 def continuation_scope_breaches(
     envelope: Dict[str, Any],
     grant_result: Dict[str, Any],
@@ -1272,10 +1822,393 @@ def _declared_intent_fields(actuals: Dict[str, Any]) -> List[str]:
     return fields
 
 
+def normalize_reauthorization_scope(
+    scope: Any,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Normalize a re-authorization answer's granted scope.
+
+    Unlike a continuation-grant scope, both numerics are optional: an
+    answer may extend only one budget, only grant boundary actions, or
+    carry no scope at all (a scope-less approval clears exactly the pause
+    it answers). Present numerics must be non-negative ints; boundary
+    actions use the coverable-field vocabulary.
+    """
+    if scope is None:
+        return None, None
+    if not isinstance(scope, dict):
+        return None, "reauthorization scope must be a mapping"
+    valid_keys = {"max_actual_minutes", "max_actual_files_touched"} | set(
+        COVERABLE_CONTINUATION_FIELDS
+    )
+    unknown = sorted(set(scope) - valid_keys)
+    if unknown:
+        return None, f"reauthorization scope has unknown key(s): {', '.join(unknown)}"
+    normalized: Dict[str, Any] = {}
+    for key in ("max_actual_minutes", "max_actual_files_touched"):
+        if key not in scope:
+            continue
+        value = scope[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return None, f"reauthorization scope {key} must be a non-negative integer"
+        normalized[key] = value
+    for key in COVERABLE_CONTINUATION_FIELDS:
+        value = scope.get(key, False)
+        if not isinstance(value, bool):
+            return None, f"reauthorization scope {key} must be boolean"
+        normalized[key] = value
+    return normalized, None
+
+
+def _parse_reauthorization(
+    actuals: Dict[str, Any],
+) -> Optional[Dict[str, Dict[str, Any]]]:
+    """Validated `actuals.reauthorization` input.
+
+    The receiver presents the channel answers it has observed for the
+    checkpoint being re-evaluated: `receiver_human` from its own audit
+    record's recorded outcome, `sender_reply` from a signature-verified
+    sender message threaded to the checkpoint notification, `gh_comment`
+    from the related PR/issue. Verification of each channel's provenance
+    (signatures, threading, recording) happens at the receiver before the
+    answer may be presented here — this input is the arbitration surface,
+    not the trust boundary.
+    """
+    raw = actuals.get("reauthorization")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError("actuals.reauthorization must be a non-empty mapping")
+    unknown = sorted(set(raw) - set(REAUTH_CHANNEL_PRECEDENCE))
+    if unknown:
+        raise ValueError(
+            "actuals.reauthorization has unknown channel(s): " + ", ".join(unknown)
+        )
+    parsed: Dict[str, Dict[str, Any]] = {}
+    for channel in REAUTH_CHANNEL_PRECEDENCE:
+        if channel not in raw:
+            continue
+        answer = raw[channel]
+        if not isinstance(answer, dict):
+            raise ValueError(f"actuals.reauthorization.{channel} must be a mapping")
+        decision = answer.get("decision")
+        if decision not in REAUTH_DECISIONS:
+            choices = ", ".join(sorted(REAUTH_DECISIONS))
+            raise ValueError(
+                f"actuals.reauthorization.{channel}.decision must be one of: {choices}"
+            )
+        entry: Dict[str, Any] = {"decision": str(decision)}
+        decided_at = str(answer.get("decided_at_utc") or "")
+        if channel in REAUTH_GOVERNING_CHANNELS:
+            if not decided_at:
+                raise ValueError(
+                    f"actuals.reauthorization.{channel}.decided_at_utc is required"
+                )
+        if decided_at:
+            try:
+                dt.datetime.strptime(decided_at, "%Y-%m-%dT%H:%M:%SZ")
+            except ValueError as exc:
+                raise ValueError(
+                    f"actuals.reauthorization.{channel}.decided_at_utc "
+                    "must use YYYY-MM-DDTHH:MM:SSZ"
+                ) from exc
+        entry["decided_at_utc"] = decided_at or None
+        if channel == "receiver_human":
+            entry["actor"] = str(answer.get("actor") or "") or None
+        if channel == "sender_reply":
+            source = str(answer.get("source_message_id") or "")
+            if not source:
+                raise ValueError(
+                    "actuals.reauthorization.sender_reply.source_message_id "
+                    "is required"
+                )
+            entry["source_message_id"] = source
+        if channel == "gh_comment":
+            entry["author"] = str(answer.get("author") or "") or None
+            if answer.get("scope") is not None:
+                raise ValueError(
+                    "actuals.reauthorization.gh_comment cannot carry scope — "
+                    "GH comments are advisory, never authoritative"
+                )
+        scope, scope_error = normalize_reauthorization_scope(answer.get("scope"))
+        if scope_error:
+            raise ValueError(f"actuals.reauthorization.{channel}: {scope_error}")
+        if decision == "modified" and scope is None:
+            raise ValueError(
+                f"actuals.reauthorization.{channel}: decision modified "
+                "requires an explicit scope"
+            )
+        entry["scope"] = scope
+        parsed[channel] = entry
+    return parsed
+
+
+def _reauth_numeric_budget(
+    channel: str,
+    scope: Optional[Dict[str, Any]],
+    scope_key: str,
+    policy: Optional[Dict[str, Any]],
+    threshold_key: str,
+) -> Optional[int]:
+    """Effective numeric budget an answer's scope grants on one channel.
+
+    The receiver-side human is unbounded. Sender authority is bounded by
+    the receiver's own admission policy — a sender re-authorization can
+    never authorize more than the receiver's thresholds would have
+    auto-accepted at admission (the party whose under-declaration caused
+    the breach cannot self-serve unlimited scope). Without a resolvable
+    policy the sender channel extends nothing (fail closed).
+    """
+    granted = scope.get(scope_key) if isinstance(scope, dict) else None
+    if channel == "receiver_human":
+        return granted if isinstance(granted, int) else None
+    if channel != "sender_reply" or not isinstance(granted, int):
+        return None
+    if not isinstance(policy, dict):
+        return None
+    cap = policy.get("thresholds", {}).get(threshold_key)
+    if not isinstance(cap, int):
+        return None
+    return min(granted, cap)
+
+
+def _sender_may_grant_field(
+    key: str,
+    policy: Optional[Dict[str, Any]],
+    envelope: Optional[Dict[str, Any]],
+) -> bool:
+    """Whether the sender channel may grant one boundary action.
+
+    The bound is the receiver's own admission predicate, reused verbatim:
+    the grant is honored only when an envelope declaring this capability
+    would itself auto-accept under the receiver's external-side-effect
+    policy (for `allow_pr_artifacts`: a private target on the receiver's
+    allowlist carrying an artifact-class anchor — a standalone
+    `commits_changes` or an unlisted/public target stays paused).
+    `merges_pr` is categorically excluded on top of that, whatever the
+    policy: merge authority always passes the receiver-side human. So is
+    every key outside the coverable boundary-action vocabulary — the
+    legacy risk fields (destructive ops, auth/config/secrets, dependency,
+    public visibility) are receiver-side authority only, and the
+    side-effect admission predicate below never evaluates them.
+    """
+    if key not in COVERABLE_CONTINUATION_FIELDS:
+        return False
+    if key in SENDER_UNGRANTABLE_REAUTH_FIELDS:
+        return False
+    if not isinstance(policy, dict) or not isinstance(envelope, dict):
+        return False
+    external_policy = str(policy.get("thresholds", {}).get("external_side_effects"))
+    allowlist = policy.get("private_repo_allowlist") or []
+    hypothetical = dict(envelope)
+    hypothetical[key] = True
+    hypothetical["external_side_effects"] = True
+    return not _side_effect_reasons(
+        hypothetical,
+        {"present": False},
+        external_policy,
+        allowlist,
+    )
+
+
+def _reauth_boolean_grants(
+    channel: str,
+    scope: Optional[Dict[str, Any]],
+    policy: Optional[Dict[str, Any]],
+    envelope: Optional[Dict[str, Any]],
+) -> FrozenSet[str]:
+    """Boundary actions an answer's scope grants on one channel."""
+    if not isinstance(scope, dict):
+        return frozenset()
+    granted = {key for key in COVERABLE_CONTINUATION_FIELDS if scope.get(key) is True}
+    if channel == "receiver_human":
+        return frozenset(granted)
+    if channel != "sender_reply":
+        return frozenset()
+    return frozenset(
+        key for key in granted if _sender_may_grant_field(key, policy, envelope)
+    )
+
+
+def _reauth_effective_scope(
+    channel: str,
+    scope: Optional[Dict[str, Any]],
+    policy: Optional[Dict[str, Any]],
+    envelope: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """The policy-capped scope an answer actually grants.
+
+    This — never the raw request — is the durable value later checkpoints
+    and envelope recompiles consume: sender numerics are capped at the
+    receiver's thresholds and sender booleans filtered to the admission
+    predicate, while the receiver-side human's scope passes through
+    unchanged. Returns None for a scope-less answer (nothing durable).
+    """
+    if scope is None:
+        return None
+    effective: Dict[str, Any] = {}
+    for scope_key, threshold_key in (
+        ("max_actual_minutes", "max_estimated_minutes"),
+        ("max_actual_files_touched", "max_expected_files_touched"),
+    ):
+        if scope_key not in scope:
+            continue
+        budget = _reauth_numeric_budget(
+            channel, scope, scope_key, policy, threshold_key
+        )
+        if budget is not None:
+            effective[scope_key] = budget
+    grants = _reauth_boolean_grants(channel, scope, policy, envelope)
+    for key in COVERABLE_CONTINUATION_FIELDS:
+        effective[key] = key in grants
+    return effective
+
+
+def _default_reauthorization_block() -> Dict[str, Any]:
+    return {
+        "presented": False,
+        "channel": None,
+        "decision": None,
+        "decided_at_utc": None,
+        "actor": None,
+        "source_message_id": None,
+        "requested_scope": None,
+        "scope": None,
+        "disposition": None,
+        "cleared_paused_at_utc": None,
+        "advisory": [],
+    }
+
+
+def _arbitrate_reauthorization(
+    reauth_input: Dict[str, Dict[str, Any]],
+    block: Dict[str, Any],
+    breached_fields: List[str],
+    actual_minutes: int,
+    actual_files: int,
+    paused_at: str,
+    policy: Optional[Dict[str, Any]],
+    envelope: Optional[Dict[str, Any]],
+) -> None:
+    """Arbitrate channel answers against the current pause, in place.
+
+    Precedence: receiver_human > sender_reply > gh_comment, by rank and
+    never by arrival order. The governing answer is the highest-ranked
+    authoritative-capable channel bearing one; every lower-ranked answer
+    is recorded as advisory. Coverage per breached field: boundary-action
+    grants (scope booleans) are durable for the task — no freshness
+    requirement; numeric budgets clear a pause only up to the granted
+    scope. A fresh scope-less answer clears exactly the current pause —
+    numeric and boundary fields alike, within the answering channel's
+    grant bounds — without creating anything durable. A spent answer
+    presented against a newer breach it does not cover is stale (the
+    pinned grant-reuse rejection).
+    """
+    governing = next(
+        (c for c in REAUTH_GOVERNING_CHANNELS if c in reauth_input), None
+    )
+    for channel in REAUTH_CHANNEL_PRECEDENCE:
+        if channel not in reauth_input or channel == governing:
+            continue
+        reason = "never_authoritative"
+        if channel in REAUTH_GOVERNING_CHANNELS:
+            reason = "overridden_by_receiver_human"
+        block["advisory"].append({
+            "channel": channel,
+            "decision": reauth_input[channel]["decision"],
+            "reason": reason,
+        })
+    if governing is None:
+        block["disposition"] = "advisory_only"
+        return
+
+    answer = reauth_input[governing]
+    scope = answer.get("scope")
+    block["channel"] = governing
+    block["decision"] = answer["decision"]
+    block["decided_at_utc"] = answer["decided_at_utc"]
+    block["actor"] = answer.get("actor")
+    block["source_message_id"] = answer.get("source_message_id")
+    # The requested scope is provenance; the effective (policy-capped)
+    # scope is the durable value later checkpoints consume. They diverge
+    # exactly when a sender asked past the receiver's own policy.
+    block["requested_scope"] = scope
+    block["scope"] = _reauth_effective_scope(governing, scope, policy, envelope)
+
+    if answer["decision"] == "declined":
+        block["disposition"] = "declined"
+        return
+
+    decided = dt.datetime.strptime(answer["decided_at_utc"], "%Y-%m-%dT%H:%M:%SZ")
+    paused = dt.datetime.strptime(paused_at, "%Y-%m-%dT%H:%M:%SZ")
+    fresh = decided >= paused
+    scope_less = scope is None
+    boolean_grants = _reauth_boolean_grants(governing, scope, policy, envelope)
+    files_cap = (
+        policy.get("thresholds", {}).get("max_expected_files_touched")
+        if isinstance(policy, dict)
+        else None
+    )
+    minutes_cap = (
+        policy.get("thresholds", {}).get("max_estimated_minutes")
+        if isinstance(policy, dict)
+        else None
+    )
+
+    def numeric_covered(actual: int, scope_key: str, threshold_key: str) -> bool:
+        budget = _reauth_numeric_budget(
+            governing, scope, scope_key, policy, threshold_key
+        )
+        if budget is not None:
+            return actual <= budget
+        if not (scope_less and fresh):
+            return False
+        # A fresh scope-less approval clears exactly the extent recorded at
+        # the pause it answers — unbounded for the receiver-side human,
+        # within the receiver's admission caps for the sender.
+        if governing == "receiver_human":
+            return True
+        cap = minutes_cap if threshold_key == "max_estimated_minutes" else files_cap
+        return isinstance(cap, int) and actual <= cap
+
+    def boundary_covered(key: str) -> bool:
+        if key in boolean_grants:
+            return True
+        # A fresh scope-less approval also clears the boundary fields of
+        # the pause it answers, within the channel's grant bounds; nothing
+        # durable is recorded (scope stays None).
+        if not (scope_less and fresh):
+            return False
+        if governing == "receiver_human":
+            return True
+        return _sender_may_grant_field(key, policy, envelope)
+
+    uncovered: List[str] = []
+    for field in breached_fields:
+        if field == "actual_minutes":
+            covered = numeric_covered(
+                actual_minutes, "max_actual_minutes", "max_estimated_minutes"
+            )
+        elif field == "actual_files_touched":
+            covered = numeric_covered(
+                actual_files, "max_actual_files_touched", "max_expected_files_touched"
+            )
+        else:
+            covered = boundary_covered(field.rpartition(".")[2])
+        if not covered:
+            uncovered.append(field)
+
+    if uncovered:
+        block["disposition"] = "insufficient" if fresh else "stale"
+        return
+    block["disposition"] = "resumed"
+    block["cleared_paused_at_utc"] = paused_at
+
+
 def evaluate_threshold_checkpoint(
     envelope: Optional[Dict[str, Any]],
     grant_result: Dict[str, Any],
     actuals: Optional[Dict[str, Any]],
+    policy: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     checkpoint: Dict[str, Any] = {
         "evaluated": False,
@@ -1290,6 +2223,7 @@ def evaluate_threshold_checkpoint(
         "action": "not_evaluated",
         "predicted_risk_materialized": False,
         "completed_at_utc": None,
+        "reauthorization": _default_reauthorization_block(),
     }
     if not actuals or not envelope:
         return checkpoint
@@ -1394,6 +2328,34 @@ def evaluate_threshold_checkpoint(
         paused_at = _actual_utc_text(actuals, "paused_at_utc") or utc_now_iso()
         basis = "declared_intent" if intent_fields else "realized"
 
+    # Re-authorization arbitration: channel answers presented by the
+    # receiver are arbitrated against THIS pause. A resumed disposition is
+    # the only one that clears the breach; everything else leaves the
+    # checkpoint paused with the answers recorded.
+    reauth_input = _parse_reauthorization(actuals)
+    reauth_block = _default_reauthorization_block()
+    reauth_block["presented"] = reauth_input is not None
+    if reauth_input is None:
+        if breached:
+            reauth_block["disposition"] = "unanswered"
+    elif not breached:
+        reauth_block["disposition"] = "not_required"
+    else:
+        _arbitrate_reauthorization(
+            reauth_input,
+            reauth_block,
+            breached_fields,
+            actual_minutes,
+            actual_files,
+            paused_at,
+            policy,
+            envelope,
+        )
+        if reauth_block["disposition"] == "resumed":
+            action = "resumed_after_reauthorization"
+        elif reauth_block["disposition"] == "declined":
+            action = "reauthorization_declined"
+
     # A declared_intent breach is by definition caught BEFORE the risk
     # materialized — its materialization metric is pinned false and an
     # explicit true is rejected as self-contradictory. Realized breaches
@@ -1423,6 +2385,7 @@ def evaluate_threshold_checkpoint(
         "action": action,
         "predicted_risk_materialized": predicted_value,
         "completed_at_utc": _actual_utc_text(actuals, "completed_at_utc"),
+        "reauthorization": reauth_block,
     })
     return checkpoint
 
@@ -1495,6 +2458,9 @@ def evaluate_autonomy(
     logged_notes: List[Dict[str, str]] = []
     profile_snapshot: Optional[Dict[str, Any]] = None
     envelope_source: Optional[str] = None
+    # Resolved below; pre-bound so early pauses (malformed config) can
+    # evaluate checkpoints with sender authority failing closed.
+    policy: Optional[Dict[str, Any]] = None
 
     def finish(decision: Dict[str, Any]) -> Dict[str, Any]:
         reason_codes = list(decision.get("reason_codes") or [])
@@ -1549,12 +2515,14 @@ def evaluate_autonomy(
         checkpoint: Optional[Dict[str, Any]] = None,
         breached: Optional[List[str]] = None,
         co_occurring: Optional[List[str]] = None,
+        review_continuation: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         grant = grant_result or {"present": False, "enabled": False}
         resolved_checkpoint = checkpoint or evaluate_threshold_checkpoint(
             envelope,
             grant,
             actuals,
+            policy=policy,
         )
         decision: Dict[str, Any] = {
             "decision": "paused",
@@ -1565,6 +2533,8 @@ def evaluate_autonomy(
             "continuation_grant": grant,
             "result": _base_result("paused", completion_kind, resolved_checkpoint),
         }
+        if review_continuation is not None:
+            decision["review_continuation"] = review_continuation
         if matched_pattern is not None:
             decision["matched_pattern"] = matched_pattern
         if validation_errors is not None:
@@ -1609,6 +2579,54 @@ def evaluate_autonomy(
 
     body = str(message.get("body") or "")
     msg_type = str(message.get("type") or "")
+
+    if msg_type in REVIEW_LIFECYCLE_TYPES:
+        # Review-loop lifecycle admission: the four task gates do not run —
+        # these messages carry no task profile, and a granted reviewer
+        # invocation executes a pinned workflow bounded by the grant's
+        # permitted_side_effects, not by sender prose. Auto-continue
+        # requires a standing human-approved grant in this sender/thread
+        # chain; everything else keeps the explicit-confirmation default.
+        review_block = evaluate_review_continuation(
+            message,
+            bool(policy["continuation_grants_enabled"]),
+            audit_dir=audit_dir,
+            receiver=receiver,
+            actuals=actuals,
+            now_utc=now_utc,
+        )
+        if review_block["decision"] != "accepted":
+            return paused(
+                mode,
+                [_REVIEW_PAUSE_CODES[review_block["decision"]]],
+                review_continuation=review_block,
+            )
+        reason_codes = [
+            "message_valid",
+            "message_not_expired",
+            "message_hash_recorded",
+            "review_continuation_accepted",
+        ]
+        if review_block.get("head_mismatch"):
+            # Recorded, never blocking: the live head is authoritative and
+            # the reviewer must resolve the declared value against it
+            # before any terminal verdict.
+            reason_codes.append("review_continuation_head_mismatch")
+        review_checkpoint = evaluate_threshold_checkpoint(
+            None, {"present": False, "enabled": False}, None, policy=policy
+        )
+        decision = {
+            "decision": "auto_accepted",
+            "mode": mode,
+            "reason_codes": reason_codes,
+            "scope_envelope": None,
+            "logged_notes": logged_notes,
+            "continuation_grant": {"present": False, "enabled": False},
+            "review_continuation": review_block,
+            "result": _base_result("done", "auto_accepted", review_checkpoint),
+        }
+        return finish(decision)
+
     allow_without_profile = msg_type in policy["allow_without_task_profile"]
 
     profile, profile_error = extract_task_profile(body)
@@ -1829,13 +2847,26 @@ def evaluate_autonomy(
                 grant_result=grant_result,
             )
 
-    checkpoint = evaluate_threshold_checkpoint(envelope, grant_result, actuals)
-    if checkpoint["evaluated"] and checkpoint["breached"]:
+    checkpoint = evaluate_threshold_checkpoint(
+        envelope, grant_result, actuals, policy=policy
+    )
+    reauth_disposition = checkpoint["reauthorization"].get("disposition")
+    if (
+        checkpoint["evaluated"]
+        and checkpoint["breached"]
+        and reauth_disposition != "resumed"
+    ):
         has_declaration_error = bool(checkpoint["declaration_errors"])
         reason = "declaration_error" if has_declaration_error else "threshold_checkpoint_breached"
+        reasons = [reason]
+        if reauth_disposition == "stale":
+            # The pinned grant-reuse rejection: the only governing answer
+            # on file was decided against an earlier pause and does not
+            # cover this one.
+            reasons.append("checkpoint_reauthorization_stale")
         return paused(
             mode,
-            [reason],
+            reasons,
             "checkpoint_paused",
             envelope=envelope,
             grant_result=grant_result,
@@ -1863,6 +2894,8 @@ def evaluate_autonomy(
         reason_codes.insert(-1, "lexical_advisory")
     if grant_result.get("decision") == "accepted":
         reason_codes.append("continuation_grant_accepted")
+    if reauth_disposition == "resumed":
+        reason_codes.append("checkpoint_reauthorized")
 
     return finish({
         "decision": "auto_accepted",

@@ -5,6 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-08-12
+
+### Added
+
+- Review-loop continuation grants: a human-approved
+  `approved_thread_continuation` may carry a `review_loop` scope (one
+  repository, PR, and sender thread; allowed lifecycle types; a round
+  ceiling; wall-clock expiry; permitted review side effects) so in-scope
+  same-thread follow-up review rounds auto-invoke the reviewer. A grant
+  authorizes running a round, never its verdict — the live PR head stays
+  authoritative, with declared heads compared by exact full-SHA equality.
+  Expiry and revocation bind at evaluation time, approvals never authorize
+  retroactively, only rounds that actually ran consume the round budget,
+  the accepted side-effect set binds the invocation, and out-of-scope
+  requests pause. Receiver config enables recognition only; authority
+  exists solely in prior human-approved grant audits. Adds the
+  `review_continuation` audit block, pinned `review_continuation_*` and
+  `review_loop_invalid` reason codes, and a conformance fixture set; full
+  semantics in `docs/protocol/autonomy.md` and
+  `docs/protocol/review_loop.md`.
+- Checkpoint re-authorization is now specified end to end: three pinned
+  answer channels — receiver-side human, signature-verified sender reply
+  bounded by the receiver's own admission policy, GitHub comments as
+  advisory-only — with rank, never arrival order, deciding conflicts. A
+  consumption rule binds each answer to the pause it clears: scope-less
+  approvals clear one checkpoint, scoped numeric budgets stand for the
+  rest of the task up to the granted value, and boundary-action grants
+  durably authorize one granular capability until task completion. The
+  audit surface separates the requested scope from the effective
+  policy-capped grant, with pinned reason codes `checkpoint_reauthorized`
+  and `checkpoint_reauthorization_stale` and a conformance fixture set.
+- `oacp session-init` now supports Codex `SessionStart` JSON, a bounded and
+  truthful ordered-read manifest, optional pull-before-verify memory sync, and
+  active-model/cwd input from the hook payload. `oacp setup codex` safely
+  merges one startup-only handler into `.codex/hooks.json`; users review and
+  trust the definition with `/hooks`.
+- Project-wide message-history retention through `oacp retention`: outbox,
+  dead-letter, and processed inbox-archive files are pruned when they exceed
+  either an age or count bound (defaults 30 days and 1,000 files per target),
+  with validated partial overrides in `workspace.json`, deterministic dry-run
+  JSON, and file-identity rechecks before deletion.
+- Processed inbound messages now have one cross-runtime destination,
+  `inbox/archive/`, preserving the original filename and bytes. Quarantine
+  evidence is excluded from automatic pruning by its durable filename format;
+  manually managed fixtures can use adjacent `.retain` markers. Protocol spec
+  version advances to 0.4.3.
+
+### Changed
+
+- Codex startup file states now say `verified` instead of `loaded`: the command
+  confirms readability and updates `status.yaml`, while its hook context tells
+  Codex which files still require ordered reads. Legacy `.agent-hub` project
+  detection has been removed from this Codex path.
+- `oacp setup claude` keeps automatic startup memory pull but no longer creates
+  or registers an automatic `SessionEnd` push. Rerunning setup removes only the
+  exact historical generated registration and leaves any existing script or
+  custom hooks untouched; explicit wrap-up remains the single push path.
+- Session lifecycle documentation now distinguishes coordinator telemetry in
+  `session_lifecycle_state.json` from runtime startup and `status.yaml`.
+
 ## [0.4.2] - 2026-08-07
 
 ### Added
@@ -702,6 +762,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Checkout step in github-release workflow job (#19)
 - Pre-release audit fixes: SHA-pinned actions, dangling doc refs (#15, #16)
 
+[0.4.3]: https://github.com/kiloloop/oacp/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/kiloloop/oacp/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/kiloloop/oacp/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/kiloloop/oacp/compare/v0.3.5...v0.4.0

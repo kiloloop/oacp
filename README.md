@@ -234,6 +234,7 @@ uv tool install .
 | `oacp inbox` | List pending messages across agents (table or `--json`) |
 | `oacp watch` | Emit inbox delta events for one agent across selected projects |
 | `oacp memory` | Archive, restore, or git-sync project/org memory files |
+| `oacp session-init` | Verify Codex startup inputs, optionally pull memory, and update status |
 | `oacp agent` | Manage global agent profiles (`init`, `show`, `list`) |
 | `oacp org-memory` | Initialize org-level memory at `$OACP_HOME/org-memory/` |
 | `oacp write-event` | Write an event to `org-memory/events/` |
@@ -280,6 +281,9 @@ oacp/
 ├── Makefile            # Task runner (make help for all targets)
 └── SPEC.md             # Full protocol specification
 ```
+
+[`mcp_servers/`](mcp_servers/) contains experimental, unsupported prototypes;
+it is not part of the OACP product surface.
 
 ## Related
 

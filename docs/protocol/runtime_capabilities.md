@@ -170,11 +170,17 @@ The `oacp doctor` command validates environment and workspace health. Every chec
 
 ## Integration
 
-### Session Lifecycle Hooks
+### Runtime startup and session telemetry
 
-`scripts/session_lifecycle_hooks.py` should write `status.yaml` during `init_session` and `close_session`:
-- `init_session` → create/update `status.yaml` with `status: available` (or `busy` if `--packet-id` provided)
-- `close_session` → update `status.yaml` with `status: offline`
+Runtime-specific startup owns `status.yaml`. For Codex, `oacp setup codex`
+registers a `SessionStart` handler that runs memory pull and `oacp session-init`
+sequentially after the user reviews and trusts it with `/hooks`. The manual
+fallback is `oacp session-init --pull-memory --project <project>`.
+
+`scripts/session_lifecycle_hooks.py` maintains the separate
+`session_lifecycle_state.json` telemetry consumed by the coordinator. Its packet
+states follow `packet_states.yaml`; it does not load runtime context or write
+`status.yaml`.
 
 ### Hub Doctor
 
@@ -273,7 +279,8 @@ The card schema is inspired by Google's A2A Agent Card spec (v0.3.0). Key differ
 - **Agent Profiles**: `docs/protocol/agent_profiles.md` — two-tier global profile + project card system
 - **Parity Matrix**: `docs/guides/runtime_capability_matrix.md` — detailed per-runtime capability comparison
 - **Inbox Protocol**: `docs/protocol/inbox_outbox.md` — agent messaging format
-- **Session Lifecycle**: `scripts/session_lifecycle_hooks.py` (reference implementation) — session boundary hooks
+- **Session telemetry**: `scripts/session_lifecycle_hooks.py` — coordinator
+  compatibility state, separate from runtime startup and `status.yaml`
 - **Workspace Setup**: `scripts/init_project_workspace.sh` — project initialization
 - **Agent Card Template**: `templates/agent_card.template.yaml` — card template
 - **Card Validator**: `scripts/validate_agent_card.py` — schema validation

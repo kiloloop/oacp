@@ -46,6 +46,13 @@ def test_prior_grant_audits_use_schema_version_two() -> None:
     for audit_path in sorted((FIXTURE_ROOT / "audits").glob("*.yaml")):
         audit = _load_yaml(audit_path)
         assert audit["schema_version"] == 2
+        if audit.get("decision") == "auto_accepted":
+            # Round-consumption fixtures: an admitted review round carries
+            # no human outcome by construction — it must never smuggle a
+            # grant decision.
+            outcome = audit.get("result", {}).get("human_outcome")
+            assert not (outcome or {}).get("grant")
+            continue
         outcome = audit.get("result", {}).get("human_outcome", {})
         assert outcome.get("recorded") is True
 

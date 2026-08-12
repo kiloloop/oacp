@@ -1,0 +1,14 @@
+case: review_continuation_missing_approval_pauses
+config: configs/auto_review_continuation_enabled.yaml
+message: messages/review_continuation_unapproved.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - review_continuation_missing_approval
+  review_continuation:
+    decision: missing_approval
+    grant_found: false
+  result:
+    final_state: paused
+    completion_kind: admission_paused

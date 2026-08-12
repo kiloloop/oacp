@@ -1,0 +1,10 @@
+actual_minutes: 10
+actual_files_touched: 1
+paused_at_utc: "2026-05-12T12:30:00Z"
+declared_intent_fields:
+  - task_profile.comments_on_github
+reauthorization:
+  receiver_human:
+    decision: approved
+    decided_at_utc: "2026-05-12T12:50:00Z"
+    actor: alice

@@ -1,0 +1,21 @@
+actual_minutes: 18
+actual_files_touched: 12
+paused_at_utc: "2026-05-12T12:30:00Z"
+side_effects_actual:
+  creates_or_updates_pr: false
+  comments_on_github: false
+  commits_changes: false
+reauthorization:
+  receiver_human:
+    decision: declined
+    decided_at_utc: "2026-05-12T12:50:00Z"
+    actor: alice
+  sender_reply:
+    decision: approved
+    decided_at_utc: "2026-05-12T12:40:00Z"
+    source_message_id: msg-20260512124000-sender-reauth2
+    scope:
+      max_actual_files_touched: 12
+  gh_comment:
+    decision: approved
+    author: driveby-collaborator

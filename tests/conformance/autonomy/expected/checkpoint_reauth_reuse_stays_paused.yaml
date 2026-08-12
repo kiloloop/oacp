@@ -1,0 +1,31 @@
+case: checkpoint_reauth_reuse_stays_paused
+config: configs/auto_review_standard.yaml
+message: messages/clean_task.yaml
+actuals: actuals/reauth_reuse.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - threshold_checkpoint_breached
+    - checkpoint_reauthorization_stale
+  breached:
+    - actual_minutes
+  result:
+    final_state: paused
+    completion_kind: checkpoint_paused
+    threshold_checkpoint:
+      evaluated: true
+      breached: true
+      breached_fields:
+        - actual_minutes
+      breach_basis: realized
+      paused_at_utc: "2026-05-12T13:10:00Z"
+      action: paused_for_reauthorization
+      reauthorization:
+        presented: true
+        channel: receiver_human
+        decision: approved
+        decided_at_utc: "2026-05-12T12:45:00Z"
+        actor: alice
+        disposition: stale
+        advisory: []

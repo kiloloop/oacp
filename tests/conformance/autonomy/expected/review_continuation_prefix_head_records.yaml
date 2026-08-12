@@ -1,0 +1,26 @@
+case: review_continuation_prefix_head_records
+config: configs/auto_review_continuation_enabled.yaml
+message: messages/review_continuation_prefix_head.yaml
+actuals: actuals/review_live_head_prefix.yaml
+now: "2026-05-26T12:30:00Z"
+audits:
+  - audits/prior_review_grant_approved.yaml
+expected:
+  decision: auto_accepted
+  mode: auto_review
+  reason_codes:
+    - message_valid
+    - message_not_expired
+    - message_hash_recorded
+    - review_continuation_accepted
+    - review_continuation_head_mismatch
+  review_continuation:
+    decision: accepted
+    grant_found: true
+    head_check:
+      declared_head: 7d3f2a90c1b4e5f6a7b8c9d0e1f203142536475a
+      live_head: 7d3f2a90ffee0011223344556677889900aabbcc
+      status: mismatch
+  result:
+    final_state: done
+    completion_kind: auto_accepted

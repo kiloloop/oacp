@@ -105,6 +105,18 @@ class TestDirectoryCreation(unittest.TestCase):
                     f"dead_letter missing for {agent}",
                 )
 
+    def test_creates_inbox_archive_dirs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_workspace(tmp)
+            run_update(root)
+            for agent in ("codex", "claude", "gemini"):
+                self.assertTrue(
+                    os.path.isdir(
+                        os.path.join(root, "agents", agent, "inbox", "archive")
+                    ),
+                    f"inbox/archive missing for {agent}",
+                )
+
     def test_creates_logs_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = make_workspace(tmp)
@@ -122,11 +134,14 @@ class TestDirectoryCreation(unittest.TestCase):
             root = make_workspace(tmp)
             run_update(root)
             expected = [
-                "agents/codex/inbox", "agents/codex/outbox", "agents/codex/dead_letter",
+                "agents/codex/inbox", "agents/codex/inbox/archive",
+                "agents/codex/outbox", "agents/codex/dead_letter",
                 "agents/codex/audit/autonomy_decisions",
-                "agents/claude/inbox", "agents/claude/outbox", "agents/claude/dead_letter",
+                "agents/claude/inbox", "agents/claude/inbox/archive",
+                "agents/claude/outbox", "agents/claude/dead_letter",
                 "agents/claude/audit/autonomy_decisions",
-                "agents/gemini/inbox", "agents/gemini/outbox", "agents/gemini/dead_letter",
+                "agents/gemini/inbox", "agents/gemini/inbox/archive",
+                "agents/gemini/outbox", "agents/gemini/dead_letter",
                 "agents/gemini/audit/autonomy_decisions",
                 "packets/review", "packets/findings", "packets/test", "packets/deploy",
                 "checkpoints", "merges", "memory", "memory/archive", "artifacts", "state", "logs",
@@ -161,6 +176,18 @@ class TestGitkeep(unittest.TestCase):
             root = make_workspace(tmp)
             run_update(root)
             self.assertTrue(os.path.isfile(os.path.join(root, "agents", "claude", "dead_letter", ".gitkeep")))
+
+    def test_gitkeep_in_inbox_archive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_workspace(tmp)
+            run_update(root)
+            self.assertTrue(
+                os.path.isfile(
+                    os.path.join(
+                        root, "agents", "claude", "inbox", "archive", ".gitkeep"
+                    )
+                )
+            )
 
     def test_gitkeep_in_autonomy_audit_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
