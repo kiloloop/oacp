@@ -16,7 +16,7 @@ endif
 
 # ── Targets ──────────────────────────────────────────────────────────────
 
-.PHONY: help init update test validate validate-msg validate-card send quality packet handoff normalize preflight doctor
+.PHONY: help update test docs validate validate-msg validate-card send quality packet preflight doctor
 
 help: ## Show available targets (default)
 	@echo "OACP — task runner"
@@ -26,14 +26,14 @@ help: ## Show available targets (default)
 	@grep -E '^[a-z][-a-z]+:.*## ' $(MAKEFILE_LIST) | \
 		awk -F ':.*## ' '{ printf "  %-14s %s\n", $$1, $$2 }'
 
-init: _require-project ## Create a new project workspace
-	bash $(SCRIPTS_DIR)/init_project_workspace.sh $(PROJECT) $(ARGS)
-
 update: _require-project ## Sync existing workspace with latest structure
 	bash $(SCRIPTS_DIR)/update_workspace.sh $(PROJECT) $(ARGS)
 
 test: ## Run all tests
 	python3 -m pytest $(SCRIPTS_DIR)/../tests -v $(ARGS)
+
+docs: ## Regenerate the README command table from oacp --help
+	python3 $(SCRIPTS_DIR)/gen_readme_commands.py --write
 
 validate-msg: ## Validate inbox messages
 	python3 $(SCRIPTS_DIR)/validate_message.py $(ARGS)
@@ -57,9 +57,3 @@ quality: ## Run quality gate check
 
 packet: _require-project ## Create a review/findings/merge packet
 	bash $(SCRIPTS_DIR)/init_packet.sh $(PROJECT) $(ARGS)
-
-handoff: _require-project ## Create a structured handoff packet
-	python3 $(SCRIPTS_DIR)/create_handoff_packet.py $(PROJECT) $(ARGS)
-
-normalize: ## Normalize raw findings into canonical YAML
-	python3 $(SCRIPTS_DIR)/normalize_findings.py $(ARGS)

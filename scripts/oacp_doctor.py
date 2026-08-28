@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -34,12 +35,14 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from _oacp_constants import (
+    AGENT_RE,
     ALL_RUNTIMES,
     CANONICAL_CAPABILITIES,
     REPO_SLUG_RE,
     is_agent_dir,
     utc_now_iso,
 )
+from agent_profile import discover_project_memberships
 from memory_sync import (
     CANONICAL_MEMORY_GITIGNORE,
     MARKER_FILE,
@@ -250,7 +253,7 @@ def check_workspace(project_dir: Path) -> DoctorCategory:
             name="workspace.json",
             severity=Severity.error,
             message="workspace.json — not found",
-            fix_hint=f"Run: make init PROJECT={project_dir.name}",
+            fix_hint=f"Run: oacp init {project_dir.name}",
         ))
     else:
         try:
@@ -276,7 +279,7 @@ def check_workspace(project_dir: Path) -> DoctorCategory:
             name="agents/",
             severity=Severity.error,
             message="agents/ directory — not found",
-            fix_hint=f"Run: make init PROJECT={project_dir.name}",
+            fix_hint=f"Run: oacp init {project_dir.name}",
         ))
     else:
         agent_count = sum(1 for d in agents_dir.iterdir() if is_agent_dir(d))
@@ -781,10 +784,200 @@ def check_autonomy(
                 message=f"{agent_name}/autonomy audit — no orphaned policy refs",
             ))
 
+        # Audit-record integrity sweep: off-enum vocabulary, duplicate live
+        # evaluations, paused-terminal shapes, and malformed human-outcome
+        # blocks. Doctor diagnoses; the finalizer is the enforcement.
+        try:
+            import finalize_autonomy_record
+        except ImportError:  # pragma: no cover - packaging guard
+            finalize_autonomy_record = None  # type: ignore[assignment]
+        if finalize_autonomy_record is not None and audit_dir.is_dir():
+            report = finalize_autonomy_record.sweep_audit_dir(audit_dir)
+            record_count = len(report["records"])
+            error_files: List[str] = []
+            advisory_files: List[str] = []
+            for name, findings in sorted(report["records"].items()):
+                severities = {finding["severity"] for finding in findings}
+                if "error" in severities:
+                    error_files.append(name)
+                elif "advisory" in severities:
+                    advisory_files.append(name)
+            if error_files:
+                cat.results.append(DoctorResult(
+                    name=f"{agent_name}/autonomy-audit-integrity",
+                    severity=Severity.error,
+                    message=(
+                        f"{agent_name}/autonomy audit — "
+                        f"{len(error_files)}/{record_count} record(s) with "
+                        f"integrity errors: {_summarize_paths(error_files)}"
+                    ),
+                    fix_hint=(
+                        "oacp autonomy-finalize <record> --validate "
+                        "[--sweep] to list findings; close stale or "
+                        "off-vocabulary records via supersession"
+                    ),
+                ))
+            else:
+                cat.results.append(DoctorResult(
+                    name=f"{agent_name}/autonomy-audit-integrity",
+                    severity=Severity.ok,
+                    message=(
+                        f"{agent_name}/autonomy audit — {record_count} "
+                        "record(s) validated, no integrity errors"
+                    ),
+                ))
+            duplicates = report["duplicate_groups"]
+            if duplicates:
+                grouped = [
+                    f"{group['message_id']} ({len(group['files'])} live)"
+                    for group in duplicates
+                ]
+                cat.results.append(DoctorResult(
+                    name=f"{agent_name}/autonomy-audit-duplicates",
+                    severity=Severity.error,
+                    message=(
+                        f"{agent_name}/autonomy audit — duplicate live "
+                        f"evaluation(s): {_summarize_paths(grouped)}"
+                    ),
+                    fix_hint=(
+                        "oacp autonomy-finalize <stale record> "
+                        "--final-state superseded --superseded-by <live "
+                        "evaluation_id>"
+                    ),
+                ))
+            elif record_count:
+                cat.results.append(DoctorResult(
+                    name=f"{agent_name}/autonomy-audit-duplicates",
+                    severity=Severity.ok,
+                    message=(
+                        f"{agent_name}/autonomy audit — one live evaluation "
+                        "per message"
+                    ),
+                ))
+            if advisory_files:
+                cat.results.append(DoctorResult(
+                    name=f"{agent_name}/autonomy-audit-advisories",
+                    severity=Severity.warn,
+                    message=(
+                        f"{agent_name}/autonomy audit — "
+                        f"{len(advisory_files)} record(s) with advisory "
+                        f"findings: {_summarize_paths(advisory_files)}"
+                    ),
+                ))
+
     return cat
 
 
-# ── Category 5: Agent Status ─────────────────────────────────────────────
+# ── Category 5: Agent Registry ───────────────────────────────────────────
+
+
+def check_agent_registry(
+    oacp_dir: Path,
+    yaml_loader: Optional[Any] = None,
+) -> DoctorCategory:
+    """Check that every project agent is present in the instance registry."""
+    cat = DoctorCategory(name="Agent Registry")
+    memberships = discover_project_memberships(oacp_dir)
+    if not memberships:
+        cat.results.append(DoctorResult(
+            name="registry",
+            severity=Severity.ok,
+            message="No project agents found — registry is empty",
+        ))
+        return cat
+
+    loader = yaml_loader
+    if loader is None:
+        yaml_mod = _try_yaml_import()
+        if yaml_mod is not None:
+            loader = yaml_mod.safe_load
+    if loader is None:
+        cat.results.append(DoctorResult(
+            name="registry",
+            severity=Severity.skip,
+            message="Agent registry validation skipped — PyYAML unavailable",
+            fix_hint="Install PyYAML to validate global agent profiles",
+        ))
+        return cat
+
+    missing_count = 0
+    for agent_name, expected_projects in memberships.items():
+        profile_path = oacp_dir / "agents" / agent_name / "profile.yaml"
+        if not profile_path.is_file():
+            missing_count += 1
+            cat.results.append(DoctorResult(
+                name=f"{agent_name}/profile.yaml",
+                severity=Severity.warn,
+                message=(
+                    f"{agent_name}/profile.yaml — missing from instance registry "
+                    f"({len(expected_projects)} project membership(s))"
+                ),
+                fix_hint="Run: oacp agent sync",
+            ))
+            continue
+
+        try:
+            data = loader(profile_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            cat.results.append(DoctorResult(
+                name=f"{agent_name}/profile.yaml",
+                severity=Severity.error,
+                message=f"{agent_name}/profile.yaml — invalid YAML: {exc}",
+                fix_hint="Repair the profile; doctor will not overwrite identity fields",
+            ))
+            continue
+        if not isinstance(data, dict):
+            cat.results.append(DoctorResult(
+                name=f"{agent_name}/profile.yaml",
+                severity=Severity.error,
+                message=f"{agent_name}/profile.yaml — top level must be a mapping",
+                fix_hint="Repair the profile; doctor will not overwrite identity fields",
+            ))
+            continue
+
+        registered = data.get("projects")
+        if not isinstance(registered, list) or not all(
+            isinstance(project, str) for project in registered
+        ):
+            cat.results.append(DoctorResult(
+                name=f"{agent_name}/projects",
+                severity=Severity.error,
+                message=f"{agent_name}/profile.yaml — projects must be a list of strings",
+                fix_hint="Repair projects, then run: oacp agent sync",
+            ))
+            continue
+
+        missing_projects = [
+            project for project in expected_projects if project not in registered
+        ]
+        if missing_projects:
+            missing_count += 1
+            cat.results.append(DoctorResult(
+                name=f"{agent_name}/projects",
+                severity=Severity.warn,
+                message=(
+                    f"{agent_name}/profile.yaml — missing memberships: "
+                    f"{', '.join(missing_projects)}"
+                ),
+                fix_hint="Run: oacp agent sync",
+            ))
+
+    if missing_count == 0 and not any(
+        result.severity == Severity.error for result in cat.results
+    ):
+        cat.results.append(DoctorResult(
+            name="registry",
+            severity=Severity.ok,
+            message=(
+                f"{len(memberships)} agent(s), "
+                f"{sum(len(projects) for projects in memberships.values())} "
+                "project membership(s) — registered"
+            ),
+        ))
+    return cat
+
+
+# ── Category 6: Agent Status ─────────────────────────────────────────────
 
 
 def check_agent_status(
@@ -1505,6 +1698,210 @@ def check_memory_sync(
 # ── Orchestrator ──────────────────────────────────────────────────────────
 
 
+# ── Category 8: Org-Memory Debrief Store ─────────────────────────────────
+
+
+# The agent segment is the protocol's canonical agent grammar (AGENT_RE);
+# the session segment is hyphen-free, so the split-on-last-hyphen parse is
+# deterministic for every valid agent name.
+_AGENT_FRAGMENT = AGENT_RE.pattern.lstrip("^").rstrip("$")
+DEBRIEF_FILENAME_RE = re.compile(
+    rf"^(?P<date>\d{{8}})-(?P<agent>{_AGENT_FRAGMENT})-(?P<session>[a-z0-9]{{1,32}})\.md$"
+)
+
+
+def _valid_debrief_project_segment(name: str) -> bool:
+    # Mirrors the workspace project-name rule: any name that does not start
+    # with '.' and contains no path separators has a valid debrief path.
+    return not name.startswith(".") and "/" not in name and "\\" not in name
+
+
+# ── Debrief store validation scope ───────────────────────────────────────
+# Setup-level by design: the doctor confirms the store exists, the path
+# layout is canonical, and nothing irregular sits in the namespace. It
+# never opens debrief files — content and format verification belong to
+# the writer contract (read-back at publication) and to git history, and
+# the store is written by trusted local agents, so the doctor is a
+# diagnostic for accidental drift, not a security boundary. One working
+# rule: a failed traversal or classification produces an explicit non-ok
+# row, never a clean result.
+
+
+def check_org_memory(oacp_dir: Path) -> DoctorCategory:
+    """Check the org-memory debrief store setup: layout, staging, symlinks."""
+    cat = DoctorCategory(name="Org Memory")
+    org_memory = oacp_dir / "org-memory"
+    if not org_memory.is_dir():
+        cat.results.append(DoctorResult(
+            name="org-memory-dir",
+            severity=Severity.skip,
+            message="org-memory/ — not initialized",
+            fix_hint="Run: oacp org-memory init",
+        ))
+        return cat
+
+    debriefs = org_memory / "debriefs"
+    if not debriefs.is_dir():
+        cat.results.append(DoctorResult(
+            name="debriefs-dir",
+            severity=Severity.warn,
+            message="org-memory/debriefs/ — missing (pre-debrief-store layout)",
+            fix_hint="Run: oacp org-memory init",
+        ))
+        return cat
+    cat.results.append(DoctorResult(
+        name="debriefs-dir",
+        severity=Severity.ok,
+        message="org-memory/debriefs/ — present",
+    ))
+
+    layout_bad: List[str] = []
+    staging: List[str] = []
+    irregular: List[str] = []
+    walk_errors: List[str] = []
+    total = 0
+
+    def _walk_error(exc: OSError) -> None:
+        # A directory the walk cannot enter hides an unknown number of
+        # records; the failure must surface as its own row.
+        location = getattr(exc, "filename", None) or str(debriefs)
+        try:
+            rel_loc = Path(location).relative_to(debriefs).as_posix() or "."
+        except ValueError:
+            rel_loc = str(location)
+        walk_errors.append(f"{rel_loc}: {exc.__class__.__name__}")
+
+    entries: List[Path] = []
+    # followlinks=False so a symlinked directory cannot pull foreign trees
+    # into the store; the link itself is still flagged below.
+    for dirpath, dirnames, filenames in os.walk(
+        debriefs, onerror=_walk_error, followlinks=False
+    ):
+        dpath = Path(dirpath)
+        kept: List[str] = []
+        for dname in sorted(dirnames):
+            entry = dpath / dname
+            try:
+                is_link = entry.is_symlink()
+            except OSError as exc:
+                walk_errors.append(
+                    f"{entry.relative_to(debriefs).as_posix()}: "
+                    f"{exc.__class__.__name__}"
+                )
+                continue
+            if is_link:
+                irregular.append(
+                    entry.relative_to(debriefs).as_posix() + "/ (symlinked directory)"
+                )
+            else:
+                kept.append(dname)
+        dirnames[:] = kept
+        entries.extend(dpath / f for f in filenames)
+
+    for file_path in sorted(entries):
+        rel = file_path.relative_to(debriefs).as_posix()
+        if rel == ".gitkeep":
+            continue
+        # Writer staging artifacts (.stage.<name>.<nonce>) are outside the
+        # canonical namespace; lingering ones mean interrupted publication.
+        if file_path.name.startswith(".stage."):
+            staging.append(rel)
+            continue
+        # The namespace holds regular files reached without following
+        # links; classification failures surface, never raise.
+        try:
+            if file_path.is_symlink():
+                irregular.append(f"{rel} (symlink)")
+                continue
+            regular = file_path.is_file()
+        except OSError as exc:
+            walk_errors.append(f"{rel}: {exc.__class__.__name__}")
+            continue
+        if not regular:
+            irregular.append(f"{rel} (not a regular file)")
+            continue
+        total += 1
+        parts = rel.split("/")
+        match = DEBRIEF_FILENAME_RE.match(parts[-1]) if len(parts) == 4 else None
+        date_valid = False
+        if match is not None:
+            try:
+                dt.datetime.strptime(match.group("date"), "%Y%m%d")
+                date_valid = True
+            except ValueError:
+                pass
+        if (
+            match is None
+            or not date_valid
+            or not _valid_debrief_project_segment(parts[0])
+            or parts[1] != match.group("date")[0:4]
+            or parts[2] != match.group("date")[4:6]
+        ):
+            layout_bad.append(rel)
+
+    if staging:
+        cat.results.append(DoctorResult(
+            name="debriefs-staging",
+            severity=Severity.warn,
+            message=(
+                f"{len(staging)} lingering writer staging artifact(s) "
+                f"(interrupted publication): {_summarize_paths(staging)}"
+            ),
+            fix_hint="The owning writer removes or adopts its stale staging files on retry",
+        ))
+
+    if irregular:
+        cat.results.append(DoctorResult(
+            name="debriefs-irregular",
+            severity=Severity.error,
+            message=(
+                f"{len(irregular)} non-regular entr(ies) under debriefs/ "
+                f"(the store holds regular files, never symlinks): "
+                f"{_summarize_paths(irregular)}"
+            ),
+        ))
+
+    if walk_errors:
+        cat.results.append(DoctorResult(
+            name="debriefs-unreadable",
+            severity=Severity.error,
+            message=(
+                f"{len(walk_errors)} entr(ies) under debriefs/ could not be "
+                f"inspected (setup check incomplete): "
+                f"{_summarize_paths(walk_errors)}"
+            ),
+        ))
+
+    if total == 0:
+        if not walk_errors:
+            cat.results.append(DoctorResult(
+                name="debriefs-layout",
+                severity=Severity.ok,
+                message="debriefs/ — empty store, nothing to validate",
+            ))
+        return cat
+
+    if layout_bad:
+        cat.results.append(DoctorResult(
+            name="debriefs-layout",
+            severity=Severity.error,
+            message=(
+                f"{len(layout_bad)} of {total} debrief file(s) outside the "
+                f"canonical <project>/<YYYY>/<MM>/<YYYYMMDD>-<agent>-<session>.md "
+                f"layout: {_summarize_paths(layout_bad)}"
+            ),
+            fix_hint="Move or rename to the canonical path; never rewrite contents",
+        ))
+    else:
+        cat.results.append(DoctorResult(
+            name="debriefs-layout",
+            severity=Severity.ok,
+            message=f"{total} debrief file(s) — canonical layout",
+        ))
+
+    return cat
+
+
 def run_doctor(
     *,
     project: Optional[str] = None,
@@ -1521,6 +1918,13 @@ def run_doctor(
     # Always run environment checks
     categories.append(check_environment(runner=runner, which_fn=which_fn))
 
+    # Org-memory is opt-in: debrief-store checks run only when it exists
+    if (oacp_dir / "org-memory").is_dir():
+        categories.append(check_org_memory(oacp_dir))
+
+    if (oacp_dir / "projects").is_dir():
+        categories.append(check_agent_registry(oacp_dir, yaml_loader=yaml_loader))
+
     # Workspace checks require a project
     if project:
         project_dir = oacp_dir / "projects" / project
@@ -1530,7 +1934,7 @@ def run_doctor(
                 name="project-dir",
                 severity=Severity.error,
                 message=f"Project directory not found: {project_dir}",
-                fix_hint=f"Run: make init PROJECT={project}",
+                fix_hint=f"Run: oacp init {project}",
             ))
             categories.append(ws_cat)
         else:

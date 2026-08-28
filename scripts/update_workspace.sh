@@ -5,14 +5,14 @@ set -euo pipefail
 
 # update_workspace.sh — idempotent sync of an existing project workspace
 # with the latest directory structure expected by OACP.
-# Directory structure — keep in sync with init_project_workspace.sh
+# Directory structure — keep in sync with init_project_workspace.py (oacp init)
 
 usage() {
   cat <<EOF
 Usage: $0 <project> [--repo /path/to/repo] [--link SRC:DST ...] [--dry-run] [--quiet]
 
 Sync an existing project workspace with the latest directory structure.
-The workspace must already exist (use init_project_workspace.sh to create one).
+The workspace must already exist (use \`oacp init <project>\` to create one).
 
 Options:
   --repo PATH       Set repo root for artifact symlinks.
@@ -66,7 +66,7 @@ done
 # ── Guard: workspace must already exist ──────────────────────────────────
 if [[ ! -d "$PROJECT_ROOT" ]]; then
   echo "Error: workspace '$PROJECT_ROOT' does not exist." >&2
-  echo "Use init_project_workspace.sh to create a new workspace." >&2
+  echo "Use 'oacp init' to create a new workspace." >&2
   exit 2
 fi
 

@@ -1,0 +1,19 @@
+schema_version: 2
+spec_version: "0.4.3"
+created_at_utc: "2026-08-01T01:00:00Z"
+receiver: claude
+sender: alice
+message_id: msg-20260801010000-alice-0005
+message_sha256: 1f0005aa
+decision: auto_accepted
+mode: auto_review
+reason_codes:
+- message_valid
+result:
+  final_state: completed
+  completion_kind: auto_accepted
+  actual_minutes: 12
+  actual_files_touched: 2
+  predicted_risk_materialized: false
+  completed_at_utc: "2026-08-01T02:00:00Z"
+  envelope_enforcement: none

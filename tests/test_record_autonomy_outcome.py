@@ -550,7 +550,7 @@ def test_cli_locks_the_read_modify_write_sequence(
     )
     lock_state = {"held": False}
     real_load = outcome_recorder._load_mapping
-    real_write = outcome_recorder._atomic_write_yaml
+    real_write = outcome_recorder.atomic_replace_yaml
 
     # The lock now lives in the shared stable-audit-lock helper
     # (_oacp_constants.locked_audit), which imports fcntl at call time —
@@ -576,7 +576,7 @@ def test_cli_locks_the_read_modify_write_sequence(
 
     monkeypatch.setattr(fcntl, "flock", fake_flock)
     monkeypatch.setattr(outcome_recorder, "_load_mapping", checked_load)
-    monkeypatch.setattr(outcome_recorder, "_atomic_write_yaml", checked_write)
+    monkeypatch.setattr(outcome_recorder, "atomic_replace_yaml", checked_write)
 
     code = main([
         str(audit_path),

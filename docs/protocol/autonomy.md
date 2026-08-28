@@ -106,6 +106,15 @@ schema-invalid profile pauses with `task_profile_unparsable`; it is not a fatal
 message-schema error. Message types listed in `allow_without_task_profile`, such
 as `brainstorm_request`, may auto-accept without the block.
 
+`expected_files_touched` counts distinct deliverable files only: files created
+or modified as part of the requested outcome or a review-required correction.
+Exclude receiver-local inbox, outbox, audit, memory, cache, and scratch writes
+used for protocol bookkeeping or temporary work. For example, a change to one
+protocol document, one template, and one test declares `3` even when the
+receiver also writes an audit record, reply body, and cache entries; a
+reply-only analysis that uses scratch files but produces no file deliverable
+declares `0`.
+
 ### Default scope envelope (profileless admissions)
 
 `allow_without_task_profile` is an **admission-only exemption**: the sender
@@ -160,11 +169,14 @@ Do not merge, deploy, publish, or touch credentials.
 
 Gate 3 excludes well-formed `oacp-guardrails` fence contents from ordinary
 side-effect, auth/config/secrets, and ambiguous-scope pause classification, but
-records every matching term as a `lexical_advisory`; fenced text is never
-invisible to the audit. Destructive commands, direct main pushes, credential
+records every matching span in `matched_patterns` and logs the term classes as
+`lexical_advisory`; fenced text is never invisible to the audit. Destructive
+commands, direct main pushes, credential
 rotation, dependency installation, public-repository text, memory SSOT text,
 and pricing/commercial content are scanned across the raw body and remain hard
-even inside the fence. An unclosed or differently labeled fence is not skipped.
+even inside the fence (the reply-only carve-out for pricing/commercial content,
+under Gate 3, keys on the declared profile shape, not on fencing). An unclosed
+or differently labeled fence is not skipped.
 
 ## Four-Gate Evaluator
 
@@ -190,6 +202,9 @@ If any required gate is missing or uncertain, the receiver pauses.
      and every other external side-effect class pause, and a declared
      `merges_pr` pauses at admission regardless.
    - Pauses contradictory profile fields with `declaration_error`.
+   - Evaluates every envelope-derived axis before any early return and
+     records the result as the admission ledger (see "Admission ledger"
+     under Audit Events); the verdict is still the first failing axis.
 3. **Receiver classification**
    - Pause unconditionally on destructive command tokens: `rm -rf`, `--force`,
      `--no-verify`, `--dangerously-skip-permissions`.
@@ -215,8 +230,11 @@ If any required gate is missing or uncertain, the receiver pauses.
      `skip` and `without` remain same-clause only because their ordinary prose
      uses are ambiguous. Heading scope ends at the first blank line or next
      heading, so the first governed line must follow the heading directly.
-     Non-demotable hard stops remain hard even when they appear in such a
-     clause or block.
+     Direct-main pushes, credential rotation, memory-SSOT scope, and
+     pricing/commercial content remain hard even when they appear in such a
+     clause or block. Dependency-install and public-repository matches receive
+     this context handling only for the proven negated/out-of-scope forms;
+     affirmative forms remain hard.
    - With a complete profile, demote side-effect or sensitive-scope lexical
      matches to a logged `lexical_advisory` when the corresponding declaration
      is `false`. Missing/unparsable profiles and contradictory declarations do
@@ -224,12 +242,35 @@ If any required gate is missing or uncertain, the receiver pauses.
    - When policy explicitly uses `external_side_effects: allow`, declared
      ordinary external side-effect verbs are also advisory; non-demotable hard
      stops remain hard.
+   - Treat the repository-setting phrase `merge method` and descriptive
+     dependency-introspection wording such as `what pip install pulls` as
+     reference-only advisories. This is a narrow contextual classification,
+     not removal or weakening of the merge or dependency-install classes;
+     affirmative action wording follows the existing hard-stop or granular
+     declaration path.
    - Pause when the body touches declared auth/config/secrets/credentials or
      public-repository scope, or any memory SSOT scope.
-   - Keep `commercial`, `pricing`, public-repository text, and memory SSOT text
-     hard with no fence or negation demotion. Pricing/commercial matches are
-     reported separately as `hard_stop_content_sensitivity` rather than action
-     risk.
+   - Keep `commercial`, `pricing`, affirmative public-repository text, and
+     memory SSOT text hard. Pricing/commercial matches receive no fence or
+     negation demotion and are reported separately as
+     `hard_stop_content_sensitivity` rather than action risk.
+   - Reply-only carve-out for pricing/commercial content. The category was
+     ruled always-hard — "`commercial`/`pricing` pauses stay HARD, relabeled a
+     *content-sensitivity* category (out of the action-risk FP stats)" — and
+     that ruling is amended for exactly one profile shape: a complete task
+     profile that declares `sends_oacp_reply_only: true` **and** every other
+     side-effect flag false (`external_side_effects`, `creates_or_updates_pr`,
+     `comments_on_github`, `commits_changes`, `merges_pr`, `files_issues`).
+     For that shape a pricing/commercial match does not pause: every matching
+     term is recorded as a `lexical_advisory_reply_only` note carrying the
+     term and as structured span provenance whose `demotion_basis` is
+     `reply_only_advisory`, recorded ahead of the other Gate-3 classes so the
+     advisory survives whichever hard stop or axis governs the verdict, and
+     the verdict comes from the remaining axes. Any
+     other shape keeps the hard stop: a side-effect flag `true`, a profile that
+     omits `sends_oacp_reply_only`, a missing, unparsable, or contradictory
+     profile, and the profileless default envelope (reply-only by bound, but it
+     declares nothing). Fencing and negation still never demote the category.
    - Pause when file scope is ambiguous or broader than the declared profile.
 4. **Runtime/workspace**
    - Worktree is clean or the task can be isolated to a fresh branch.
@@ -244,7 +285,10 @@ cannot override hard stops.
 Regardless of autonomy mode, receivers must pause on destructive command tokens
 (`rm -rf`, `--force`, `--no-verify`,
 `--dangerously-skip-permissions`), direct main pushes, credential rotation,
-dependency installation, memory SSOT scope, and pricing/commercial content.
+affirmative dependency installation, memory SSOT scope, and
+pricing/commercial content —
+the last with the single declared reply-only profile-shape carve-out described
+under Gate 3, where it records as an advisory instead.
 Declared auth/config/secrets/dependencies/public scope still pauses through Gate
 2. The only standard external-side-effect exception is the configured
 `allow_pr_artifacts` private-repository class described above.
@@ -303,6 +347,15 @@ task_profile:
   continuation_grants: {}
 breached: []
 co_occurring_reason_codes: []
+admission_axes:
+  evaluated: true
+  thresholds: []
+  declared_risk: []
+  declaration: []
+  side_effects: []
+  continuation_grant: []
+  declaration_errors: []
+matched_patterns: []
 runtime:
   agent: codex
   model: gpt-5            # serving model, normalized at the writer; null only with a reason
@@ -317,6 +370,7 @@ result:
   completion_kind: auto_accepted
   actual_minutes: null
   actual_files_touched: null
+  work_started_at_utc: null
   predicted_risk_materialized: false
   completed_at_utc: null
   envelope_enforcement: none
@@ -329,6 +383,7 @@ result:
     breached_fields: []
     declaration_errors: []
     breach_basis: null
+    breach_sub_basis: null
     paused_at_utc: null
     action: not_evaluated
     predicted_risk_materialized: false
@@ -429,6 +484,93 @@ deduplicated against `reason_codes`, and empty on auto-accepted decisions.
 Threshold-calibration analytics should read `reason_codes` and
 `co_occurring_reason_codes` together.
 
+### Lexical provenance
+
+`matched_patterns` is a source-ordered list of every autonomy lexical match,
+including the profileless-risk vocabulary and every Gate-3 class, not only the
+match that drove the verdict. Each entry has this additive shape:
+
+```yaml
+matched_patterns:
+  - pattern: merge
+    category: side_effect
+    span: {start: 48, end: 53}
+    demotion_basis: reference_only
+```
+
+`span` is a zero-based, end-exclusive Unicode-code-point range in the original
+message body. `demotion_basis` records why the hit was demoted or why it stayed
+operative: `negated`, `reference_only`, `guardrails_fence`, `profile_false`,
+`profile_true`, `policy_allowed`, `reply_only_advisory`, `affirmative`,
+`profileless_type`, `profileless_risk`, or `non_demotable`.
+Contextual demotion is occurrence-scoped: negated or descriptive wording that
+demotes one match does not demote a later affirmative match in the same clause,
+and a match that spans a clause boundary remains non-demotable. A later
+dependency-install or public-repository occurrence requires its own negation
+after the preceding class cue; the evaluator does not infer scope from a list
+of contrast words. Dependency-install matching also stops at another install
+verb, and an otherwise demotable match containing its own negation stays hard
+as ambiguous. The first occurrence is demoted only when a narrow recognized
+negation form demonstrably governs that occurrence (including the proven
+direct dependency-install, direct public-repository action, and out-of-scope
+public-repository forms); an unrelated negation earlier in the clause is not a
+basis, and unrecognized governance fails closed. A recognized governance form
+also fails closed when another negation term precedes its proving term in the
+same governance prefix; this deliberately keeps both inverting and reinforcing
+stacked-negation constructions hard because their polarity is ambiguous.
+Pricing/commercial matches therefore
+distinguish the declared reply-only advisory shape from the otherwise
+non-demotable content-sensitivity class without changing the class policy.
+
+The legacy singular `matched_pattern` remains on a paused decision and still
+names the first blocking match. `logged_notes` remains the compatibility
+surface for advisory reason codes. New readers use `matched_patterns` for
+complete forensic evidence and must not infer that a missing singular field
+means no lexical term matched.
+
+### Admission ledger
+
+`admission_axes` is the structured record of every envelope-derived
+admission axis, evaluated in full before any early return — the Gate-3
+lexical returns and every Gate-2 return alike — so a pause taken for one
+reason never leaves another axis unrecorded. Each axis lists the pinned
+reason codes that held (empty means passed), in evaluation order:
+
+| Axis | Reason codes |
+|---|---|
+| `thresholds` | `estimated_minutes_exceeds_threshold`, `expected_files_touched_exceeds_threshold` |
+| `declared_risk` | `destructive_ops_pause`, `auth_config_or_secrets_pause`, `dependency_changes_pause`, `public_visibility_pause` |
+| `declaration` | `declaration_error` |
+| `side_effects` | `merges_pr_pause`, `external_side_effects_not_pr_artifact`, `external_side_effects_pause`, and the granular `<capability>_pause` codes |
+| `continuation_grant` | the `continuation_grant_*` codes, including `continuation_grant_scope_exceeded` |
+
+The ledger is evidence, never verdict: `reason_codes` keep the pinned
+first-failure shape, and every other axis the ledger holds surfaces
+through `co_occurring_reason_codes`, which is therefore complete for the
+envelope-derived axes — silence there means passed. `evaluated: false`
+with every axis `null` marks a pause taken before a scope envelope
+existed (malformed config, `always_pause` mode, message-integrity
+failures, a missing or unparsable profile, review-lifecycle admissions):
+nothing was evaluated, and the record says so instead of reading as "all
+passed". Lexical classification is body-derived: `matched_patterns` records
+every hit, while the compatibility field `matched_pattern` names the first
+blocking hit. Neither is a ledger axis.
+
+`declaration_errors` carries the cause of an admission-time
+`declaration_error`: the contradicted field, its declared value, and the
+declared fields it conflicts with — for example
+`task_profile.external_side_effects` declared `false` against
+`task_profile.commits_changes`. The field paths also land in `breached`,
+as before.
+
+Admission and checkpoint evidence never overwrite each other. The ledger
+and `co_occurring_reason_codes` describe admission only and are left
+untouched by every later write; checkpoint outcomes live in
+`result.threshold_checkpoint`. A receiver-side checkpoint update that
+replaces `reason_codes` with a checkpoint reason discards the admission
+history — the finalizer (`oacp autonomy-finalize --checkpoint`) is the
+write path precisely because it leaves the admission fields alone.
+
 ### Pinned completion_kind taxonomy
 
 `result.completion_kind` names the terminal shape of the **evaluation** only —
@@ -520,6 +662,143 @@ grant request never prevents recording the task-level outcome; the recorder
 sets `grant.request_error` and requires an explicit replacement scope before
 that malformed request can be approved or modified.
 
+### Terminal finalization and audit integrity
+
+Every receiver-side write to an audit record after admission goes through
+one lock-aware code path:
+
+```bash
+# mid-task §E checkpoint (same points on every receiver)
+oacp autonomy-finalize <audit.yaml> --checkpoint --actuals <actuals.yaml>
+
+# terminal update
+oacp autonomy-finalize <audit.yaml> --final-state done \
+  --actual-minutes 30 --actual-files-touched 3 \
+  --realized creates_or_updates_pr --realized commits_changes \
+  --reply-message-id <msg-id>
+```
+
+Hand-edited terminal blocks are what produced off-enum vocabulary,
+duplicate live evaluations, and terminal records still carrying a paused
+checkpoint action; the finalizer enforces the pinned enums and
+cross-field invariants at write time, under the shared audit lock.
+
+**Run-state vocabulary.** `result.final_state` splits by lifecycle phase:
+`pending`, `paused`, and `blocked` are live states; `done`, `superseded`,
+and `error` are terminal. Only terminal states can be finalized.
+`pending` is receiver-written (an admission record picked up for
+execution) — the evaluator itself never writes it.
+
+**Invariants (terminal ⇒ not paused).** Finalizing `done` requires: a
+recorded human outcome when the admission decision was `paused`; a
+resolved checkpoint (a `resumed` re-authorization disposition, or a
+post-pause human outcome) when the record's checkpoint breached; and no
+live sibling evaluation of the same logical message. A still-paused
+checkpoint `action` reconciles to `resumed_after_reauthorization` at
+finalization once its re-authorization resolved — but an answered pause
+covers only what was paused and granted: every final axis is still
+compared against the resolved scope (the envelope, an accepted grant,
+the recorded re-authorization scope, and the answered pause's own
+realized effects), and any new expansion — an uncovered realized effect,
+a numeric beyond a scoped re-authorization budget, or a numeric beyond
+the pause-time extent a scope-less approval cleared — refuses terminal
+reconciliation and routes through a fresh `--checkpoint` with
+re-authorization input. Realized effects are monotonic evidence: a
+`true` checkpoint value carries forward when terminal actuals omit it,
+and an explicit terminal `false` against a recorded `true` is refused as
+contradictory under-reporting. A mid-task `--checkpoint` refuses a closed
+record outright (completion evidence present, or superseded): a
+checkpoint never reopens terminal state. `completion_kind` is never
+receiver-composed: a record whose kind or state is off-enum is refused
+for `done`/`error` — it is closed via supersession, never edited in
+place.
+
+**Terminal checkpoint parity.** Finalizing `done` on an envelope-bearing
+record always evaluates the §E threshold checkpoint against the final
+actuals, whichever receiver writes it. Within the envelope, the
+checkpoint records `within_declared_envelope` (or
+`continued_with_grant`) and the terminal write proceeds; a breach leaves
+the record checkpoint-paused (exit code 4) and the §E re-authorization
+flow applies before any terminal state can be written. Realized effects
+use the canonical axis names only: `actual_minutes`,
+`actual_files_touched`, `side_effects_actual.<capability>`, and
+`task_profile.<field>` for declared-intent corrections.
+
+**Evaluation identity and supersession.** Every persisted evaluation
+carries an `evaluation_id` derived from receiver, message id, message
+bytes, and evaluation time. Re-evaluating a message the evaluator
+already recorded adopts the existing record when nothing changed (same
+bytes, same policy, same verdict — no duplicate is written) and
+supersedes it otherwise: the new record references its predecessor via
+`supersedes_evaluation_id`, and the predecessor closes with
+`final_state: superseded` plus `superseded_by_evaluation_id` — a state
+update, never a rewrite of what it said. The prior scan, the
+adopt-or-write choice, and predecessor supersession run as one
+transaction under a stable lock keyed by (receiver, message id), so
+concurrent evaluations of the same logical message serialize instead of
+both staying live; adoption also self-heals a crashed predecessor
+transaction by superseding any other live prior it finds, stamping the
+adopted survivor's `evaluation_id` and `superseded_evaluation_ids` so
+every healed predecessor stays resolvable. When one successor closes
+several live priors, it lists all of them in
+`superseded_evaluation_ids` alongside the single-valued
+`supersedes_evaluation_id` (the newest). The transaction fails closed
+and is rollback-capable for every failure class, validation and
+filesystem alike: every live predecessor is strict-load preflighted
+before anything is written, so ambiguous predecessor evidence
+(duplicate-key YAML) fails the whole evaluation with nothing persisted
+and the malformed bytes untouched; any later failure restores every
+already-mutated predecessor byte-for-byte (read-back verified) and
+removes a just-written successor before raising — never a partial
+success that leaves two live evaluations or a predecessor linked to a
+successor that no longer exists. Every superseded record must name its
+successor, and resolution is strict: `--superseded-by` is mandatory on
+the supersession transition and must resolve to exactly one other
+evaluation in the same audit directory carrying the same receiver and
+message id and referencing the predecessor back through
+`supersedes_evaluation_id` or `superseded_evaluation_ids` — a record
+merely carrying the id (unrelated identity, ambiguous holders, no
+back-reference) is refused, only strict duplicate-key-refusing bytes
+serve as successor evidence, and the sweep flags dangling,
+self-referential, ambiguous, or unrelated-identity successor chains.
+The transaction pre-acquires every affected record's per-file audit
+lock in deterministic order and holds them across capture, mutation,
+and restore — the newly created successor included, its lock entered
+before publication and held until the transaction commits or rolls
+back — so conforming per-record writers (human-outcome recording,
+`message_auth` attachment) serialize with it rather than losing a
+committed update to its rollback.
+The supersession transition is also the documented
+repair for legacy off-enum records — it bypasses the enum guards,
+preserves the off-enum `completion_kind`, and stashes an off-enum run
+state as `result.legacy_final_state` before overwriting it. Superseded
+records are transparent to envelope-clear validation, excluded from live
+duplicate detection, and skipped by the off-enum sweep checks (their
+history is closed); exactly one evaluation per logical message stays
+live.
+
+**Legacy vocabulary.** Records written before this rail carry off-enum
+values; the canonical mapping is documentation for collectors, not a
+rewrite instruction — `executed` and `review_round_delivered` map to
+`auto_accepted`, `human_approved_completed` and
+`completed_after_human_approval` to `admission_paused`, and
+`final_state: completed` to `done`. `superseded` itself is pinned, not
+legacy.
+
+**Validation.** `oacp autonomy-finalize <record> --validate [--sweep]`
+reports pinned finding codes (`off_enum_completion_kind`,
+`off_enum_final_state`, `duplicate_logical_id`, `duplicate_yaml_key`,
+`paused_terminal_checkpoint_action`, `paused_terminal_completed`,
+`terminal_paused_without_outcome`, `superseded_missing_successor`,
+`breached_empty_fields`, `invalid_human_outcome`,
+`decision_kind_incoherent`, `off_enum_breach_basis`,
+`breach_basis_incoherent`, `record_unparsable`; advisory:
+`noncanonical_checkpoint_axis`, `terminal_missing_actuals`), and
+`oacp doctor` sweeps every receiver's audit directory with the same
+checks. Duplicate YAML keys are refused
+outright — plain YAML loading silently keeps the later value. The
+fixture set lives in `tests/conformance/autonomy/records/`.
+
 ### Pinned reason-code taxonomy
 
 Evaluator implementations must reject unpinned reason codes. The canonical
@@ -610,12 +889,25 @@ Decision trace:
 - Gate 3 fails: body matches `rm -rf`.
 - Decision: `paused`.
 - Reason codes: `hard_stop_destructive_command`.
-- Audit event includes `matched_pattern: "rm -rf"`.
+- Audit event includes legacy `matched_pattern: "rm -rf"` plus a
+  `matched_patterns` entry with its exact source span and
+  `demotion_basis: non_demotable`.
 
 The receiver must pause before any action runs. No autonomy mode can override
 the hard stop.
 
 ## Threshold-Exceeded Checkpoint
+
+`result.work_started_at_utc` is the receiver-stamped time of its first action
+on that task. `actual_minutes` is active wall-clock time from that stamp to
+completion or the current checkpoint, rounded up to a whole minute, excluding
+each represented re-authorization pause from `paused_at_utc` through
+`cleared_paused_at_utc`. If a terminal outcome leaves that pause uncleared,
+active work ends at `paused_at_utc`; the subsequent paused wait does not count.
+The current record shape represents at most its current pause interval.
+Admission-to-start idle time never counts; time waiting on a peer reviewer does
+count because it is part of that task's review loop. Serialized tasks admitted
+together therefore stamp and measure their own starts independently.
 
 Receivers must evaluate a threshold checkpoint if work expands beyond the
 declared scope envelope after acceptance:
@@ -646,6 +938,7 @@ result:
     breached_fields:
       - actual_files_touched
     breach_basis: realized
+    breach_sub_basis: null
     paused_at_utc: "2026-05-12T13:48:25Z"
     action: paused_for_reauthorization
 ```
@@ -668,6 +961,26 @@ A breached checkpoint stamps two fields beyond the breach itself:
   `declared_intent` record legitimately combines `breached: true` with
   all-false realized effects and low actual counts — the sender's
   under-declaration was caught, not an executed drift.
+- `breach_sub_basis` — optional refinement of a `realized` breach on the
+  time axis (`actual_minutes` in `breached_fields`). The only pinned
+  value is `waiting_on_peer`: the clock overran while the receiver was
+  waiting on a peer reply (a review round, a re-authorization answer)
+  rather than working, so the ledger can separate review latency from
+  working time when calibrating the time axis. Receivers pass it in the
+  checkpoint actuals (`actuals.breach_sub_basis`); it is `null` on every
+  other checkpoint. An off-vocabulary value, or the value on an
+  unbreached checkpoint, on a `declared_intent` breach, or on a breach
+  that does not include the time axis, is rejected rather than recorded —
+  and the same grammar is enforced on read-back: the audit validator
+  (`oacp autonomy-finalize --validate`, `oacp doctor`, and the finalizer's
+  own residual check) reports `off_enum_breach_basis` /
+  `breach_basis_incoherent` on a persisted `breach_basis` or
+  `breach_sub_basis` that the evaluator would have refused — an
+  off-vocabulary value, a basis on an unbreached checkpoint, a sub-basis
+  off the realized time axis, or an enum-valid basis on the opposite
+  breach source (`declared_intent` over realized axes, realized effects,
+  or materialized risk; `realized` over `task_profile.*` corrections) —
+  so stored ledger evidence cannot drift off the grammar by hand-editing.
 
 A prospective correction is expressed through its own checkpoint input,
 never by marking a realized effect true (that would assert an outward
@@ -790,7 +1103,7 @@ threshold_checkpoint:
     scope:                          # the effective grant — policy-capped;
       max_actual_minutes: 30        # the durable value later checkpoints
     disposition: resumed            # and envelope recompiles consume
-    cleared_paused_at_utc: "2026-05-12T12:30:00Z"
+    cleared_paused_at_utc: "2026-05-12T12:50:00Z"
     advisory:
       - channel: sender_reply
         decision: approved
@@ -840,11 +1153,11 @@ through a standing granted scope is spent. Presenting it against a new
 breach is a reuse attempt and fails with `checkpoint_reauthorization_stale`.
 
 Consumption state lives on the audit record: the
-`threshold_checkpoint.reauthorization` block binds the governing answer to
-the pause it cleared (`cleared_paused_at_utc`) and preserves the granted
-scope for later checkpoints. A new checkpoint re-stamps `paused_at_utc`;
-whether prior answers still cover it is decided by the arbitration above,
-never by implicit trust.
+`threshold_checkpoint.reauthorization` block records when the governing
+answer cleared the current `paused_at_utc` interval in
+`cleared_paused_at_utc` and preserves the granted scope for later checkpoints.
+A new checkpoint re-stamps `paused_at_utc`; whether prior answers still cover
+it is decided by the arbitration above, never by implicit trust.
 
 ### Boundary-action grants
 
@@ -1075,7 +1388,9 @@ Runtime decisions:
 - Protocol bookkeeping never consumes the file budget. The receiver's own
   `audit/`, `inbox/`, and `outbox/` directories and the runtime scratchpad
   (reply/body-file composition) are the enforcement layer's instrumentation
-  surfaces, not task scope: writes there skip the counter entirely. The
+  surfaces, not task scope: writes there skip the counter entirely.
+  `audit/autonomy_decisions/` is the exception carved out of `audit/` — it
+  is authority, not instrumentation (see below). The
   exemption is receiver-scoped (a peer agent's directories are task scope),
   containment is judged on resolved filesystem targets (a symlink planted
   under an exempt root that points into ordinary task scope stays counted),
@@ -1084,19 +1399,29 @@ Runtime decisions:
   `config.yaml` sits outside the exempt directories. Without this class, a
   tightly declared task is guaranteed to trip the ceiling at close-out on
   its own mandatory audit write.
-- Two receiver surfaces are the opposite of exempt. The receiver's `state/`
-  directory holds the active envelope itself: writing, removing,
-  relocating, or copying anything under it from inside the session is
-  denied as envelope self-modification, categorically — filesystem-mutator
-  operands (`rm`, `unlink`, `mv`, `cp`, …) are gated by resolved path
-  regardless of source/destination role, not just write targets. Operands
-  are judged as the utility parses them (GNU target-directory spellings and
-  `--` included), and mutator operands or Bash write targets bearing shell
-  expansion syntax escalate to **ask** — the shell expands patterns after
-  classification, so a literal spelling proves nothing about the effective
-  target. Trust
-  roots (the receiver's `trust/` pins and the project trust catalog) are
-  authority-bearing auth configuration: writes and mutations are denied
+- Two receiver surfaces are **authority**: the opposite of exempt, and
+  governed by one boundary rather than two. The receiver's `state/`
+  directory holds the active envelope itself; its
+  `audit/autonomy_decisions/` directory holds the records whose recorded
+  re-authorization can widen that envelope's live file bound. Writing,
+  removing, relocating, or copying anything under either from inside the
+  session is denied as authority self-modification, categorically —
+  filesystem-mutator operands (`rm`, `unlink`, `mv`, `cp`, …) are gated by
+  resolved path regardless of source/destination role, not just write
+  targets, because deleting or relocating a record changes which record
+  governs just as surely as rewriting one. Operands are judged as the
+  utility parses them (GNU target-directory spellings and `--` included),
+  and mutator operands or Bash write targets bearing shell expansion syntax
+  escalate to **ask** — the shell expands patterns after classification, so
+  a literal spelling proves nothing about the effective target. The
+  canonical audit writers (`oacp autonomy-finalize`,
+  `oacp autonomy-outcome`, `oacp verify --attach-audit`) reach the record
+  as classified commands that escalate for review, never as file writes.
+  The boundary is deliberately scoped to the session the envelope binds: it
+  is the *self*-authorization path that must close, and a concurrent
+  session is already outside that envelope's reach.
+- Trust roots (the receiver's `trust/` pins and the project trust catalog)
+  are authority-bearing auth configuration: writes and mutations are denied
   unless the envelope declares `touches_auth_config_or_secrets`, and even
   then they count as ordinary task scope. CLI-mediated updates
   (`oacp trust import`) are classified as commands and escalate for review
@@ -1128,9 +1453,11 @@ to a safe-id grammar at compile time) never reaches a filesystem glob:
   record cannot be validated in-session and escalates to **ask**.
 
 The ordering this creates is deliberate: finish the task, update the audit
-record's `result` block (a bookkeeping write, exempt from the counter),
-then clear. `oacp envelope compile` from inside the session stays denied
-unconditionally — completion sanctions the exit, never recompilation.
+record's `result` block through the canonical writer (`oacp
+autonomy-finalize`; a direct write to the record is denied as authority
+self-modification), then clear. `oacp envelope compile` from inside the
+session stays denied unconditionally — completion sanctions the exit, never
+recompilation.
 
 ### Envelope drift
 
@@ -1141,6 +1468,15 @@ active task id when available. This forces the Threshold-Exceeded Checkpoint
 protocol above: the deny fires once, the session stops, notifies the sender,
 and awaits re-authorization. A revised profile is recompiled with `oacp
 envelope compile --extend`, which preserves accumulated counters.
+
+A granted re-authorization takes effect without that recompile, which is
+denied from inside the bound session: the adapter reads the governing audit
+record's `threshold_checkpoint.reauthorization.scope` at enforcement time and
+overlays it on the compiled envelope, so the effective ceiling is
+`expected_files_touched` widened to the granted `max_actual_files_touched` —
+never past it, never below it, and never from a scope-less approval, which
+grants nothing durable. The envelope itself stays immutable; only `scope`
+(the policy-capped value) is consulted, never `requested_scope`.
 
 ### Enforcement recording
 
@@ -1351,11 +1687,12 @@ the accepted `review_continuation.scope`.
 
 Audit `result.final_state` is limited to:
 
-- `done`
-- `paused`
-- `blocked`
-- `superseded`
-- `error`
+- `pending` (live; receiver-written at pickup — the evaluator never writes it)
+- `paused` (live)
+- `blocked` (live)
+- `done` (terminal)
+- `superseded` (terminal; see "Terminal finalization and audit integrity")
+- `error` (terminal)
 
 `result.completion_kind` is separately pinned to the evaluation-shape enum
 above (see "Pinned completion_kind taxonomy"). Missing-profile messages that

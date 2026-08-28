@@ -33,5 +33,5 @@ expected:
         decided_at_utc: "2026-05-12T12:50:00Z"
         actor: alice
         disposition: resumed
-        cleared_paused_at_utc: "2026-05-12T12:30:00Z"
+        cleared_paused_at_utc: "2026-05-12T12:50:00Z"
         advisory: []

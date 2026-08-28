@@ -1,0 +1,46 @@
+# Expected validator/sweep finding codes per record, pinned like the
+# decision-contract fixtures. Codes come from
+# scripts/finalize_autonomy_record.py FINDING_SEVERITIES; the runner is
+# tests/test_audit_record_conformance.py, which sweeps this directory and
+# compares exact code multisets.
+breached_empty_fields.yaml:
+- breached_empty_fields
+breach_basis_source_mismatch.yaml:
+- breach_basis_incoherent
+clean_terminal_done.yaml: []
+duplicate_live_a.yaml:
+- duplicate_logical_id
+duplicate_live_b.yaml:
+- duplicate_logical_id
+duplicate_yaml_key_logged_notes.yaml:
+- duplicate_yaml_key
+final_state_superseded_valid.yaml: []
+inconsistent_work_clock.yaml:
+- work_started_before_admission
+- actual_minutes_inconsistent
+noncanonical_axis_names.yaml:
+- noncanonical_checkpoint_axis
+- noncanonical_checkpoint_axis
+off_enum_final_state_completed.yaml:
+- off_enum_final_state
+off_enum_kind_completed_after_human_approval.yaml:
+- off_enum_completion_kind
+off_enum_kind_executed.yaml:
+- off_enum_completion_kind
+off_enum_kind_human_approved_completed.yaml:
+- off_enum_completion_kind
+off_enum_kind_review_round_delivered.yaml:
+- off_enum_completion_kind
+superseded_legacy_kind_repaired.yaml: []
+superseded_legacy_successor_live.yaml: []
+superseded_successor_live.yaml: []
+superseded_missing_successor.yaml:
+- superseded_missing_successor
+superseded_unrelated_successor.yaml:
+- superseded_missing_successor
+unrelated_identity_holder_live.yaml: []
+paused_terminal_action_unreconciled.yaml:
+- paused_terminal_checkpoint_action
+paused_terminal_completed_stamp.yaml:
+- paused_terminal_completed
+serialized_wave_item.yaml: []

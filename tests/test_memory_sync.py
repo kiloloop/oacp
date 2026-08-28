@@ -300,3 +300,32 @@ def test_canonical_gitignore_denies_keystore_last() -> None:
     assert lines.index("keys/") > max(
         i for i, line in enumerate(lines) if line.startswith("!")
     )
+
+
+def test_debrief_paths_are_allowed_memory_paths() -> None:
+    # The central debrief store must sync cross-machine: every path under
+    # org-memory/debriefs/** is inside the memory allowlist.
+    from memory_sync import is_allowed_memory_path
+
+    allowed = [
+        "org-memory/debriefs/.gitkeep",
+        "org-memory/debriefs/demo-project/2026/08/20260825-alice-1f3a9c2b.md",
+    ]
+    for path in allowed:
+        assert is_allowed_memory_path(path), path
+
+
+def test_canonical_gitignore_syncs_nested_debrief_files(tmp_path: Path) -> None:
+    # The canonical allowlist must actually stage deeply nested debrief
+    # files (project/year/month), not just top-level org-memory content.
+    repo = tmp_path / "oacp"
+    _git("init", str(repo))
+    _configure_identity(repo)
+    _write(repo / ".gitignore", CANONICAL_MEMORY_GITIGNORE)
+    debrief = "org-memory/debriefs/demo-project/2026/08/20260825-alice-1f3a9c2b.md"
+    _write(repo / debrief, "---\nschema_version: 1\n---\nbody\n")
+    _write(repo / "org-memory" / "debriefs" / ".gitkeep", "")
+    _git("add", "-A", cwd=repo)
+    tracked = _git("ls-files", cwd=repo).splitlines()
+    assert debrief in tracked
+    assert "org-memory/debriefs/.gitkeep" in tracked

@@ -25,6 +25,7 @@ from oacp_doctor import (  # noqa: E402
     Severity,
     apply_fixes,
     check_autonomy,
+    check_agent_registry,
     check_agent_status,
     check_environment,
     check_inbox_health,
@@ -447,6 +448,85 @@ class TestAutonomyConfig(unittest.TestCase):
             policy_refs = next(r for r in cat.results if "policy-refs" in r.name)
             self.assertEqual(policy_refs.severity, Severity.warn)
 
+    def test_check_autonomy_audit_sweep_flags_off_enum_record(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_dir = Path(td)
+            audit_dir = project_dir / "agents" / "codex" / "audit" / "autonomy_decisions"
+            audit_dir.mkdir(parents=True)
+            _write(
+                audit_dir / "20260512T132325Z_msg-demo.yaml",
+                (
+                    "schema_version: 2\n"
+                    "receiver: codex\n"
+                    "message_id: msg-demo\n"
+                    "decision: auto_accepted\n"
+                    "result:\n"
+                    "  final_state: done\n"
+                    "  completion_kind: executed\n"
+                ),
+            )
+            import yaml
+
+            cat = check_autonomy(project_dir, yaml_loader=yaml.safe_load)
+            integrity = next(
+                r for r in cat.results if "audit-integrity" in r.name
+            )
+            self.assertEqual(integrity.severity, Severity.error)
+            self.assertIn("integrity errors", integrity.message)
+
+    def test_check_autonomy_audit_sweep_flags_duplicate_live_records(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_dir = Path(td)
+            audit_dir = project_dir / "agents" / "codex" / "audit" / "autonomy_decisions"
+            audit_dir.mkdir(parents=True)
+            record = (
+                "schema_version: 2\n"
+                "receiver: codex\n"
+                "message_id: msg-demo\n"
+                "decision: paused\n"
+                "result:\n"
+                "  final_state: paused\n"
+                "  completion_kind: admission_paused\n"
+            )
+            _write(audit_dir / "20260512T132325Z_msg-demo.yaml", record)
+            _write(audit_dir / "20260512T142325Z_msg-demo.yaml", record)
+            import yaml
+
+            cat = check_autonomy(project_dir, yaml_loader=yaml.safe_load)
+            duplicates = next(
+                r for r in cat.results if "audit-duplicates" in r.name
+            )
+            self.assertEqual(duplicates.severity, Severity.error)
+
+    def test_check_autonomy_audit_sweep_clean_dir_reports_ok(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_dir = Path(td)
+            audit_dir = project_dir / "agents" / "codex" / "audit" / "autonomy_decisions"
+            audit_dir.mkdir(parents=True)
+            _write(
+                audit_dir / "20260512T132325Z_msg-demo.yaml",
+                (
+                    "schema_version: 2\n"
+                    "receiver: codex\n"
+                    "message_id: msg-demo\n"
+                    "decision: paused\n"
+                    "result:\n"
+                    "  final_state: paused\n"
+                    "  completion_kind: admission_paused\n"
+                ),
+            )
+            import yaml
+
+            cat = check_autonomy(project_dir, yaml_loader=yaml.safe_load)
+            integrity = next(
+                r for r in cat.results if "audit-integrity" in r.name
+            )
+            self.assertEqual(integrity.severity, Severity.ok)
+            duplicates = next(
+                r for r in cat.results if "audit-duplicates" in r.name
+            )
+            self.assertEqual(duplicates.severity, Severity.ok)
+
 
 class TestCheckAgentStatus(unittest.TestCase):
     def test_present_fresh_status(self) -> None:
@@ -500,6 +580,52 @@ class TestCheckAgentStatus(unittest.TestCase):
             cat = check_agent_status(project_dir)
             self.assertEqual(cat.results[0].severity, Severity.warn)
             self.assertIn("not found", cat.results[0].message)
+
+
+class TestCheckAgentRegistry(unittest.TestCase):
+    def test_missing_profiles_and_memberships_warn(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "projects" / "alpha" / "agents" / "claude").mkdir(
+                parents=True
+            )
+            (root / "projects" / "beta" / "agents" / "claude").mkdir(
+                parents=True
+            )
+            _write(
+                root / "agents" / "claude" / "profile.yaml",
+                "name: claude\nruntime: claude\nprojects: [alpha]\n",
+            )
+
+            import yaml
+
+            cat = check_agent_registry(root, yaml_loader=yaml.safe_load)
+            self.assertEqual(cat.name, "Agent Registry")
+            self.assertEqual(cat.results[0].severity, Severity.warn)
+            self.assertIn("beta", cat.results[0].message)
+            self.assertIn("oacp agent sync", cat.results[0].fix_hint)
+
+    def test_synced_registry_is_clean(self) -> None:
+        from agent_profile import sync_agent_registry
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for project, agent in (
+                ("alpha", "claude"),
+                ("beta", "claude"),
+                ("beta", "carol"),
+            ):
+                (root / "projects" / project / "agents" / agent).mkdir(
+                    parents=True
+                )
+
+            sync_agent_registry(root)
+
+            import yaml
+
+            cat = check_agent_registry(root, yaml_loader=yaml.safe_load)
+            self.assertTrue(all(r.severity == Severity.ok for r in cat.results))
+            self.assertIn("2 agent(s), 3 project membership(s)", cat.results[0].message)
 
 
 class TestSeverityAggregation(unittest.TestCase):
@@ -637,11 +763,12 @@ class TestRunDoctor(unittest.TestCase):
                 runner=runner,
                 which_fn=which,
             )
-            # Environment + Workspace + Inbox Health + Schemas + Autonomy
-            # + Agent Status + Trust Root = 7
-            self.assertEqual(len(cats), 7)
+            # Environment + Agent Registry + Workspace + Inbox Health + Schemas
+            # + Autonomy + Agent Status + Trust Root = 8
+            self.assertEqual(len(cats), 8)
             cat_names = [c.name for c in cats]
             self.assertIn("Environment", cat_names)
+            self.assertIn("Agent Registry", cat_names)
             self.assertIn("Workspace", cat_names)
             self.assertIn("Inbox Health", cat_names)
             self.assertIn("Schemas", cat_names)

@@ -22,9 +22,14 @@ from __future__ import annotations
 
 import argparse
 import copy
+from contextlib import contextmanager
+import fcntl
+import os
+import stat
 import sys
+import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, Iterator, List, Optional, Sequence
 
 try:
     import yaml
@@ -40,7 +45,6 @@ from _oacp_constants import (
     AGENT_RE,
     ALL_RUNTIMES,
     _template_path,
-    _write_if_missing,
     is_agent_dir,
 )
 
@@ -53,12 +57,17 @@ def _validate_name(name: str) -> Optional[str]:
     if not NAME_RE.fullmatch(name):
         return f"invalid agent name '{name}': must be 1-64 alphanumeric chars, dots, hyphens, or underscores"
     return None
+
+
 def _load_yaml(path: Path) -> Dict[str, Any]:
     """Load a YAML file using PyYAML."""
     if yaml is None:
         raise RuntimeError("PyYAML is required: pip install pyyaml")
     raw = path.read_text(encoding="utf-8")
-    data = yaml.safe_load(raw)
+    try:
+        data = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"invalid YAML in {path}: {exc}") from exc
     if data is None:
         data = {}
     if not isinstance(data, dict):
@@ -71,6 +80,250 @@ def _dump_yaml(data: Dict[str, Any]) -> str:
     if yaml is None:
         raise RuntimeError("PyYAML is required: pip install pyyaml")
     return yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+
+@contextmanager
+def _locked_profile(profile_path: Path) -> Iterator[None]:
+    """Serialize updates to one global profile across concurrent writers."""
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    directory_fd = os.open(profile_path.parent, os.O_RDONLY)
+    try:
+        fcntl.flock(directory_fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(directory_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(directory_fd)
+
+
+def _atomic_write_profile(path: Path, data: Dict[str, Any]) -> None:
+    """Atomically replace one profile while preserving its existing mode."""
+    content = _dump_yaml(data)
+    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644
+    temp_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+            temp_path = Path(handle.name)
+        os.chmod(temp_path, mode)
+        os.replace(temp_path, path)
+        temp_path = None
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
+
+
+def _new_profile(
+    name: str,
+    runtime: str,
+    *,
+    model: str,
+    description: str,
+    projects: Sequence[str],
+) -> Dict[str, Any]:
+    """Build a new profile from the shipped template and identity defaults."""
+    with _template_path("agent_profile.template.yaml") as tpl_path:
+        data = _load_yaml(tpl_path)
+    data["name"] = name
+    data["runtime"] = runtime
+    data["model"] = model
+    data["description"] = description
+    data["projects"] = list(projects)
+    return data
+
+
+def upsert_global_profile(
+    oacp_root: Path,
+    name: str,
+    runtime: str,
+    *,
+    projects: Sequence[str] = (),
+    model: Optional[str] = None,
+    description: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create or extend an instance-level agent registration.
+
+    Existing identity values are never replaced. Missing identity keys are
+    filled, and new project memberships are appended in caller order. The
+    directory lock plus atomic replace prevents concurrent additions from losing
+    memberships without adding registry artifacts.
+    """
+    err = _validate_name(name)
+    if err:
+        raise ValueError(err)
+    if runtime not in ALL_RUNTIMES:
+        raise ValueError(
+            f"invalid runtime '{runtime}': must be one of {tuple(ALL_RUNTIMES)}"
+        )
+    for project in projects:
+        if project.startswith(".") or "/" in project or "\\" in project:
+            raise ValueError(f"invalid project name '{project}'")
+
+    model_default = model if model is not None else (
+        runtime if runtime != "unknown" else ""
+    )
+    description_default = description if description is not None else (
+        f"{name} agent ({runtime} runtime)" if runtime != "unknown" else f"{name} agent"
+    )
+    profile_path = oacp_root / "agents" / name / "profile.yaml"
+
+    with _locked_profile(profile_path):
+        if profile_path.is_file():
+            data = _load_yaml(profile_path)
+            action = "unchanged"
+            identity_defaults = {
+                "name": name,
+                "runtime": runtime,
+                "model": model_default,
+                "description": description_default,
+            }
+            for key, value in identity_defaults.items():
+                if key not in data:
+                    data[key] = value
+                    action = "updated"
+
+            memberships = data.get("projects")
+            if memberships is None:
+                memberships = []
+                data["projects"] = memberships
+                action = "updated"
+            if not isinstance(memberships, list) or not all(
+                isinstance(item, str) for item in memberships
+            ):
+                raise ValueError(
+                    f"projects must be a list of strings in {profile_path}"
+                )
+            for project in projects:
+                if project not in memberships:
+                    memberships.append(project)
+                    action = "updated"
+
+            if action == "updated":
+                _atomic_write_profile(profile_path, data)
+        else:
+            data = _new_profile(
+                name,
+                runtime,
+                model=model_default,
+                description=description_default,
+                projects=projects,
+            )
+            _atomic_write_profile(profile_path, data)
+            action = "created"
+
+    return {"path": profile_path, "action": action, "profile": data}
+
+
+def discover_project_memberships(oacp_root: Path) -> Dict[str, List[str]]:
+    """Return visible project memberships keyed by agent name."""
+    memberships: Dict[str, List[str]] = {}
+    projects_dir = oacp_root / "projects"
+    if not projects_dir.is_dir():
+        return memberships
+    for project_dir in sorted(projects_dir.iterdir()):
+        if not is_agent_dir(project_dir):
+            continue
+        agents_dir = project_dir / "agents"
+        if not agents_dir.is_dir():
+            continue
+        for agent_dir in sorted(agents_dir.iterdir()):
+            if is_agent_dir(agent_dir):
+                memberships.setdefault(agent_dir.name, []).append(project_dir.name)
+    return memberships
+
+
+def _identity_from_projects(
+    oacp_root: Path,
+    name: str,
+    projects: Sequence[str],
+) -> Dict[str, str]:
+    """Infer registry defaults from project cards/status without overriding them."""
+    cards: List[Dict[str, Any]] = []
+    statuses: List[Dict[str, Any]] = []
+    for project in projects:
+        agent_dir = oacp_root / "projects" / project / "agents" / name
+        for filename, target in (("agent_card.yaml", cards), ("status.yaml", statuses)):
+            path = agent_dir / filename
+            if not path.is_file():
+                continue
+            try:
+                target.append(_load_yaml(path))
+            except (OSError, ValueError):
+                continue
+
+    runtime = next(
+        (
+            str(card["runtime"])
+            for card in cards
+            if card.get("runtime") in ALL_RUNTIMES
+        ),
+        "",
+    )
+    if not runtime and name in ALL_RUNTIMES and name != "unknown":
+        runtime = name
+    if not runtime:
+        runtime = next(
+            (
+                str(status["runtime"])
+                for status in statuses
+                if status.get("runtime") in ALL_RUNTIMES
+            ),
+            "unknown",
+        )
+
+    model = next(
+        (
+            str(source["model"])
+            for source in [*cards, *statuses]
+            if isinstance(source.get("model"), str) and source["model"].strip()
+        ),
+        runtime if runtime != "unknown" else "",
+    )
+    description = next(
+        (
+            str(card["description"])
+            for card in cards
+            if isinstance(card.get("description"), str)
+            and card["description"].strip()
+        ),
+        f"{name} agent ({runtime} runtime)" if runtime != "unknown" else f"{name} agent",
+    )
+    return {"runtime": runtime, "model": model, "description": description}
+
+
+def sync_agent_registry(oacp_root: Path) -> Dict[str, Any]:
+    """Backfill all project agent directories into the instance registry."""
+    memberships = discover_project_memberships(oacp_root)
+    actions: Dict[str, str] = {}
+    for name, projects in memberships.items():
+        identity = _identity_from_projects(oacp_root, name, projects)
+        result = upsert_global_profile(
+            oacp_root,
+            name,
+            identity["runtime"],
+            projects=projects,
+            model=identity["model"],
+            description=identity["description"],
+        )
+        actions[name] = str(result["action"])
+    return {
+        "agents": len(memberships),
+        "memberships": sum(len(projects) for projects in memberships.values()),
+        "created": sum(action == "created" for action in actions.values()),
+        "updated": sum(action == "updated" for action in actions.values()),
+        "unchanged": sum(action == "unchanged" for action in actions.values()),
+        "actions": actions,
+    }
 # ---------------------------------------------------------------------------
 # Merge logic
 # ---------------------------------------------------------------------------
@@ -208,20 +461,19 @@ def cmd_init(args: argparse.Namespace, oacp_root: Path) -> int:
         print(f"Error: invalid runtime '{runtime}': must be one of {VALID_RUNTIMES}", file=sys.stderr)
         return 1
 
-    with _template_path("agent_profile.template.yaml") as tpl_path:
-        template = tpl_path.read_text(encoding="utf-8")
+    try:
+        result = upsert_global_profile(oacp_root, name, runtime)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
-    # Fill in identity fields
-    template = template.replace('name: ""', f'name: "{name}"', 1)
-    template = template.replace('runtime: ""', f'runtime: "{runtime}"', 1)
-
-    profile_dir = oacp_root / "agents" / name
-    profile_path = profile_dir / "profile.yaml"
-
-    if _write_if_missing(profile_path, template):
+    profile_path = result["path"]
+    if result["action"] == "created":
         print(f"Created global profile: {profile_path}")
+    elif result["action"] == "updated":
+        print(f"Updated global profile (identity preserved): {profile_path}")
     else:
-        print(f"Profile already exists (skipped): {profile_path}")
+        print(f"Profile already exists (unchanged): {profile_path}")
 
     return 0
 
@@ -285,8 +537,51 @@ def cmd_list(args: argparse.Namespace, oacp_root: Path) -> int:
         if name in project_names:
             tags.append("project")
         tag_str = ", ".join(tags)
-        print(f"  {name}  ({tag_str})")
+        try:
+            profile = load_global_profile(oacp_root, name) or {}
+        except (OSError, ValueError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        identity = _identity_from_projects(
+            oacp_root,
+            name,
+            [project] if project and name in project_names else [],
+        )
+        runtime = profile.get("runtime") or identity["runtime"]
+        projects = profile.get("projects", [])
+        if projects is None:
+            projects = []
+        if not isinstance(projects, list) or not all(
+            isinstance(membership, str) for membership in projects
+        ):
+            print(
+                f"Error: projects must be a list of strings in "
+                f"{oacp_root / 'agents' / name / 'profile.yaml'}",
+                file=sys.stderr,
+            )
+            return 1
+        project_text = ",".join(projects) if projects else "-"
+        print(
+            f"  {name}  runtime={runtime}  memberships={project_text}  ({tag_str})"
+        )
 
+    return 0
+
+
+def cmd_sync(args: argparse.Namespace, oacp_root: Path) -> int:
+    """Backfill the instance registry from project agent directories."""
+    del args
+    try:
+        result = sync_agent_registry(oacp_root)
+    except (OSError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print(
+        "Agent registry synchronized: "
+        f"{result['agents']} agent(s), {result['memberships']} project membership(s); "
+        f"created {result['created']}, updated {result['updated']}, "
+        f"unchanged {result['unchanged']}."
+    )
     return 0
 
 
@@ -311,6 +606,9 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p_init = sub.add_parser("init", help="Create a global agent profile")
     p_init.add_argument("name", help="Agent name")
     p_init.add_argument("--runtime", required=True, help="Agent runtime (claude, codex, cursor, gemini, human)")
+
+    # sync
+    sub.add_parser("sync", help="Backfill the instance registry from project agents")
 
     # show
     p_show = sub.add_parser("show", help="Show merged agent profile")
@@ -341,6 +639,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     dispatch = {
         "init": cmd_init,
+        "sync": cmd_sync,
         "show": cmd_show,
         "list": cmd_list,
     }

@@ -225,22 +225,32 @@ uv tool install .
 
 ## Commands
 
+<!-- BEGIN GENERATED: oacp commands — do not edit by hand; run `make docs` -->
 | Command | Description |
 |---------|-------------|
-| `oacp init` | Create a project workspace under `$OACP_HOME/projects/` |
+| `oacp init` | Create a project workspace under $OACP_HOME/projects/ |
 | `oacp add-agent` | Add an agent to an existing project workspace |
-| `oacp setup` | Generate runtime-specific config files (Claude, Codex, Cursor, Gemini) |
-| `oacp send` | Send a protocol-compliant inbox message (`--from` auto-inferred) |
-| `oacp inbox` | List pending messages across agents (table or `--json`) |
-| `oacp watch` | Emit inbox delta events for one agent across selected projects |
-| `oacp memory` | Archive, restore, or git-sync project/org memory files |
-| `oacp session-init` | Verify Codex startup inputs, optionally pull memory, and update status |
-| `oacp agent` | Manage global agent profiles (`init`, `show`, `list`) |
-| `oacp org-memory` | Initialize org-level memory at `$OACP_HOME/org-memory/` |
-| `oacp write-event` | Write an event to `org-memory/events/` |
+| `oacp agent` | Manage global agent profiles (init, sync, show, list) |
+| `oacp inbox` | List pending inbox messages |
+| `oacp watch` | Emit inbox delta events for Monitor-friendly polling |
+| `oacp retention` | Prune project message history by age and count |
+| `oacp memory` | Archive, restore, or sync memory files |
+| `oacp session-init` | Verify Codex startup inputs and emit SessionStart context |
+| `oacp setup` | Generate runtime-specific config files in a repo |
+| `oacp send` | Send a protocol-compliant inbox message |
+| `oacp key` | Generate and inspect message-signing keys |
+| `oacp trust` | Import, inspect, and revoke trust-root entries (catalog + pins) |
+| `oacp org-memory` | Initialize org-level memory at $OACP_HOME/org-memory/ |
+| `oacp write-event` | Write an event to org-memory/events/ |
+| `oacp autonomy-outcome` | Record a human approval/decline in an autonomy audit |
+| `oacp autonomy-finalize` | Record checkpoints and terminal states in an autonomy audit |
+| `oacp envelope` | Compile, show, or clear the runtime envelope for a task |
 | `oacp doctor` | Check environment and workspace health |
 | `oacp validate` | Validate an inbox/outbox YAML message |
-| `oacp --version` | Print the installed version |
+| `oacp verify` | Verify a message's auth trailer against receiver-local pins |
+<!-- END GENERATED: oacp commands -->
+
+`oacp --version` prints the installed version.
 
 <details>
 <summary>Key flags</summary>
@@ -291,7 +301,7 @@ it is not part of the OACP product surface.
 
 ## Prerequisites
 
-- Python 3.9+
+- Python 3.9.2+
 - Bash 3.2+ (macOS default is fine)
 - `gh` CLI (optional, for GitHub operations)
 

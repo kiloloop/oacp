@@ -101,6 +101,13 @@ def generate_message_id(sender: str) -> str:
     return f"msg-{compact_ts}-{sender}-{rand4}"
 
 
+def generate_conversation_id(sender: str) -> str:
+    """Generate a thread ID with a random six-digit sequence."""
+    now = dt.datetime.now(dt.timezone.utc)
+    sequence = secrets.randbelow(1_000_000)
+    return f"conv-{now.strftime('%Y%m%d')}-{sender}-{sequence:06d}"
+
+
 def generate_timestamp() -> str:
     """Generate a UTC RFC3339 timestamp (seconds precision)."""
     return utc_now_iso()
@@ -700,8 +707,10 @@ def send_message(
                 f"— thread may be broken! A new conversation_id will be generated."
             )
             if not conversation_id:
-                now = dt.datetime.now(dt.timezone.utc)
-                conversation_id = f"conv-{now.strftime('%Y%m%d')}-{sender}-1"
+                conversation_id = generate_conversation_id(sender)
+
+    if not parent_message_id and not conversation_id:
+        conversation_id = generate_conversation_id(sender)
 
     # Determine the 'to' value for the message dict
     to_value: Any = recipients_list if is_broadcast else recipients_list[0]

@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "oacp-cli"
-version = "0.4.3"
+version = "0.4.4"
 description = "Open Agent Coordination Protocol CLI for file-based multi-agent workflows"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-requires-python = ">=3.9"
+requires-python = ">=3.9.2"
 authors = [
   { name = "Kiloloop" },
 ]
@@ -32,7 +32,7 @@ classifiers = [
 
 [project.optional-dependencies]
 crypto = [
-  "cryptography>=3.4",
+  "cryptography>=50.0.0",
 ]
 
 [project.urls]
@@ -47,8 +47,10 @@ oacp-envelope-hook = "oacp.envelope_hook:main"
 
 [dependency-groups]
 dev = [
-  "pytest>=8.0",
-  "ruff>=0.11.0",
+  "build==1.5.0",
+  "hatchling==1.27.0",
+  "pytest==9.1.1",
+  "ruff==0.16.2",
 ]
 
 [tool.hatch.build.targets.sdist]
@@ -68,6 +70,7 @@ packages = ["oacp"]
 "scripts/oacp_doctor.py" = "oacp/_scripts/oacp_doctor.py"
 "scripts/autonomy_gate.py" = "oacp/_scripts/autonomy_gate.py"
 "scripts/record_autonomy_outcome.py" = "oacp/_scripts/record_autonomy_outcome.py"
+"scripts/finalize_autonomy_record.py" = "oacp/_scripts/finalize_autonomy_record.py"
 "scripts/envelope_compiler.py" = "oacp/_scripts/envelope_compiler.py"
 "scripts/claude_envelope_hook.py" = "oacp/_scripts/claude_envelope_hook.py"
 "scripts/init_project_workspace.py" = "oacp/_scripts/init_project_workspace.py"
@@ -93,9 +96,20 @@ packages = ["oacp"]
 "scripts/setup_runtime.py" = "oacp/_scripts/setup_runtime.py"
 "scripts/init_org_memory.py" = "oacp/_scripts/init_org_memory.py"
 "scripts/write_event.py" = "oacp/_scripts/write_event.py"
+"scripts/check_quality_gate.py" = "oacp/_scripts/check_quality_gate.py"
+"scripts/init_packet.sh" = "oacp/_scripts/init_packet.sh"
+"scripts/preflight.py" = "oacp/_scripts/preflight.py"
+"scripts/update_workspace.sh" = "oacp/_scripts/update_workspace.sh"
+"scripts/validate_agent_card.py" = "oacp/_scripts/validate_agent_card.py"
+"scripts/gen_readme_commands.py" = "oacp/_scripts/gen_readme_commands.py"
 "docs/protocol/agent_safety_defaults.md" = "oacp/_protocol/agent_safety_defaults.md"
 "docs/protocol/dispatch_states.yaml" = "oacp/_protocol/dispatch_states.yaml"
 "docs/protocol/session_init.md" = "oacp/_protocol/session_init.md"
+"docs/protocol/inbox_outbox.md" = "oacp/_protocol/inbox_outbox.md"
+"docs/protocol/message_signing.md" = "oacp/_protocol/message_signing.md"
+"docs/protocol/autonomy.md" = "oacp/_protocol/autonomy.md"
+"docs/protocol/org_memory.md" = "oacp/_protocol/org_memory.md"
+"templates/inbox_message.template.yaml" = "oacp/_templates/inbox_message.template.yaml"
 "templates/runtime_capabilities.yaml" = "oacp/_templates/runtime_capabilities.yaml"
 "templates/org-memory/recent.md" = "oacp/_templates/org-memory/recent.md"
 "templates/org-memory/decisions.md" = "oacp/_templates/org-memory/decisions.md"

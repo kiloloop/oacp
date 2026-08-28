@@ -19,6 +19,8 @@ body: |
   task_profile:
     estimated_minutes: 20
     risk_tier: P3
+    # Distinct deliverable files only; exclude receiver-local inbox, outbox,
+    # audit, memory, cache, and scratch writes.
     expected_files_touched: 3
     destructive_ops: false
     external_side_effects: false

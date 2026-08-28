@@ -1,0 +1,29 @@
+case: declaration_error_admission_pauses
+config: configs/auto_review_standard.yaml
+message: messages/declaration_error_admission.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - declaration_error
+  breached:
+    - task_profile.external_side_effects
+  co_occurring_reason_codes:
+    - external_side_effects_not_pr_artifact
+  admission_axes:
+    evaluated: true
+    thresholds: []
+    declared_risk: []
+    declaration:
+      - declaration_error
+    side_effects:
+      - external_side_effects_not_pr_artifact
+    continuation_grant: []
+    declaration_errors:
+      - field: task_profile.external_side_effects
+        declared: false
+        conflicts_with:
+          - task_profile.commits_changes
+  result:
+    final_state: paused
+    completion_kind: admission_paused

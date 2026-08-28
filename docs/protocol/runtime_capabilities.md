@@ -49,7 +49,7 @@ These are reference defaults. Actual capabilities may vary by configuration.
 | `async_tasks` | yes | yes | no | yes |
 | `image_generation` | no | no | no | yes |
 
-See `docs/guides/runtime_capability_matrix.md` for the full parity matrix with details.
+See the public [cross-runtime parity matrix](https://github.com/kiloloop/research/blob/main/runtime-comparison/runtime_capability_matrix.md) for full details.
 
 ## Dynamic Status Schema
 
@@ -277,10 +277,10 @@ The card schema is inspired by Google's A2A Agent Card spec (v0.3.0). Key differ
 ## Cross-References
 
 - **Agent Profiles**: `docs/protocol/agent_profiles.md` — two-tier global profile + project card system
-- **Parity Matrix**: `docs/guides/runtime_capability_matrix.md` — detailed per-runtime capability comparison
+- **Parity Matrix**: [Cross-runtime parity matrix](https://github.com/kiloloop/research/blob/main/runtime-comparison/runtime_capability_matrix.md) — detailed per-runtime capability comparison
 - **Inbox Protocol**: `docs/protocol/inbox_outbox.md` — agent messaging format
 - **Session telemetry**: `scripts/session_lifecycle_hooks.py` — coordinator
   compatibility state, separate from runtime startup and `status.yaml`
-- **Workspace Setup**: `scripts/init_project_workspace.sh` — project initialization
+- **Workspace Setup**: `scripts/init_project_workspace.py` (`oacp init`) — project initialization
 - **Agent Card Template**: `templates/agent_card.template.yaml` — card template
 - **Card Validator**: `scripts/validate_agent_card.py` — schema validation

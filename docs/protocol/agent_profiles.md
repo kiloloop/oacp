@@ -24,7 +24,9 @@ $OACP_HOME/
             └── outbox/
 ```
 
-- **Global profiles** (`agents/<name>/profile.yaml`) are created once per agent and rarely change.
+- **Global profiles** (`agents/<name>/profile.yaml`) form the instance registry.
+  `oacp add-agent` and `oacp init --agents` create them and append project
+  memberships without replacing existing identity fields.
 - **Project cards** (`projects/<project>/agents/<name>/agent_card.yaml`) carry project-specific overrides — permissions, skills, routing rules — and are the authoritative resolved identity for that project.
 - **Status files** (`status.yaml`) remain separate; they track dynamic session state, not static identity.
 
@@ -80,9 +82,10 @@ Global profiles use `agent_profile.template.yaml`. Fields:
 |-------|------|----------|-------------|
 | `version` | string | yes | Schema version (semver, currently `0.2.0`) |
 | `name` | string | yes | Agent identifier (matches directory name) |
-| `runtime` | string | yes | One of: `claude`, `codex`, `gemini`, `human` |
-| `model` | string | no | Model version identifier |
+| `runtime` | string | yes | One of: `claude`, `codex`, `cursor`, `gemini`, `human`, `unknown` |
+| `model` | string | no | Configured model identifier; a runtime alias may select that runtime's environment default |
 | `description` | string | no | One-line role summary |
+| `projects` | list | yes | Project workspaces where this agent is initialized |
 | `routing_rules` | dict | no | `primary` (preferred targets) and `avoid` (agents to skip) |
 | `trust_level` | string | no | `untrusted`, `standard`, `elevated`, or `admin` |
 | `quota` | dict | no | `max_cost_usd_per_month`, `reset_day`, `warn_threshold` |
@@ -123,17 +126,30 @@ oacp agent show claude --project my-app
 
 ### `oacp agent list`
 
-List known agents with their tier tags.
+List the instance registry with each agent's runtime and project memberships.
+`--project` preserves the merged global/project view for one workspace.
 
 ```bash
 oacp agent list
-#   claude  (global)
-#   codex   (global)
+#   claude  runtime=claude  memberships=my-app,other-app  (global)
+#   codex   runtime=codex  memberships=my-app  (global)
 
 oacp agent list --project my-app
-#   claude  (global, project)
-#   codex   (global)
-#   gemini  (project)
+#   claude  runtime=claude  memberships=my-app,other-app  (global, project)
+#   codex   runtime=codex  memberships=my-app  (global, project)
+```
+
+### `oacp agent sync`
+
+Backfill the instance registry once from existing project agent directories.
+The command infers defaults from agent cards and status files, preserves every
+existing identity value, and only appends missing memberships. It is safe to
+repeat. `oacp doctor` reports missing profiles or memberships and points to
+this command.
+
+```bash
+oacp agent sync
+# Agent registry synchronized: 3 agent(s), 8 project membership(s); ...
 ```
 
 ## Relationship to Existing Agent Cards
@@ -144,7 +160,7 @@ Agent cards predate global profiles and remain the authoritative per-project ide
 |---------|---------------|--------------------|
 | **Location** | `$OACP_HOME/agents/<name>/profile.yaml` | `$OACP_HOME/projects/<project>/agents/<name>/agent_card.yaml` |
 | **Scope** | All projects | Single project |
-| **Updates** | Rarely (identity changes) | Per project as needed |
+| **Updates** | Identity changes plus append-only project membership | Per project as needed |
 | **Authority** | Defaults only | Authoritative for the project |
 | **Extra sections** | None | `permissions`, `availability`, `protocol` |
 

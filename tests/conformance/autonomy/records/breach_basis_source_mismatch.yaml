@@ -1,0 +1,42 @@
+schema_version: 2
+spec_version: "0.4.3"
+created_at_utc: "2026-08-01T01:00:00Z"
+receiver: claude
+sender: alice
+message_id: msg-20260801010000-alice-0031
+message_sha256: 1f0031aa
+decision: auto_accepted
+mode: auto_review
+reason_codes:
+- message_valid
+result:
+  final_state: done
+  completion_kind: checkpoint_paused
+  actual_minutes: 40
+  actual_files_touched: 7
+  predicted_risk_materialized: false
+  completed_at_utc: "2026-08-01T02:10:00Z"
+  envelope_enforcement: none
+  threshold_checkpoint:
+    evaluated: true
+    actual_minutes: 40
+    actual_files_touched: 7
+    side_effects_actual:
+      creates_or_updates_pr: false
+      comments_on_github: false
+      commits_changes: true
+    breached: true
+    breached_fields:
+    - actual_files_touched
+    declaration_errors: []
+    breach_basis: declared_intent
+    paused_at_utc: "2026-08-01T01:40:00Z"
+    action: resumed_after_reauthorization
+    reauthorization:
+      presented: true
+      channel: receiver_human
+      decision: approved
+      decided_at_utc: "2026-08-01T01:50:00Z"
+      actor: alice
+      disposition: resumed
+      advisory: []

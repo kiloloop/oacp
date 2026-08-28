@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - `bash` 3.2+ (macOS default) or 4+ (recommended)
-- `python3` 3.9+ (for JSON state management, quality gate scripts, and inbox messaging)
+- `python3` 3.9.2+ (for JSON state management, quality gate scripts, and inbox messaging)
 - `gh` CLI (optional, for GitHub operations — `gh auth login`)
 - Agent runtime CLI: `claude`, `codex`, `cursor`, or `gemini` (depending on your agents)
 

@@ -1,0 +1,913 @@
+# Admission-ledger replay corpus.
+#
+# Twenty-five anonymized reproductions of audit records from a fleet corpus in
+# which a structured-predicate replay found envelope-derived admission axes
+# that held but went unrecorded — 44 qualitative axes across these records
+# plus one masked numeric threshold. Forty-three of the 45 reproduce from the
+# evaluator alone (its early returns skipped every axis evaluated after the
+# one that drove the verdict); the two on ledger-19 were lost receiver-side
+# when a checkpoint update overwrote the admission reasons. Each case carries the
+# receiver policy shape, the declared profile, a body line that reproduces the
+# recorded primary reason, the pinned verdict, and `expected_axes` — every
+# envelope-derived axis that holds for that profile under the policy — plus
+# `field_record_missing`, the subset the original record failed to carry.
+#
+# Runner: tests/test_autonomy_ledger_replay.py. A conforming evaluator records
+# every expected axis in `admission_axes` and surfaces every non-primary one
+# through `co_occurring_reason_codes`, with the verdict unchanged.
+policy:
+  max_estimated_minutes: 45
+  max_expected_files_touched: 5
+  external_side_effects: allow_pr_artifacts
+  private_repo_allowlist:
+  - example-org/private-repo
+cases:
+- case: ledger-01
+  body_line: Work on the public repo.
+  task_profile:
+    estimated_minutes: 40
+    risk_tier: P2
+    expected_files_touched: 12
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: false
+    target_repo: example-org/private-repo
+    creates_or_updates_pr: true
+    comments_on_github: true
+    commits_changes: true
+    merges_pr: true
+    files_issues: false
+    sends_oacp_reply_only: false
+  expected_matched_pattern: public repo
+  expected_reason_codes:
+  - hard_stop_sensitive_scope
+  expected_axes:
+  - expected_files_touched_exceeds_threshold
+  - merges_pr_pause
+  field_record_missing:
+  - merges_pr_pause
+- case: ledger-02
+  body_line: Do the task.
+  task_profile:
+    estimated_minutes: 40
+    risk_tier: P2
+    expected_files_touched: 15
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: true
+    public_visibility: false
+    target_repo: example-org/private-repo
+    creates_or_updates_pr: true
+    comments_on_github: false
+    commits_changes: true
+    merges_pr: true
+    files_issues: false
+    sends_oacp_reply_only: false
+  expected_reason_codes:
+  - dependency_changes_pause
+  expected_axes:
+  - expected_files_touched_exceeds_threshold
+  - dependency_changes_pause
+  - merges_pr_pause
+  field_record_missing:
+  - merges_pr_pause
+- case: ledger-03
+  body_line: Do the task.
+  task_profile:
+    estimated_minutes: 35
+    risk_tier: P2
+    expected_files_touched: 15
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: true
+    target_repo: example-org/other-repo
+    creates_or_updates_pr: true
+    comments_on_github: true
+    commits_changes: true
+    merges_pr: false
+    files_issues: false
+    sends_oacp_reply_only: false
+  expected_reason_codes:
+  - public_visibility_pause
+  expected_axes:
+  - expected_files_touched_exceeds_threshold
+  - public_visibility_pause
+  - external_side_effects_not_pr_artifact
+  field_record_missing:
+  - external_side_effects_not_pr_artifact
+- case: ledger-04
+  body_line: Do the task.
+  task_profile:
+    estimated_minutes: 25
+    risk_tier: P2
+    expected_files_touched: 55
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: true
+    target_repo: example-org/other-repo
+    creates_or_updates_pr: true
+    comments_on_github: true
+    commits_changes: true
+    merges_pr: false
+    files_issues: false
+    sends_oacp_reply_only: false
+  expected_reason_codes:
+  - public_visibility_pause
+  expected_axes:
+  - expected_files_touched_exceeds_threshold
+  - public_visibility_pause
+  - external_side_effects_not_pr_artifact
+  field_record_missing:
+  - external_side_effects_not_pr_artifact
+- case: ledger-05
+  body_line: Do the task.
+  task_profile:
+    estimated_minutes: 20
+    risk_tier: P2
+    expected_files_touched: 55
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: true
+    target_repo: example-org/other-repo
+    creates_or_updates_pr: true
+    comments_on_github: true
+    commits_changes: true
+    merges_pr: false
+    files_issues: false
+    sends_oacp_reply_only: false
+  expected_reason_codes:
+  - public_visibility_pause
+  expected_axes:
+  - expected_files_touched_exceeds_threshold
+  - public_visibility_pause
+  - external_side_effects_not_pr_artifact
+  field_record_missing:
+  - external_side_effects_not_pr_artifact
+- case: ledger-06
+  body_line: Do the task.
+  task_profile:
+    estimated_minutes: 40
+    risk_tier: P1
+    expected_files_touched: 9
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: true
+    public_visibility: false
+    target_repo: example-org/private-repo
+    creates_or_updates_pr: true
+    comments_on_github: true
+    commits_changes: true
+    merges_pr: true
+    files_issues: false
+    sends_oacp_reply_only: false
+  expected_reason_codes:
+  - dependency_changes_pause
+  expected_axes:
+  - expected_files_touched_exceeds_threshold
+  - dependency_changes_pause
+  - merges_pr_pause
+  field_record_missing:
+  - merges_pr_pause
+- case: ledger-07
+  body_line: Edit config.yaml.
+  task_profile:
+    estimated_minutes: 35
+    risk_tier: P2
+    expected_files_touched: 8
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: true
+    touches_dependencies: false
+    public_visibility: false
+    target_repo: example-org/private-repo
+    creates_or_updates_pr: true
+    comments_on_github: false
+    commits_changes: true
+    merges_pr: true
+    files_issues: false
+    sends_oacp_reply_only: false
+  expected_matched_pattern: config
+  expected_reason_codes:
+  - hard_stop_sensitive_scope
+  expected_axes:
+  - expected_files_touched_exceeds_threshold
+  - auth_config_or_secrets_pause
+  - merges_pr_pause
+  field_record_missing:
+  - auth_config_or_secrets_pause
+  - merges_pr_pause
+- case: ledger-08
+  body_line: Publish the release.
+  task_profile:
+    estimated_minutes: 40
+    risk_tier: P1
+    expected_files_touched: 50
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: true
+    touches_dependencies: false
+    public_visibility: true
+    target_repo: example-org/private-repo
+    creates_or_updates_pr: true
+    comments_on_github: false
+    commits_changes: true
+    merges_pr: true
+    files_issues: false
+    sends_oacp_reply_only: false
+  expected_matched_pattern: publish
+  expected_reason_codes:
+  - hard_stop_external_side_effect
+  expected_axes:
+  - expected_files_touched_exceeds_threshold
+  - auth_config_or_secrets_pause
+  - public_visibility_pause
+  - merges_pr_pause
+  - external_side_effects_not_pr_artifact
+  field_record_missing:
+  - auth_config_or_secrets_pause
+  - external_side_effects_not_pr_artifact
+  - merges_pr_pause
+  - public_visibility_pause
+- case: ledger-09
+  body_line: Do the task.
+  task_profile:
+    estimated_minutes: 40
+    risk_tier: P1
+    expected_files_touched: 45
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: true
+    touches_dependencies: false
+    public_visibility: false
+    target_repo: ''
+    creates_or_updates_pr: false
+    comments_on_github: false
+    commits_changes: true
+    merges_pr: false
+    files_issues: false
+    sends_oacp_reply_only: false
+  expected_reason_codes:
+  - auth_config_or_secrets_pause
+  expected_axes:
+  - expected_files_touched_exceeds_threshold
+  - auth_config_or_secrets_pause
+  - external_side_effects_not_pr_artifact
+  field_record_missing:
+  - external_side_effects_not_pr_artifact
+- case: ledger-10
+  body_line: Publish the release.
+  task_profile:
+    estimated_minutes: 45
+    risk_tier: P2
+    expected_files_touched: 8
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: true
+    target_repo: example-org/private-repo
+    creates_or_updates_pr: true
+    comments_on_github: true
+    commits_changes: true
+    merges_pr: true
+    files_issues: false
+    sends_oacp_reply_only: false
+  expected_matched_pattern: publish
+  expected_reason_codes:
+  - hard_stop_external_side_effect
+  expected_axes:
+  - expected_files_touched_exceeds_threshold
+  - public_visibility_pause
+  - merges_pr_pause
+  - external_side_effects_not_pr_artifact
+  field_record_missing:
+  - external_side_effects_not_pr_artifact
+  - merges_pr_pause
+  - public_visibility_pause
+- case: ledger-11
+  body_line: Merge the branch.
+  task_profile:
+    estimated_minutes: 20
+    risk_tier: P2
+    expected_files_touched: 5
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: true
+    target_repo: ''
+    creates_or_updates_pr: false
+    comments_on_github: false
+    commits_changes: false
+    merges_pr: false
+    files_issues: false
+    sends_oacp_reply_only: false
+  expected_matched_pattern: merge
+  expected_reason_codes:
+  - hard_stop_external_side_effect
+  expected_axes:
+  - public_visibility_pause
+  - external_side_effects_not_pr_artifact
+  field_record_missing:
+  - external_side_effects_not_pr_artifact
+  - public_visibility_pause
+- case: ledger-12
+  body_line: Do the task.
+  task_profile:
+    estimated_minutes: 15
+    risk_tier: P1
+    expected_files_touched: 3
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: true
+    target_repo: ''
+    creates_or_updates_pr: false
+    comments_on_github: true
+    commits_changes: true
+    merges_pr: false
+    files_issues: false
+    sends_oacp_reply_only: false
+  expected_reason_codes:
+  - public_visibility_pause
+  expected_axes:
+  - public_visibility_pause
+  - external_side_effects_not_pr_artifact
+  field_record_missing:
+  - external_side_effects_not_pr_artifact
+- case: ledger-13
+  body_line: Do the task.
+  task_profile:
+    estimated_minutes: 20
+    risk_tier: P2
+    expected_files_touched: 4
+    destructive_ops: false
+    external_side_effects: false
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: false
+    target_repo: ''
+    creates_or_updates_pr: false
+    comments_on_github: false
+    commits_changes: true
+    merges_pr: false
+    files_issues: false
+    sends_oacp_reply_only: false
+  expected_reason_codes:
+  - declaration_error
+  expected_axes:
+  - declaration_error
+  - external_side_effects_not_pr_artifact
+  field_record_missing:
+  - external_side_effects_not_pr_artifact
+- case: ledger-14
+  body_line: Publish the release.
+  task_profile:
+    estimated_minutes: 25
+    risk_tier: P2
+    expected_files_touched: 15
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: true
+    target_repo: ''
+    creates_or_updates_pr: true
+    comments_on_github: false
+    commits_changes: true
+    merges_pr: false
+    files_issues: false
+    sends_oacp_reply_only: false
+  expected_matched_pattern: publish
+  expected_reason_codes:
+  - hard_stop_external_side_effect
+  expected_axes:
+  - expected_files_touched_exceeds_threshold
+  - public_visibility_pause
+  - external_side_effects_not_pr_artifact
+  field_record_missing:
+  - external_side_effects_not_pr_artifact
+  - public_visibility_pause
+- case: ledger-15
+  body_line: Publish the release.
+  task_profile:
+    estimated_minutes: 60
+    risk_tier: P1
+    expected_files_touched: 60
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: true
+    public_visibility: true
+    target_repo: ''
+    creates_or_updates_pr: true
+    comments_on_github: false
+    commits_changes: true
+    merges_pr: false
+    files_issues: false
+    sends_oacp_reply_only: false
+  expected_matched_pattern: publish
+  expected_reason_codes:
+  - hard_stop_external_side_effect
+  expected_axes:
+  - estimated_minutes_exceeds_threshold
+  - expected_files_touched_exceeds_threshold
+  - dependency_changes_pause
+  - public_visibility_pause
+  - external_side_effects_not_pr_artifact
+  field_record_missing:
+  - dependency_changes_pause
+  - external_side_effects_not_pr_artifact
+  - public_visibility_pause
+- case: ledger-16
+  body_line: Publish the release.
+  task_profile:
+    estimated_minutes: 60
+    risk_tier: P1
+    expected_files_touched: 60
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: true
+    public_visibility: true
+    target_repo: ''
+    creates_or_updates_pr: true
+    comments_on_github: false
+    commits_changes: true
+    merges_pr: false
+    files_issues: false
+    sends_oacp_reply_only: false
+  expected_matched_pattern: publish
+  expected_reason_codes:
+  - hard_stop_external_side_effect
+  expected_axes:
+  - estimated_minutes_exceeds_threshold
+  - expected_files_touched_exceeds_threshold
+  - dependency_changes_pause
+  - public_visibility_pause
+  - external_side_effects_not_pr_artifact
+  field_record_missing:
+  - dependency_changes_pause
+  - external_side_effects_not_pr_artifact
+  - public_visibility_pause
+- case: ledger-17
+  body_line: Work on the public repo.
+  task_profile:
+    estimated_minutes: 50
+    risk_tier: P2
+    expected_files_touched: 60
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: false
+    target_repo: example-org/other-repo
+    creates_or_updates_pr: true
+    comments_on_github: false
+    commits_changes: false
+    merges_pr: true
+    files_issues: false
+    sends_oacp_reply_only: false
+  expected_matched_pattern: public repo
+  expected_reason_codes:
+  - hard_stop_sensitive_scope
+  expected_axes:
+  - estimated_minutes_exceeds_threshold
+  - expected_files_touched_exceeds_threshold
+  - merges_pr_pause
+  - external_side_effects_not_pr_artifact
+  field_record_missing:
+  - external_side_effects_not_pr_artifact
+  - merges_pr_pause
+- case: ledger-18
+  body_line: Publish the release.
+  task_profile:
+    estimated_minutes: 40
+    risk_tier: P2
+    expected_files_touched: 120
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: true
+    target_repo: example-org/other-repo
+    creates_or_updates_pr: true
+    comments_on_github: false
+    commits_changes: false
+    merges_pr: false
+    files_issues: false
+    sends_oacp_reply_only: false
+  expected_matched_pattern: publish
+  expected_reason_codes:
+  - hard_stop_external_side_effect
+  expected_axes:
+  - expected_files_touched_exceeds_threshold
+  - public_visibility_pause
+  - external_side_effects_not_pr_artifact
+  field_record_missing:
+  - external_side_effects_not_pr_artifact
+  - public_visibility_pause
+- case: ledger-19
+  body_line: Do the task.
+  task_profile:
+    estimated_minutes: 15
+    risk_tier: P3
+    expected_files_touched: 6
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: false
+    target_repo: ''
+    creates_or_updates_pr: false
+    comments_on_github: false
+    commits_changes: true
+    merges_pr: false
+    files_issues: false
+    sends_oacp_reply_only: false
+  note: field record's reason_codes were receiver-overwritten with the checkpoint reason; the admission
+    verdict is replayed from the envelope
+  expected_reason_codes:
+  - expected_files_touched_exceeds_threshold
+  - external_side_effects_not_pr_artifact
+  expected_axes:
+  - expected_files_touched_exceeds_threshold
+  - external_side_effects_not_pr_artifact
+  field_record_missing:
+  - expected_files_touched_exceeds_threshold
+  - external_side_effects_not_pr_artifact
+- case: ledger-20
+  body_line: Do the task.
+  task_profile:
+    estimated_minutes: 25
+    risk_tier: P2
+    expected_files_touched: 4
+    destructive_ops: false
+    external_side_effects: false
+    touches_auth_config_or_secrets: false
+    touches_dependencies: false
+    public_visibility: false
+    target_repo: ''
+    creates_or_updates_pr: false
+    comments_on_github: false
+    commits_changes: true
+    merges_pr: false
+    files_issues: false
+    sends_oacp_reply_only: false
+  expected_reason_codes:
+  - declaration_error
+  expected_axes:
+  - declaration_error
+  - external_side_effects_not_pr_artifact
+  field_record_missing:
+  - external_side_effects_not_pr_artifact
+- case: ledger-21
+  body_line: Do the task.
+  task_profile:
+    estimated_minutes: 50
+    risk_tier: P2
+    expected_files_touched: 45
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: true
+    public_visibility: false
+    target_repo: example-org/other-repo
+    creates_or_updates_pr: true
+    comments_on_github: false
+    commits_changes: false
+    merges_pr: true
+    files_issues: false
+    sends_oacp_reply_only: false
+  expected_reason_codes:
+  - dependency_changes_pause
+  expected_axes:
+  - estimated_minutes_exceeds_threshold
+  - expected_files_touched_exceeds_threshold
+  - dependency_changes_pause
+  - merges_pr_pause
+  - external_side_effects_not_pr_artifact
+  field_record_missing:
+  - external_side_effects_not_pr_artifact
+  - merges_pr_pause
+- case: ledger-22
+  body_line: Install the dependency.
+  task_profile:
+    estimated_minutes: 60
+    risk_tier: P2
+    expected_files_touched: 20
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: true
+    public_visibility: false
+    target_repo: ''
+    creates_or_updates_pr: true
+    comments_on_github: false
+    commits_changes: false
+    merges_pr: true
+    files_issues: true
+    sends_oacp_reply_only: false
+  expected_matched_pattern: install dependency
+  expected_reason_codes:
+  - hard_stop_external_side_effect
+  expected_axes:
+  - estimated_minutes_exceeds_threshold
+  - expected_files_touched_exceeds_threshold
+  - dependency_changes_pause
+  - merges_pr_pause
+  - external_side_effects_not_pr_artifact
+  field_record_missing:
+  - dependency_changes_pause
+  - external_side_effects_not_pr_artifact
+  - merges_pr_pause
+- case: ledger-23
+  body_line: Do the task.
+  task_profile:
+    estimated_minutes: 75
+    risk_tier: P1
+    expected_files_touched: 60
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: true
+    public_visibility: false
+    target_repo: example-org/other-repo
+    creates_or_updates_pr: true
+    comments_on_github: true
+    commits_changes: true
+    merges_pr: true
+    files_issues: false
+    sends_oacp_reply_only: false
+  expected_reason_codes:
+  - dependency_changes_pause
+  expected_axes:
+  - estimated_minutes_exceeds_threshold
+  - expected_files_touched_exceeds_threshold
+  - dependency_changes_pause
+  - merges_pr_pause
+  - external_side_effects_not_pr_artifact
+  field_record_missing:
+  - external_side_effects_not_pr_artifact
+  - merges_pr_pause
+- case: ledger-24
+  body_line: Do the task.
+  task_profile:
+    estimated_minutes: 90
+    risk_tier: P1
+    expected_files_touched: 30
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: true
+    public_visibility: false
+    target_repo: example-org/private-repo
+    creates_or_updates_pr: true
+    comments_on_github: true
+    commits_changes: true
+    merges_pr: true
+    files_issues: false
+    sends_oacp_reply_only: false
+  expected_reason_codes:
+  - dependency_changes_pause
+  expected_axes:
+  - estimated_minutes_exceeds_threshold
+  - expected_files_touched_exceeds_threshold
+  - dependency_changes_pause
+  - merges_pr_pause
+  field_record_missing:
+  - merges_pr_pause
+- case: ledger-25
+  body_line: Do the task.
+  task_profile:
+    estimated_minutes: 95
+    risk_tier: P1
+    expected_files_touched: 40
+    destructive_ops: false
+    external_side_effects: true
+    touches_auth_config_or_secrets: false
+    touches_dependencies: true
+    public_visibility: true
+    target_repo: example-org/private-repo
+    creates_or_updates_pr: true
+    comments_on_github: true
+    commits_changes: true
+    merges_pr: true
+    files_issues: false
+    sends_oacp_reply_only: false
+  expected_reason_codes:
+  - dependency_changes_pause
+  - public_visibility_pause
+  expected_axes:
+  - estimated_minutes_exceeds_threshold
+  - expected_files_touched_exceeds_threshold
+  - dependency_changes_pause
+  - public_visibility_pause
+  - merges_pr_pause
+  - external_side_effects_not_pr_artifact
+  field_record_missing:
+  - external_side_effects_not_pr_artifact
+  - merges_pr_pause
+
+# Content-sensitivity replay: the reply-only carve-out.
+#
+# Six anonymized reproductions of every content-sensitivity hard stop the
+# same fleet corpus recorded over one two-week window (two mirror-pair
+# research briefs sent to two receivers each, one competitive-analysis
+# brief, one re-evaluation after a brief amendment) plus one control.
+# Every original record carried the single reason code
+# hard_stop_content_sensitivity and was cleared by a human unchanged.
+#
+# Under the reply-only carve-out the category is an advisory for exactly
+# one profile shape: a complete profile declaring sends_oacp_reply_only
+# true with every other side-effect flag false. Three of the six records
+# (cat5-01..03) have that shape and replay with the matched term recorded
+# as a lexical_advisory_reply_only note and the verdict taken by the axes
+# the hard stop used to mask. The other three (cat5-04..06) declared the
+# legacy five-flag profile and omitted sends_oacp_reply_only, so the
+# shape is not declared and the hard stop is unchanged. The control
+# (cat5-control) declares a commit and stays hard.
+#
+# Runner: the content-sensitivity tests in tests/test_autonomy_ledger_replay.py.
+# recorded_reason_codes is what the original fleet record carried.
+content_sensitivity:
+  cases:
+  - case: cat5-01
+    type: brainstorm_request
+    body_line: >-
+      Literature sweep: the claim that the approach beat eight commercial
+      products is secondary and unverified - a lead, not evidence.
+    task_profile:
+      estimated_minutes: 50
+      risk_tier: P2
+      expected_files_touched: 8
+      destructive_ops: false
+      external_side_effects: false
+      touches_auth_config_or_secrets: false
+      touches_dependencies: false
+      public_visibility: false
+      sends_oacp_reply_only: true
+    recorded_reason_codes:
+    - hard_stop_content_sensitivity
+    expected_reason_codes:
+    - estimated_minutes_exceeds_threshold
+    - expected_files_touched_exceeds_threshold
+    expected_notes:
+    - code: lexical_advisory_reply_only
+      matched_pattern: commercial
+    expected_axes:
+    - estimated_minutes_exceeds_threshold
+    - expected_files_touched_exceeds_threshold
+  - case: cat5-02
+    type: brainstorm_request
+    body_line: >-
+      Literature sweep: the claim that the approach beat eight commercial
+      products is secondary and unverified - a lead, not evidence.
+    task_profile:
+      estimated_minutes: 50
+      risk_tier: P2
+      expected_files_touched: 8
+      destructive_ops: false
+      external_side_effects: false
+      touches_auth_config_or_secrets: false
+      touches_dependencies: false
+      public_visibility: false
+      sends_oacp_reply_only: true
+    recorded_reason_codes:
+    - hard_stop_content_sensitivity
+    expected_reason_codes:
+    - estimated_minutes_exceeds_threshold
+    - expected_files_touched_exceeds_threshold
+    expected_notes:
+    - code: lexical_advisory_reply_only
+      matched_pattern: commercial
+    expected_axes:
+    - estimated_minutes_exceeds_threshold
+    - expected_files_touched_exceeds_threshold
+  - case: cat5-03
+    type: task_request
+    body_line: >-
+      Code-first competitive analysis of the project: people, backing,
+      business-model signals (hosted tier? pricing page?), exact license.
+    task_profile:
+      estimated_minutes: 35
+      risk_tier: P2
+      expected_files_touched: 15
+      destructive_ops: false
+      external_side_effects: false
+      touches_auth_config_or_secrets: false
+      touches_dependencies: false
+      public_visibility: false
+      sends_oacp_reply_only: true
+    recorded_reason_codes:
+    - hard_stop_content_sensitivity
+    expected_reason_codes:
+    - expected_files_touched_exceeds_threshold
+    expected_notes:
+    - code: lexical_advisory_reply_only
+      matched_pattern: pricing
+    expected_axes:
+    - expected_files_touched_exceeds_threshold
+  - case: cat5-04
+    type: brainstorm_request
+    body_line: >-
+      Deep-dive on three harness-onboarding candidates; frame the interop
+      proof as coverage across frontier, commercial, and open-weight runtimes.
+    task_profile:
+      estimated_minutes: 25
+      risk_tier: P2
+      expected_files_touched: 12
+      destructive_ops: false
+      external_side_effects: false
+      touches_auth_config_or_secrets: false
+      touches_dependencies: false
+      public_visibility: false
+    recorded_reason_codes:
+    - hard_stop_content_sensitivity
+    expected_matched_pattern: commercial
+    expected_reason_codes:
+    - hard_stop_content_sensitivity
+    expected_axes:
+    - expected_files_touched_exceeds_threshold
+  - case: cat5-05
+    type: brainstorm_request
+    body_line: >-
+      Deep-dive on three harness-onboarding candidates; frame the interop
+      proof as coverage across frontier, commercial, and open-weight runtimes.
+    task_profile:
+      estimated_minutes: 25
+      risk_tier: P2
+      expected_files_touched: 12
+      destructive_ops: false
+      external_side_effects: false
+      touches_auth_config_or_secrets: false
+      touches_dependencies: false
+      public_visibility: false
+    recorded_reason_codes:
+    - hard_stop_content_sensitivity
+    expected_matched_pattern: commercial
+    expected_reason_codes:
+    - hard_stop_content_sensitivity
+    expected_axes:
+    - expected_files_touched_exceeds_threshold
+  - case: cat5-06
+    type: brainstorm_request
+    body_line: >-
+      Deep-dive on three harness-onboarding candidates (amended brief); frame
+      the interop proof as coverage across frontier, commercial, and
+      open-weight runtimes.
+    task_profile:
+      estimated_minutes: 25
+      risk_tier: P2
+      expected_files_touched: 12
+      destructive_ops: false
+      external_side_effects: false
+      touches_auth_config_or_secrets: false
+      touches_dependencies: false
+      public_visibility: false
+    recorded_reason_codes:
+    - hard_stop_content_sensitivity
+    expected_matched_pattern: commercial
+    expected_reason_codes:
+    - hard_stop_content_sensitivity
+    expected_axes:
+    - expected_files_touched_exceeds_threshold
+  - case: cat5-control
+    type: task_request
+    body_line: >-
+      Literature sweep: the claim that the approach beat eight commercial
+      products is secondary and unverified; commit the sweep notes to the repo.
+    task_profile:
+      estimated_minutes: 10
+      risk_tier: P2
+      expected_files_touched: 2
+      destructive_ops: false
+      external_side_effects: true
+      touches_auth_config_or_secrets: false
+      touches_dependencies: false
+      public_visibility: false
+      target_repo: example-org/private-repo
+      creates_or_updates_pr: false
+      comments_on_github: false
+      commits_changes: true
+      merges_pr: false
+      files_issues: false
+      sends_oacp_reply_only: false
+    recorded_reason_codes:
+    - hard_stop_content_sensitivity
+    expected_matched_pattern: commercial
+    expected_reason_codes:
+    - hard_stop_content_sensitivity
+    expected_axes:
+    - external_side_effects_not_pr_artifact

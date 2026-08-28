@@ -21,7 +21,10 @@ expected:
 ```
 
 Consumers may add implementation-specific trace fields, but `decision`, `mode`,
-`reason_codes`, and `matched_pattern` when present must match.
+`reason_codes`, and legacy `matched_pattern` when present must match. Evaluator
+outputs also carry `matched_patterns`: every lexical hit has a pattern name,
+source span, category, and non-empty `demotion_basis`; the executable runner
+validates that additive provenance across every fixture.
 
 These fixtures may also include:
 
@@ -45,7 +48,28 @@ These fixtures may also include:
 - `expected.result.threshold_checkpoint` for envelope drift decisions
 - `expected.breached` for the pinned top-level breach list
 - `expected.task_profile` for full declared-profile capture
+- `expected.admission_axes` for the pinned admission ledger (exact match)
+- generated `matched_patterns` for complete lexical provenance; this is
+  validated structurally by the runner rather than repeated in every expected
+  YAML file
 
 The executable runner is `tests/test_autonomy_gate.py`; every expected fixture
 is evaluated against `scripts/autonomy_gate.py`. Evaluator reason codes are a
 pinned enum, and any unregistered code fails the runner.
+
+The `ledger_replay/` subdirectory holds an anonymized replay corpus: audit
+records from a fleet corpus whose evaluator early-outs left envelope-derived
+admission axes unrecorded. Each case pins the unchanged verdict together
+with the complete `admission_axes` ledger and `co_occurring_reason_codes`
+the evaluator must now produce; the runner is
+`tests/test_autonomy_ledger_replay.py`. The same file's
+`content_sensitivity` section replays the reply-only carve-out over every
+content-sensitivity hard stop of one window plus a control, pinning which
+records demote to a `lexical_advisory_reply_only` note and which keep the
+hard stop.
+
+The `records/` subdirectory pins a second contract class: audit-record
+integrity findings (off-enum vocabulary, duplicate live evaluations,
+paused-terminal shapes) validated by `scripts/finalize_autonomy_record.py`
+and run by `tests/test_audit_record_conformance.py` — see
+`records/README.md`.

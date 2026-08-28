@@ -11,6 +11,7 @@ scope-envelope contract. The module is intentionally separate from
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import hashlib
 import json
@@ -23,7 +24,14 @@ from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tupl
 
 import yaml
 
-from _oacp_constants import REPO_SLUG_RE, SPEC_VERSION, locked_audit, utc_now_iso
+from _oacp_constants import (
+    REPO_SLUG_RE,
+    SPEC_VERSION,
+    atomic_replace_bytes,
+    atomic_replace_yaml,
+    locked_audit,
+    utc_now_iso,
+)
 from validate_message import validate_message_dict
 
 
@@ -82,6 +90,28 @@ COMPLETE_PROFILE_FIELDS = (
     "expected_files_touched",
     *LEGACY_PROFILE_BOOL_FIELDS,
 )
+# The structured admission ledger: every envelope-derived admission axis,
+# evaluated in full before any early return, in evaluation order. A pause
+# taken for one reason never leaves another axis unrecorded — record
+# silence means "passed", never "not evaluated". Lexical (Gate-3)
+# classification is body-derived and records every match in
+# `matched_patterns`; the legacy singular `matched_pattern` still names the
+# first blocking match. Lexical evidence is not a ledger axis.
+ADMISSION_AXES = (
+    "thresholds",
+    "declared_risk",
+    "declaration",
+    "side_effects",
+    "continuation_grant",
+)
+# Declared-risk profile flags and the per-knob admission pause each one
+# names, in the evaluation order the reason codes are recorded in.
+DECLARED_RISK_REASONS = (
+    ("destructive_ops", "destructive_ops_pause"),
+    ("touches_auth_config_or_secrets", "auth_config_or_secrets_pause"),
+    ("touches_dependencies", "dependency_changes_pause"),
+    ("public_visibility", "public_visibility_pause"),
+)
 
 FINAL_STATES = {"done", "paused", "blocked", "superseded", "error"}
 # `result.completion_kind` names the terminal shape of the EVALUATION only —
@@ -101,6 +131,12 @@ PINNED_COMPLETION_KINDS = frozenset({
 # prospectively — the undeclared action was caught before it materialized
 # (§E: mandatory before performing ANY newly discovered outward action).
 BREACH_BASES = ("declared_intent", "realized")
+# Checkpoint breach sub-basis: refines a `realized` breach on the time axis
+# only. `waiting_on_peer` marks a checkpoint whose clock overran while the
+# receiver was waiting on a peer reply (a review round, a re-authorization
+# answer) rather than working, so the ledger can separate review latency
+# from working time when calibrating the time axis.
+BREACH_SUB_BASES = ("waiting_on_peer",)
 # Checkpoint re-authorization channels, highest precedence first. Precedence
 # is by channel rank, never arrival order. GH comments are consultable but
 # never authoritative: they sit outside the protocol's identity and
@@ -217,13 +253,17 @@ GUARDRAILS_FENCE_RE = re.compile(
     r"(?ms)^[ \t]*```oacp-guardrails[ \t]*\n"
     r"(?P<content>.*?)^[ \t]*```[ \t]*(?:\n|$)"
 )
-NEGATION_PREFIX_RE = re.compile(
-    r"\b(?:"
+NEGATION_TERM_PATTERN = (
     r"no|not|never|do\s+not|does\s+not|don't|doesn't|"
     r"out\s+of\s+scope|exclude(?:s|d)?|avoid|refrain\s+from|"
     r"prohibited|forbidden|skip|without"
-    r")\b"
-    r"[^.!?;\n]{0,160}$",
+)
+NEGATION_TERM_RE = re.compile(
+    rf"\b(?:{NEGATION_TERM_PATTERN})\b",
+    re.IGNORECASE,
+)
+NEGATION_PREFIX_RE = re.compile(
+    rf"\b(?:{NEGATION_TERM_PATTERN})\b[^.!?;\n]{{0,160}}$",
     re.IGNORECASE,
 )
 BLOCK_NEGATION_PREFIX_RE = re.compile(
@@ -255,6 +295,23 @@ SIDE_EFFECT_VERB_PATTERNS = (
     ("merge", re.compile(r"(?<![\w/-])merge(?![\w/-])", re.IGNORECASE)),
 )
 
+INSTALL_VERB_PATTERN = r"\binstall(?:s|ing)?\b"
+INSTALL_VERB_RE = re.compile(INSTALL_VERB_PATTERN, re.IGNORECASE)
+INSTALL_DEPENDENCY_RE = re.compile(
+    rf"{INSTALL_VERB_PATTERN}"
+    rf"(?:(?!{INSTALL_VERB_PATTERN})[^.!?;\n—–])*?"
+    r"\bdependenc(?:y|ies)\b",
+    re.IGNORECASE,
+)
+# Fail-closed positive governance forms for the proven false positives. These
+# patterns prove that a negation governs the target occurrence; they are not an
+# enumeration of words that might terminate some unrelated negation.
+INSTALL_NEGATION_GOVERNANCE_RE = re.compile(
+    rf"\b(?:{NEGATION_TERM_PATTERN})\b"
+    r"(?:\s*:\s*|\s+(?:run\s+package\s+)?)$",
+    re.IGNORECASE,
+)
+
 NON_DEMOTABLE_SIDE_EFFECT_PATTERNS = (
     ("push to main", re.compile(r"\bpush(?:es|ing)?\s+to\s+main\b", re.IGNORECASE)),
     (
@@ -263,7 +320,7 @@ NON_DEMOTABLE_SIDE_EFFECT_PATTERNS = (
     ),
     (
         "install dependency",
-        re.compile(r"\binstall(?:s|ing)?\b.*\bdependenc(?:y|ies)\b", re.IGNORECASE),
+        INSTALL_DEPENDENCY_RE,
     ),
 )
 
@@ -300,10 +357,30 @@ CONTENT_SENSITIVITY_PATTERNS = (
     ("commercial", re.compile(r"(?<![\w/-])commercial(?![\w/-])", re.IGNORECASE)),
 )
 
+PUBLIC_REPO_RE = re.compile(
+    r"\bpublic\s+repositor(?:y|ies)|\bpublic\s+repo\b",
+    re.IGNORECASE,
+)
+# Public-repository demotion uses the same positive-governance rule: only the
+# narrow direct and out-of-scope forms supported by field evidence are advisory.
+PUBLIC_REPO_NEGATION_GOVERNANCE_RE = re.compile(
+    rf"\b(?:{NEGATION_TERM_PATTERN})\b"
+    r"(?:"
+    r"\s*:\s*(?:anything\s+(?:on|in)\s+)?(?:the\s+)?"
+    r"|\s+(?:(?:any|all)\s+)?(?:the\s+)?"
+    r"|\s+publish(?:ing)?(?:\s+(?:the\s+)?"
+    r"(?:docs?|documentation|content|changes?|files?))?"
+    r"\s+to\s+(?:the\s+)?"
+    r"|\s+(?:touch(?:ing)?|edit(?:ing)?|updat(?:e|ing)|"
+    r"chang(?:e|ing)|modify(?:ing)?|us(?:e|ing))\s+(?:the\s+)?"
+    r")$",
+    re.IGNORECASE,
+)
+
 NON_DEMOTABLE_SENSITIVE_PATTERNS = (
     (
         "public repo",
-        re.compile(r"\bpublic\s+repositor(?:y|ies)|\bpublic\s+repo\b", re.IGNORECASE),
+        PUBLIC_REPO_RE,
     ),
     (
         "memory SSOT",
@@ -314,6 +391,26 @@ NON_DEMOTABLE_SENSITIVE_PATTERNS = (
 AMBIGUOUS_SCOPE_PATTERNS = (
     ("all files", re.compile(r"\ball\s+files\b", re.IGNORECASE)),
 )
+
+PROFILELESS_ONLY_RISK_PATTERNS = (
+    ("pull request", re.compile(r"\bpull\s+request\b|\bPR\b")),
+    ("github", re.compile(r"\bgithub\b", re.IGNORECASE)),
+    ("commit", re.compile(r"\bcommit(?:s|ted|ting)?\b", re.IGNORECASE)),
+)
+
+LEXICAL_DEMOTION_BASES = frozenset({
+    "affirmative",
+    "guardrails_fence",
+    "negated",
+    "non_demotable",
+    "policy_allowed",
+    "profile_false",
+    "profile_true",
+    "profileless_risk",
+    "profileless_type",
+    "reference_only",
+    "reply_only_advisory",
+})
 
 
 class AutonomyConfigError(ValueError):
@@ -326,6 +423,48 @@ class TaskProfileError(ValueError):
 
 def load_yaml_file(path: Path) -> Dict[str, Any]:
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} must contain a YAML mapping")
+    return data
+
+
+class DuplicateKeyError(ValueError):
+    """A YAML mapping key appeared twice in one document."""
+
+
+class _StrictYamlLoader(yaml.SafeLoader):
+    """SafeLoader that refuses duplicate mapping keys.
+
+    Plain PyYAML silently keeps the later value, so a duplicated
+    ``logged_notes:`` key can shadow the populated one with an empty list
+    and the loss is invisible to every reader. Any writer that re-serializes
+    a record MUST load it through this loader first — rewriting a
+    plain-loaded mapping collapses the duplicate-key evidence for good.
+    """
+
+
+def _strict_construct_mapping(
+    loader: _StrictYamlLoader, node: Any, deep: bool = False
+) -> Dict[Any, Any]:
+    mapping: Dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise DuplicateKeyError(
+                f"duplicate mapping key {key!r} at line {key_node.start_mark.line + 1}"
+            )
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_StrictYamlLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _strict_construct_mapping
+)
+
+
+def load_yaml_strict(path: Path) -> Dict[str, Any]:
+    """Load a YAML mapping, refusing duplicate keys and non-mappings."""
+    data = yaml.load(path.read_text(encoding="utf-8"), Loader=_StrictYamlLoader)
     if not isinstance(data, dict):
         raise ValueError(f"{path} must contain a YAML mapping")
     return data
@@ -423,6 +562,7 @@ def write_audit_record(
     policy_path: Path,
     receiver: str,
     now_utc: Optional[dt.datetime] = None,
+    hold_lock: Optional[contextlib.ExitStack] = None,
 ) -> Path:
     """Persist a documented audit event without mutating evaluator stdout.
 
@@ -484,14 +624,35 @@ def write_audit_record(
     )
 
     message_id = str(decision.get("message_id") or "missing-message-id")
-    safe_message_id = re.sub(r"[^A-Za-z0-9._-]", "_", message_id).strip("._")
-    safe_message_id = safe_message_id[:200] or "missing-message-id"
+    # Every persisted evaluation carries an identity; re-evaluations of the
+    # same message reference their predecessor through it instead of
+    # accumulating indistinguishable duplicates.
+    audit_record.setdefault(
+        "evaluation_id",
+        evaluation_identity(
+            receiver,
+            message_id,
+            str(decision.get("message_sha256") or ""),
+            created_at,
+        ),
+    )
+    audit_record.setdefault("supersedes_evaluation_id", None)
+    safe_message_id = _safe_message_id(message_id)
     stamp = created_at.replace(":", "").replace("-", "")
     audit_path = audit_dir / f"{stamp}_{safe_message_id}.yaml"
+    if audit_path.exists():
+        # A distinct evaluation of the same message in the same second
+        # (e.g. an amended body superseding its predecessor) is legitimate
+        # now that logical duplicates adopt or supersede before reaching
+        # this writer — disambiguate by evaluation identity instead of
+        # refusing. A true duplicate shares the identity and still trips
+        # the in-lock existence check below.
+        eval_suffix = str(audit_record["evaluation_id"]).replace("eval-", "")[:8]
+        audit_path = audit_dir / f"{stamp}_{safe_message_id}_{eval_suffix}.yaml"
     content = yaml.safe_dump(audit_record, sort_keys=False, allow_unicode=True)
-    temp_path: Optional[Path] = None
 
-    with locked_audit(audit_path):
+    def _publish_locked() -> None:
+        temp_path: Optional[Path] = None
         if audit_path.exists():
             raise FileExistsError(f"audit record already exists: {audit_path}")
         try:
@@ -512,6 +673,18 @@ def write_audit_record(
         finally:
             if temp_path is not None and temp_path.exists():
                 temp_path.unlink()
+
+    if hold_lock is not None:
+        # Transactional caller: the record's lock is entered on the
+        # caller's stack BEFORE publication and stays held until the
+        # caller's whole transaction commits or rolls back, so a
+        # per-record writer can never commit an update to this record
+        # that a rollback would then delete.
+        hold_lock.enter_context(locked_audit(audit_path))
+        _publish_locked()
+    else:
+        with locked_audit(audit_path):
+            _publish_locked()
 
     return audit_path
 
@@ -739,6 +912,36 @@ def _profile_is_complete(profile: Optional[Dict[str, Any]]) -> bool:
     return isinstance(profile, dict) and all(key in profile for key in COMPLETE_PROFILE_FIELDS)
 
 
+# Every side-effect flag other than `sends_oacp_reply_only`: the legacy
+# aggregate plus each granular capability. All must be false for a profile
+# to have the reply-only shape.
+REPLY_ONLY_OTHER_SIDE_EFFECT_FIELDS = (
+    "external_side_effects",
+    *COVERABLE_CONTINUATION_FIELDS,
+)
+
+
+def _reply_only_profile_shape(
+    profile: Optional[Dict[str, Any]],
+    envelope: Optional[Dict[str, Any]],
+) -> bool:
+    """The reply-only profile shape: a complete declared profile whose
+    ``sends_oacp_reply_only`` is true and every other side-effect flag —
+    ``external_side_effects`` and each granular capability — is false.
+
+    Declaration-only by construction: the profileless default envelope is
+    reply-only too, but it declares nothing, and the content-sensitivity
+    carve-out keys on what the sender declared. A missing, unparsable, or
+    contradictory profile, or one that omits ``sends_oacp_reply_only``,
+    does not have the shape.
+    """
+    if envelope is None or not _profile_is_complete(profile):
+        return False
+    if not envelope.get("sends_oacp_reply_only"):
+        return False
+    return not any(envelope.get(field) for field in REPLY_ONLY_OTHER_SIDE_EFFECT_FIELDS)
+
+
 def _record_lexical_note(
     notes: List[Dict[str, str]],
     code: str,
@@ -766,6 +969,280 @@ def _match_is_negated(body: str, match: re.Match[str]) -> bool:
         if is_heading:
             return BLOCK_NEGATION_PREFIX_RE.search(stripped) is not None
     return False
+
+
+def _contextual_match_is_negated(
+    label: str,
+    body: str,
+    match: re.Match[str],
+) -> bool:
+    """Require an independent negation basis for each hard-stop occurrence."""
+    if not _match_is_negated(body, match):
+        return False
+    if NEGATION_TERM_RE.search(match.group(0)) is not None:
+        return False
+
+    prefix = body[:match.start()]
+    boundary = max(prefix.rfind(mark) for mark in ("\n", ".", "!", "?", ";", "—", "–"))
+    clause_prefix = prefix[boundary + 1:]
+    if label == "install dependency":
+        cue_pattern = INSTALL_VERB_RE
+        governance_pattern = INSTALL_NEGATION_GOVERNANCE_RE
+    elif label == "public repo":
+        cue_pattern = PUBLIC_REPO_RE
+        governance_pattern = PUBLIC_REPO_NEGATION_GOVERNANCE_RE
+    else:
+        return False
+    prior_occurrences = list(cue_pattern.finditer(clause_prefix))
+    governance_prefix = (
+        clause_prefix[prior_occurrences[-1].end():]
+        if prior_occurrences
+        else clause_prefix
+    )
+    governance_match = governance_pattern.search(governance_prefix)
+    if governance_match is None:
+        return False
+    return NEGATION_TERM_RE.search(
+        governance_prefix[:governance_match.start()]
+    ) is None
+
+
+def _match_is_reference_only(
+    label: str,
+    body: str,
+    match: re.Match[str],
+) -> bool:
+    """Recognize only the descriptive lexical contexts proven in field data.
+
+    These patterns are intentionally narrow. They do not make a whole class
+    demotable: they identify the repository's merge-method setting and
+    dependency-introspection wording that describe a token instead of asking
+    the receiver to perform its action.
+    """
+    if not _match_is_clause_bounded(match):
+        return False
+    left = max(body.rfind(mark, 0, match.start()) for mark in ("\n", ".", "!", "?", ";"))
+    right_candidates = [
+        position
+        for mark in ("\n", ".", "!", "?", ";")
+        if (position := body.find(mark, match.end())) >= 0
+    ]
+    right = min(right_candidates) if right_candidates else len(body)
+    clause_start = left + 1
+    clause = body[clause_start:right]
+
+    if label == "merge":
+        reference_patterns = (
+            re.compile(
+                r"\bmerge(?:[- ]commit)?\s+"
+                r"(?:method|setting|settings|strategy|mode)\b",
+                re.IGNORECASE,
+            ),
+        )
+    elif label == "install dependency":
+        reference_patterns = (
+            re.compile(
+                r"\bwhat\s+(?:a\s+)?(?:pip\s+)?install\b"
+                r"[^.!?;\n—–]{0,160}?\b"
+                r"(?:pulls?|installs?|includes?|requires?)\b"
+                r"[^.!?;\n—–]{0,160}?\bdependenc(?:y|ies)\b",
+                re.IGNORECASE,
+            ),
+            re.compile(
+                r"\b(?:install/build|package\s+installs?)\b"
+                r"[^.!?;\n—–]{0,80}?\bread\s+as\b"
+                r"[^.!?;\n—–]{0,80}?\bdependenc(?:y|ies)(?:-class)?\b",
+                re.IGNORECASE,
+            ),
+        )
+    else:
+        return False
+
+    for reference_pattern in reference_patterns:
+        for reference in reference_pattern.finditer(clause):
+            reference_start = clause_start + reference.start()
+            reference_end = clause_start + reference.end()
+            if reference_start <= match.start() and match.end() <= reference_end:
+                return True
+    return False
+
+
+def _match_is_clause_bounded(match: re.Match[str]) -> bool:
+    return re.search(r"[.!?;\n—–]", match.group(0)) is None
+
+
+def _contextual_non_demotable_basis(
+    label: str,
+    body: str,
+    match: re.Match[str],
+) -> str:
+    """Return the shared verdict/provenance disposition for one hard match."""
+    if not _match_is_clause_bounded(match):
+        return "non_demotable"
+    if label in {
+        "install dependency",
+        "public repo",
+    } and _contextual_match_is_negated(label, body, match):
+        return "negated"
+    if label == "install dependency" and _match_is_reference_only(
+        label, body, match
+    ):
+        return "reference_only"
+    return "non_demotable"
+
+
+def _guardrails_content_spans(body: str) -> List[Tuple[int, int]]:
+    return [match.span("content") for match in GUARDRAILS_FENCE_RE.finditer(body)]
+
+
+def _match_is_in_spans(
+    match: re.Match[str],
+    spans: Sequence[Tuple[int, int]],
+) -> bool:
+    return any(start <= match.start() and match.end() <= end for start, end in spans)
+
+
+def _collect_lexical_provenance(
+    body: str,
+    profile: Optional[Dict[str, Any]],
+    envelope: Optional[Dict[str, Any]],
+    policy: Optional[Dict[str, Any]],
+    msg_type: str,
+) -> List[Dict[str, Any]]:
+    """Return every lexical match with its source span and disposition basis.
+
+    Spans are zero-based, end-exclusive Unicode-code-point offsets into the
+    original message body. The list is source ordered; overlapping patterns
+    remain separate evidence because they belong to distinct policy classes.
+    """
+    fence_spans = _guardrails_content_spans(body)
+    profile_complete = _profile_is_complete(profile)
+    external_policy = None
+    if isinstance(policy, dict) and isinstance(policy.get("thresholds"), dict):
+        external_policy = policy["thresholds"].get("external_side_effects")
+    content_reply_only = _reply_only_profile_shape(profile, envelope)
+    profileless_type = (
+        profile is None
+        and isinstance(policy, dict)
+        and msg_type in policy.get("allow_without_task_profile", ())
+    )
+    profileless_risk = (
+        profile is None
+        and isinstance(policy, dict)
+        and msg_type not in policy.get("allow_without_task_profile", ())
+        and msg_type not in REVIEW_LIFECYCLE_TYPES
+    )
+
+    def basis(
+        category: str,
+        label: str,
+        match: re.Match[str],
+        profile_field: Optional[str] = None,
+    ) -> str:
+        fenced = _match_is_in_spans(match, fence_spans)
+        if category == "destructive_command":
+            return "non_demotable"
+        if category == "side_effect":
+            if profileless_risk:
+                return "profileless_risk"
+            if fenced:
+                return "guardrails_fence"
+            if _match_is_negated(body, match):
+                return "negated"
+            if _match_is_reference_only(label, body, match):
+                return "reference_only"
+            if profileless_type:
+                return "profileless_type"
+            if profile_complete and envelope is not None and not envelope["external_side_effects"]:
+                return "profile_false"
+            if external_policy == "allow" and envelope is not None and envelope["external_side_effects"]:
+                return "policy_allowed"
+            if label == "merge" and envelope is not None and envelope.get("merges_pr"):
+                return "profile_true"
+            return "affirmative"
+        if category == "non_demotable_side_effect":
+            if profileless_risk:
+                return "profileless_risk"
+            return _contextual_non_demotable_basis(label, body, match)
+        if category == "sensitive_scope":
+            if fenced:
+                return "guardrails_fence"
+            if _match_is_negated(body, match):
+                return "negated"
+            if (
+                profile_field is not None
+                and profile_complete
+                and envelope is not None
+                and not envelope[profile_field]
+            ):
+                return "profile_false"
+            return "affirmative"
+        if category == "content_sensitivity":
+            return "reply_only_advisory" if content_reply_only else "non_demotable"
+        if category == "non_demotable_sensitive_scope":
+            return _contextual_non_demotable_basis(label, body, match)
+        if category == "ambiguous_scope":
+            if fenced:
+                return "guardrails_fence"
+            if _match_is_negated(body, match):
+                return "negated"
+            return "affirmative"
+        return "profileless_risk"
+
+    hits: List[Dict[str, Any]] = []
+
+    def append_matches(
+        category: str,
+        patterns: Sequence[Tuple[str, re.Pattern[str]]],
+    ) -> None:
+        for label, pattern in patterns:
+            for match in pattern.finditer(body):
+                hits.append({
+                    "pattern": label,
+                    "category": category,
+                    "span": {"start": match.start(), "end": match.end()},
+                    "demotion_basis": basis(category, label, match),
+                })
+
+    append_matches("destructive_command", DESTRUCTIVE_PATTERNS)
+    append_matches("side_effect", SIDE_EFFECT_VERB_PATTERNS)
+    append_matches("non_demotable_side_effect", NON_DEMOTABLE_SIDE_EFFECT_PATTERNS)
+    for label, pattern, profile_field in DECLARATION_AWARE_SENSITIVE_PATTERNS:
+        for match in pattern.finditer(body):
+            hits.append({
+                "pattern": label,
+                "category": "sensitive_scope",
+                "span": {"start": match.start(), "end": match.end()},
+                "demotion_basis": basis(
+                    "sensitive_scope", label, match, profile_field
+                ),
+            })
+    append_matches("content_sensitivity", CONTENT_SENSITIVITY_PATTERNS)
+    append_matches(
+        "non_demotable_sensitive_scope", NON_DEMOTABLE_SENSITIVE_PATTERNS
+    )
+    append_matches("ambiguous_scope", AMBIGUOUS_SCOPE_PATTERNS)
+    if profileless_risk:
+        append_matches("profileless_risk", PROFILELESS_ONLY_RISK_PATTERNS)
+
+    unknown_bases = {
+        hit["demotion_basis"] for hit in hits
+    } - LEXICAL_DEMOTION_BASES
+    if unknown_bases:
+        raise ValueError(
+            "unregistered lexical demotion basis: "
+            + ", ".join(sorted(unknown_bases))
+        )
+
+    return sorted(
+        hits,
+        key=lambda hit: (
+            hit["span"]["start"],
+            hit["span"]["end"],
+            hit["category"],
+            hit["pattern"],
+        ),
+    )
 
 
 def _gate3_body(body: str, notes: List[Dict[str, str]]) -> str:
@@ -800,9 +1277,38 @@ def _first_effective_match(
             if _match_is_negated(body, match):
                 _record_lexical_note(notes, "lexical_advisory_negated", label)
                 continue
+            if _match_is_reference_only(label, body, match):
+                _record_lexical_note(
+                    notes, "lexical_advisory_reference_only", label
+                )
+                continue
             if demote_declared or label in demote_labels:
                 _record_lexical_note(notes, "lexical_advisory_declared", label)
                 continue
+            return label
+    return None
+
+
+def _first_contextual_non_demotable_match(
+    patterns: Sequence[Tuple[str, re.Pattern[str]]],
+    body: str,
+    notes: List[Dict[str, str]],
+    *,
+    contextual_labels: FrozenSet[str],
+) -> Optional[str]:
+    """Keep a class hard while demoting only documented contextual matches."""
+    for label, pattern in patterns:
+        for match in pattern.finditer(body):
+            if label in contextual_labels:
+                match_basis = _contextual_non_demotable_basis(label, body, match)
+                if match_basis == "negated":
+                    _record_lexical_note(notes, "lexical_advisory_negated", label)
+                    continue
+                if match_basis == "reference_only":
+                    _record_lexical_note(
+                        notes, "lexical_advisory_reference_only", label
+                    )
+                    continue
             return label
     return None
 
@@ -920,6 +1426,381 @@ def message_expired(
     return now >= expires
 
 
+def _safe_message_id(message_id: str) -> str:
+    """Filesystem-safe form of a message id (never trusted as identity)."""
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", message_id).strip("._")
+    return safe[:200] or "missing-message-id"
+
+
+def evaluation_identity(
+    receiver: str,
+    message_id: str,
+    message_sha256: str,
+    created_at_utc: str,
+) -> str:
+    """Deterministic identity for one evaluation event.
+
+    Derived from what makes an evaluation distinct — who evaluated, which
+    message, which exact bytes, and when — so re-running the writer on the
+    same event reproduces the same id instead of minting a fresh one.
+    Distinct evaluations of the same message (an amended body, a later
+    re-evaluation) differ in ``message_sha256`` or ``created_at_utc`` and
+    get distinct ids, which is what supersession chains reference.
+    """
+    digest = hashlib.sha256(
+        "\n".join((receiver, message_id, message_sha256, created_at_utc)).encode("utf-8")
+    ).hexdigest()
+    return f"eval-{digest[:16]}"
+
+
+def find_prior_evaluations(
+    audit_dir: Optional[Path],
+    receiver: str,
+    message_id: str,
+) -> List[Tuple[Path, Dict[str, Any]]]:
+    """Return every readable audit record matching this logical identity."""
+    if not message_id or audit_dir is None or not audit_dir.is_dir():
+        return []
+    priors: List[Tuple[Path, Dict[str, Any]]] = []
+    for audit_path in sorted(audit_dir.glob("*.yaml")):
+        try:
+            audit = yaml.safe_load(audit_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            continue
+        if not isinstance(audit, dict):
+            continue
+        if audit.get("message_id") == message_id and audit.get("receiver") == receiver:
+            priors.append((audit_path, audit))
+    return priors
+
+
+def _prior_evaluation_id(prior: Mapping[str, Any], receiver: str) -> str:
+    """A prior's on-disk evaluation_id, or the deterministic identity it
+    will be stamped with (``supersede_audit_record`` and adoption both use
+    the same derivation, so a computed reference always resolves)."""
+    return str(
+        prior.get("evaluation_id")
+        or evaluation_identity(
+            receiver,
+            str(prior.get("message_id") or ""),
+            str(prior.get("message_sha256") or ""),
+            str(prior.get("created_at_utc") or ""),
+        )
+    )
+
+
+def supersede_audit_record(
+    audit_path: Path,
+    *,
+    superseded_by: str,
+    now_utc: Optional[dt.datetime] = None,
+) -> None:
+    """Close a stale evaluation in favor of a newer one, non-destructively.
+
+    A state update under the audit lock: ``final_state`` moves to
+    ``superseded``, the superseding evaluation is referenced, and a
+    completion stamp closes the record. Admission history — decision,
+    reason codes, checkpoint blocks, human outcomes — is preserved
+    verbatim; supersession is how off-vocabulary or stale records leave
+    the live corpus without rewriting what they said.
+    """
+    with locked_audit(audit_path):
+        _supersede_audit_record_locked(
+            audit_path, superseded_by=superseded_by, now_utc=now_utc
+        )
+
+
+def _supersede_audit_record_locked(
+    audit_path: Path,
+    *,
+    superseded_by: str,
+    now_utc: Optional[dt.datetime] = None,
+) -> None:
+    """The lock-free half of ``supersede_audit_record``.
+
+    The caller MUST already hold ``locked_audit(audit_path)`` —
+    ``persist_evaluation`` pre-acquires every affected record's lock for
+    its whole capture/mutate/restore span (flock is not reentrant, so it
+    cannot call the locking wrapper).
+    """
+    # Strict load: automatic supersession re-serializes the record, and
+    # rewriting a plain-loaded mapping would silently collapse
+    # duplicate-key evidence (PyYAML keeps only the later value). Fail
+    # closed and leave malformed evidence untouched instead.
+    record = load_yaml_strict(audit_path)
+    result = record.setdefault("result", {})
+    if not isinstance(result, dict):
+        raise ValueError(f"{audit_path}: result must be a mapping")
+    if result.get("final_state") == "superseded":
+        return
+    if result.get("final_state") not in FINAL_STATES | {"pending"}:
+        # Preserve legacy off-enum run state as history before the
+        # overwrite — the original value is part of what supersession
+        # documents.
+        result["legacy_final_state"] = result.get("final_state")
+    result["final_state"] = "superseded"
+    if not result.get("completed_at_utc"):
+        result["completed_at_utc"] = utc_now_iso(now_utc)
+    if not record.get("evaluation_id"):
+        record["evaluation_id"] = evaluation_identity(
+            str(record.get("receiver") or ""),
+            str(record.get("message_id") or ""),
+            str(record.get("message_sha256") or ""),
+            str(record.get("created_at_utc") or ""),
+        )
+    record["superseded_by_evaluation_id"] = superseded_by
+    atomic_replace_yaml(audit_path, record)
+
+
+def persist_evaluation(
+    audit_dir: Path,
+    decision: Dict[str, Any],
+    *,
+    config: Dict[str, Any],
+    message: Dict[str, Any],
+    message_path: Path,
+    policy_path: Path,
+    receiver: str,
+) -> Dict[str, Any]:
+    """Persist a decision as one logical-identity transaction.
+
+    The prior scan, the adopt-or-write choice, and predecessor supersession
+    are serialized under a stable lock keyed by (receiver, message id) —
+    per-file locks alone cannot prevent two concurrent evaluations of the
+    same logical message from both scanning an empty directory and both
+    staying live. Adoption also self-heals a crashed predecessor
+    transaction: any other live prior of the adopted identity is superseded
+    on the next evaluation, so exactly one evaluation per logical message
+    stays live even across a writer that died between its write and its
+    supersession pass.
+
+    Returns ``{"action": "adopted"|"written", "audit_path", "evaluation_id",
+    "superseded": [paths]}``. The transaction pre-acquires every affected
+    record's ``locked_audit`` in deterministic path order and holds them
+    across byte capture, mutation, and any restore — including the newly
+    created successor, whose lock is entered before publication and held
+    until the transaction commits or rolls back — so per-record audit
+    writers serialize with it instead of losing a committed update to its
+    rollback; the authoritative record view is re-read under those locks.
+    It fails closed and is rollback-capable for every failure class,
+    validation and filesystem alike: every live predecessor is
+    strict-load preflighted BEFORE anything is written, so a predecessor
+    that cannot be superseded automatically (e.g. duplicate-key YAML —
+    evidence is preserved, never normalized) raises with nothing
+    persisted; any later failure restores every already-mutated
+    predecessor byte-for-byte (read-back verified) and removes a
+    just-written successor under the same locks before raising.
+    Reporting success while a second evaluation stays live — or leaving a
+    predecessor linked to a successor that was rolled back — would defeat
+    the transaction's one-live-record invariant.
+    """
+    message_id = str(message.get("id") or "")
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    identity_anchor = audit_dir / f".identity_{receiver}_{_safe_message_id(message_id)}"
+
+    # Original bytes of every file this transaction has mutated, in
+    # mutation order. Any failure — validation OR filesystem — restores
+    # them all (and removes a just-written successor) before raising, so
+    # the caller never observes duplicate live evaluations or a
+    # predecessor linked to a successor that no longer exists.
+    mutated: List[Tuple[Path, bytes]] = []
+
+    def _restore_pre_call_state(successor_path: Optional[Path]) -> None:
+        problems: List[str] = []
+        for path, original in mutated:
+            try:
+                atomic_replace_bytes(path, original)
+                if path.read_bytes() != original:
+                    problems.append(f"{path.name}: read-back mismatch after restore")
+            except OSError as exc:
+                problems.append(f"{path.name}: restore failed ({exc})")
+        if successor_path is not None:
+            try:
+                successor_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                problems.append(
+                    f"{successor_path.name}: rollback unlink failed ({exc})"
+                )
+            if successor_path.exists():
+                problems.append(
+                    f"{successor_path.name}: still present after rollback"
+                )
+        if problems:
+            raise OSError(
+                "logical-identity transaction rollback incomplete — manual "
+                "repair required: " + "; ".join(problems)
+            )
+
+    def _supersede_all_or_restore(
+        targets: List[Path],
+        successor_id: str,
+        successor_path: Optional[Path],
+    ) -> List[Path]:
+        superseded: List[Path] = []
+        for prior_path in targets:
+            try:
+                original = prior_path.read_bytes()
+                mutated.append((prior_path, original))
+                _supersede_audit_record_locked(
+                    prior_path, superseded_by=successor_id
+                )
+            except Exception as exc:
+                _restore_pre_call_state(successor_path)
+                raise ValueError(
+                    "logical-identity transaction failed: live predecessor "
+                    f"{prior_path.name} could not be superseded ({exc}) — "
+                    "pre-call state restored; repair it manually before "
+                    "re-evaluating this message"
+                ) from exc
+            superseded.append(prior_path)
+        return superseded
+
+    def _stamp_adopted_links(
+        prior_path: Path, adopted_id: str, superseded_ids: List[str]
+    ) -> None:
+        """Make an adopted survivor a strictly resolvable successor.
+
+        The strict resolver requires the successor file to carry its
+        evaluation_id and to reference every predecessor it absorbed —
+        a pre-identity adopted record satisfies neither, which would
+        leave its healed predecessors dangling. The caller already holds
+        this record's ``locked_audit`` for the whole transaction span.
+        """
+        record = load_yaml_strict(prior_path)
+        changed = False
+        if not record.get("evaluation_id"):
+            record["evaluation_id"] = adopted_id
+            changed = True
+        existing = record.get("superseded_evaluation_ids")
+        merged = list(existing) if isinstance(existing, list) else []
+        for superseded_id in superseded_ids:
+            if superseded_id not in merged:
+                merged.append(superseded_id)
+                changed = True
+        if changed:
+            record["superseded_evaluation_ids"] = merged
+            atomic_replace_yaml(prior_path, record)
+
+    with locked_audit(identity_anchor), contextlib.ExitStack() as record_locks:
+        scan = find_prior_evaluations(audit_dir, receiver, message_id)
+        candidate_paths = sorted({
+            path
+            for path, prior in scan
+            if (prior.get("result") or {}).get("final_state") != "superseded"
+        })
+        # Deterministic-order lock acquisition over every record this
+        # transaction may mutate, held across byte capture, mutation, and
+        # any restore — per-record audit writers (human-outcome recording,
+        # message_auth attachment) serialize with the transaction instead
+        # of having a committed update erased by its rollback.
+        for path in candidate_paths:
+            record_locks.enter_context(locked_audit(path))
+        # Authoritative view: re-read under the held locks (the unlocked
+        # scan can be stale against a concurrent per-record writer). This
+        # is also the strict preflight — fail the whole transaction while
+        # nothing has changed.
+        live: List[Tuple[Path, Dict[str, Any]]] = []
+        preflight_failures: List[Tuple[Path, str]] = []
+        for path in candidate_paths:
+            try:
+                strict = load_yaml_strict(path)
+                strict_result = strict.get("result")
+                if strict_result is not None and not isinstance(strict_result, dict):
+                    raise ValueError("result must be a mapping")
+            except FileNotFoundError:
+                continue  # removed since the scan — nothing left to close
+            except ValueError as exc:
+                preflight_failures.append((path, str(exc)))
+                continue
+            if (strict.get("result") or {}).get("final_state") == "superseded":
+                continue  # closed since the scan — already resolved
+            live.append((path, strict))
+        if preflight_failures:
+            details = "; ".join(
+                f"{path.name}: {reason}" for path, reason in preflight_failures
+            )
+            raise ValueError(
+                "logical-identity transaction failed: live predecessor(s) "
+                f"could not be superseded ({details}) — evidence preserved, "
+                "nothing written; repair them manually before re-evaluating "
+                "this message"
+            )
+        adoptable = [
+            (path, prior)
+            for path, prior in live
+            if prior.get("message_sha256") == decision.get("message_sha256")
+            and prior.get("policy_sha256") == decision.get("policy_sha256")
+            and prior.get("decision") == decision.get("decision")
+        ]
+        if adoptable:
+            prior_path, prior = max(adoptable, key=lambda item: item[0].name)
+            adopted_id = _prior_evaluation_id(prior, receiver)
+            others = [
+                (path, other) for path, other in live if path != prior_path
+            ]
+            if others:
+                try:
+                    original = prior_path.read_bytes()
+                    mutated.append((prior_path, original))
+                    _stamp_adopted_links(
+                        prior_path,
+                        adopted_id,
+                        [_prior_evaluation_id(o, receiver) for _p, o in others],
+                    )
+                except Exception as exc:
+                    _restore_pre_call_state(None)
+                    raise ValueError(
+                        "logical-identity transaction failed: adopted "
+                        f"evaluation {prior_path.name} could not be stamped "
+                        f"as successor ({exc}) — pre-call state restored"
+                    ) from exc
+            superseded = _supersede_all_or_restore(
+                [path for path, _o in others], adopted_id, None
+            )
+            return {
+                "action": "adopted",
+                "audit_path": prior_path,
+                "evaluation_id": adopted_id,
+                "superseded": superseded,
+            }
+
+        if live:
+            # The newest predecessor keeps the single-valued back-pointer
+            # (each writer stamped it against the then-newest live record);
+            # the full list is what lets the strict resolver follow every
+            # predecessor of a multi-prior self-heal back to this successor.
+            ordered = sorted(live, key=lambda item: item[0].name)
+            decision["supersedes_evaluation_id"] = _prior_evaluation_id(
+                ordered[-1][1], receiver
+            )
+            decision["superseded_evaluation_ids"] = [
+                _prior_evaluation_id(prior, receiver) for _path, prior in ordered
+            ]
+        audit_path = write_audit_record(
+            audit_dir,
+            decision,
+            config=config,
+            message=message,
+            message_path=message_path,
+            policy_path=policy_path,
+            receiver=receiver,
+            hold_lock=record_locks,
+        )
+        written = yaml.safe_load(audit_path.read_text(encoding="utf-8"))
+        new_id = str(written.get("evaluation_id"))
+        superseded = _supersede_all_or_restore(
+            [path for path, _prior in live], new_id, audit_path
+        )
+        return {
+            "action": "written",
+            "audit_path": audit_path,
+            "evaluation_id": new_id,
+            "superseded": superseded,
+        }
+
+
 def prior_auto_accept_exists(
     message_id: str,
     receiver: str,
@@ -958,11 +1839,7 @@ def obvious_no_profile_risk(body: str) -> bool:
     patterns = (
         SIDE_EFFECT_VERB_PATTERNS
         + NON_DEMOTABLE_SIDE_EFFECT_PATTERNS
-        + (
-            ("pull request", re.compile(r"\bpull\s+request\b|\bPR\b")),
-            ("github", re.compile(r"\bgithub\b", re.IGNORECASE)),
-            ("commit", re.compile(r"\bcommit(?:s|ted|ting)?\b", re.IGNORECASE)),
-        )
+        + PROFILELESS_ONLY_RISK_PATTERNS
     )
     return first_match(patterns, body) is not None
 
@@ -1723,14 +2600,34 @@ def _side_effect_reasons(
     return reasons
 
 
-def _profile_declaration_errors(envelope: Dict[str, Any]) -> List[str]:
-    breaches: List[str] = []
-    artifact_fields = [key for key in COVERABLE_CONTINUATION_FIELDS if envelope[key]]
+def _profile_declaration_details(envelope: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Admission-time declaration errors with their cause.
+
+    Each entry names the contradicted field, what it declared, and the
+    declared fields it conflicts with — so a ``declaration_error`` pause
+    records which axis failed and why, not just that one did.
+    """
+    details: List[Dict[str, Any]] = []
+    artifact_fields = [
+        f"task_profile.{key}" for key in COVERABLE_CONTINUATION_FIELDS if envelope[key]
+    ]
     if artifact_fields and not envelope["external_side_effects"]:
-        breaches.append("task_profile.external_side_effects")
+        details.append({
+            "field": "task_profile.external_side_effects",
+            "declared": False,
+            "conflicts_with": artifact_fields,
+        })
     if envelope["sends_oacp_reply_only"] and artifact_fields:
-        breaches.append("task_profile.sends_oacp_reply_only")
-    return breaches
+        details.append({
+            "field": "task_profile.sends_oacp_reply_only",
+            "declared": True,
+            "conflicts_with": artifact_fields,
+        })
+    return details
+
+
+def _profile_declaration_errors(envelope: Dict[str, Any]) -> List[str]:
+    return [entry["field"] for entry in _profile_declaration_details(envelope)]
 
 
 def _threshold_reasons(
@@ -1743,6 +2640,70 @@ def _threshold_reasons(
     if envelope["expected_files_touched"] > thresholds["max_expected_files_touched"]:
         reasons.append("expected_files_touched_exceeds_threshold")
     return reasons
+
+
+def _declared_risk_reasons(envelope: Dict[str, Any]) -> List[str]:
+    return [code for key, code in DECLARED_RISK_REASONS if envelope[key]]
+
+
+def not_evaluated_admission_ledger() -> Dict[str, Any]:
+    """The ledger shape for a pause taken before a scope envelope exists.
+
+    Nothing envelope-derived can be evaluated without an envelope, and the
+    record says so explicitly: ``evaluated: false`` with every axis null
+    is distinguishable from an evaluated ledger whose axes all passed.
+    """
+    ledger: Dict[str, Any] = {"evaluated": False}
+    for axis in ADMISSION_AXES:
+        ledger[axis] = None
+    ledger["declaration_errors"] = None
+    return ledger
+
+
+def admission_ledger(
+    envelope: Dict[str, Any],
+    policy: Dict[str, Any],
+    grant_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Evaluate every envelope-derived admission axis, independent of order.
+
+    Each axis lists the pinned reason codes that held (empty = passed).
+    The ledger is pure evidence: the verdict still comes from the first
+    failing axis in evaluation order, and ``reason_codes`` keep that
+    pinned first-failure shape; everything else the ledger holds surfaces
+    through ``co_occurring_reason_codes``.
+    """
+    thresholds = policy["thresholds"]
+    grant_codes: List[str] = []
+    if grant_result.get("decision") not in {"accepted", "not_present"}:
+        grant_codes.extend(grant_result.get("reason_codes") or [])
+    if continuation_scope_breaches(envelope, grant_result):
+        grant_codes.append("continuation_grant_scope_exceeded")
+    declaration_errors = _profile_declaration_details(envelope)
+    return {
+        "evaluated": True,
+        "thresholds": _threshold_reasons(envelope, thresholds),
+        "declared_risk": _declared_risk_reasons(envelope),
+        "declaration": ["declaration_error"] if declaration_errors else [],
+        "side_effects": _side_effect_reasons(
+            envelope,
+            grant_result,
+            str(thresholds["external_side_effects"]),
+            policy["private_repo_allowlist"],
+        ),
+        "continuation_grant": grant_codes,
+        "declaration_errors": declaration_errors,
+    }
+
+
+def admission_ledger_codes(ledger: Dict[str, Any]) -> List[str]:
+    """Every reason code an evaluated ledger holds, deduplicated, axis order."""
+    codes: List[str] = []
+    for axis in ADMISSION_AXES:
+        for code in ledger.get(axis) or []:
+            if code not in codes:
+                codes.append(code)
+    return codes
 
 
 def _actual_side_effects(actuals: Dict[str, Any]) -> Dict[str, bool]:
@@ -1783,6 +2744,16 @@ def _breach_basis(actuals: Dict[str, Any]) -> Optional[str]:
     if value not in BREACH_BASES:
         choices = " or ".join(BREACH_BASES)
         raise ValueError(f"actuals.breach_basis must be {choices}")
+    return str(value)
+
+
+def _breach_sub_basis(actuals: Dict[str, Any]) -> Optional[str]:
+    value = actuals.get("breach_sub_basis")
+    if value is None:
+        return None
+    if value not in BREACH_SUB_BASES:
+        choices = " or ".join(BREACH_SUB_BASES)
+        raise ValueError(f"actuals.breach_sub_basis must be {choices}")
     return str(value)
 
 
@@ -2201,7 +3172,7 @@ def _arbitrate_reauthorization(
         block["disposition"] = "insufficient" if fresh else "stale"
         return
     block["disposition"] = "resumed"
-    block["cleared_paused_at_utc"] = paused_at
+    block["cleared_paused_at_utc"] = answer["decided_at_utc"]
 
 
 def evaluate_threshold_checkpoint(
@@ -2219,6 +3190,7 @@ def evaluate_threshold_checkpoint(
         "breached_fields": [],
         "declaration_errors": [],
         "breach_basis": None,
+        "breach_sub_basis": None,
         "paused_at_utc": None,
         "action": "not_evaluated",
         "predicted_risk_materialized": False,
@@ -2328,6 +3300,28 @@ def evaluate_threshold_checkpoint(
         paused_at = _actual_utc_text(actuals, "paused_at_utc") or utc_now_iso()
         basis = "declared_intent" if intent_fields else "realized"
 
+    # A sub-basis refines a realized time-axis breach only: `waiting_on_peer`
+    # says the clock overran while the receiver waited on a peer reply, not
+    # while working. It is rejected anywhere it cannot mean that — on an
+    # unbreached checkpoint, a prospective (declared_intent) breach, or a
+    # breach that does not include the time axis — so the ledger can trust
+    # the split instead of recording a stray label.
+    sub_basis = _breach_sub_basis(actuals)
+    if sub_basis is not None:
+        if not breached:
+            raise ValueError(
+                "actuals.breach_sub_basis requires a breached checkpoint"
+            )
+        if basis != "realized":
+            raise ValueError(
+                "actuals.breach_sub_basis requires breach_basis realized"
+            )
+        if "actual_minutes" not in breached_fields:
+            raise ValueError(
+                f"actuals.breach_sub_basis {sub_basis} requires a time-axis "
+                "breach (actual_minutes in breached_fields)"
+            )
+
     # Re-authorization arbitration: channel answers presented by the
     # receiver are arbitrated against THIS pause. A resumed disposition is
     # the only one that clears the breach; everything else leaves the
@@ -2381,6 +3375,7 @@ def evaluate_threshold_checkpoint(
         "breached_fields": breached_fields,
         "declaration_errors": declaration_errors,
         "breach_basis": basis,
+        "breach_sub_basis": sub_basis,
         "paused_at_utc": paused_at,
         "action": action,
         "predicted_risk_materialized": predicted_value,
@@ -2404,6 +3399,7 @@ def _base_result(
         "completion_kind": completion_kind,
         "actual_minutes": checkpoint.get("actual_minutes"),
         "actual_files_touched": checkpoint.get("actual_files_touched"),
+        "work_started_at_utc": None,
         "predicted_risk_materialized": bool(
             checkpoint.get("predicted_risk_materialized", False)
         ),
@@ -2455,12 +3451,19 @@ def evaluate_autonomy(
     """
     msg_hash = message_sha256(message, message_path, message_raw)
     policy_hash = canonical_policy_sha256(config)
+    body = str(message.get("body") or "")
+    msg_type = str(message.get("type") or "")
     logged_notes: List[Dict[str, str]] = []
     profile_snapshot: Optional[Dict[str, Any]] = None
     envelope_source: Optional[str] = None
     # Resolved below; pre-bound so early pauses (malformed config) can
     # evaluate checkpoints with sender authority failing closed.
     policy: Optional[Dict[str, Any]] = None
+    # The structured admission ledger. Stays `evaluated: false` on every
+    # pause taken before a scope envelope exists — there is nothing to
+    # evaluate against, and the record says so instead of reading as
+    # "all passed".
+    admission_axes: Dict[str, Any] = not_evaluated_admission_ledger()
 
     def finish(decision: Dict[str, Any]) -> Dict[str, Any]:
         reason_codes = list(decision.get("reason_codes") or [])
@@ -2501,6 +3504,14 @@ def evaluate_autonomy(
             reason_codes if decision.get("decision") == "paused" else [],
         )
         decision.setdefault("co_occurring_reason_codes", [])
+        decision["admission_axes"] = admission_axes
+        decision["matched_patterns"] = _collect_lexical_provenance(
+            body,
+            profile_snapshot,
+            decision.get("scope_envelope"),
+            policy,
+            msg_type,
+        )
         return decision
 
     def paused(
@@ -2576,9 +3587,6 @@ def evaluate_autonomy(
 
     if prior_auto_accept_exists(str(message.get("id") or ""), receiver, audit_dir):
         return paused(mode, ["message_replayed"])
-
-    body = str(message.get("body") or "")
-    msg_type = str(message.get("type") or "")
 
     if msg_type in REVIEW_LIFECYCLE_TYPES:
         # Review-loop lifecycle admission: the four task gates do not run —
@@ -2657,12 +3665,47 @@ def evaluate_autonomy(
 
     gate3_body = _gate3_body(body, logged_notes)
 
-    # Gate-2 numeric thresholds are evaluated before any Gate-3 early-out so
-    # a lexical hard stop cannot leave a co-occurring breach unevaluated:
-    # record silence must mean "passed", never "not evaluated".
-    masked_threshold_reasons: List[str] = []
+    grant_result: Dict[str, Any] = {"present": False, "enabled": False}
+    if envelope is not None and envelope_source == SCOPE_ENVELOPE_SOURCE_PROFILE:
+        # Continuation grants are a sender-declared surface; a default
+        # envelope declares nothing, so grant interplay is reachable on
+        # exempt types only through a voluntary profile (the supported
+        # override path). Resolved ahead of Gate 3 because the ledger's
+        # side-effect axis is grant-aware.
+        grant_result = evaluate_continuation_grant(
+            message,
+            envelope,
+            bool(policy["continuation_grants_enabled"]),
+            audit_dir=audit_dir,
+            receiver=receiver,
+        )
+
+    # Every envelope-derived admission axis is evaluated here, before any
+    # Gate-3 early-out, and recorded as the admission ledger: a pause taken
+    # for one reason (most often a lexical hard stop) must not leave another
+    # axis unrecorded — record silence means "passed", never "not
+    # evaluated". The ledger never changes the verdict: `reason_codes` keep
+    # their pinned first-failure shape, and every other axis that held
+    # lands in `co_occurring_reason_codes`.
+    masked_admission_reasons: List[str] = []
     if envelope is not None:
-        masked_threshold_reasons = _threshold_reasons(envelope, policy["thresholds"])
+        admission_axes = admission_ledger(envelope, policy, grant_result)
+        masked_admission_reasons = admission_ledger_codes(admission_axes)
+
+    # The one carve-out from the always-hard content-sensitivity class: a
+    # complete profile declaring reply-only work with every other
+    # side-effect flag false. For that shape the category records — every
+    # matching term, as an advisory carrying the term — and never pauses.
+    # Recorded here, ahead of every Gate-3 early return, so the advisory
+    # survives whichever hard stop or axis governs the verdict; the
+    # hard-stop branch below stays in place for every other shape.
+    content_reply_only = _reply_only_profile_shape(profile, envelope)
+    if content_reply_only:
+        for label, pattern in CONTENT_SENSITIVITY_PATTERNS:
+            if pattern.search(body):
+                _record_lexical_note(
+                    logged_notes, "lexical_advisory_reply_only", label
+                )
 
     matched = first_match(DESTRUCTIVE_PATTERNS, body)
     if matched:
@@ -2670,8 +3713,9 @@ def evaluate_autonomy(
             mode,
             ["hard_stop_destructive_command"],
             envelope=envelope,
+            grant_result=grant_result,
             matched_pattern=matched,
-            co_occurring=masked_threshold_reasons,
+            co_occurring=masked_admission_reasons,
         )
 
     external_policy = str(policy["thresholds"]["external_side_effects"])
@@ -2710,21 +3754,28 @@ def evaluate_autonomy(
                 mode,
                 ["hard_stop_external_side_effect"],
                 envelope=envelope,
+                grant_result=grant_result,
                 matched_pattern=matched,
-                co_occurring=masked_threshold_reasons,
+                co_occurring=masked_admission_reasons,
             )
 
     git_push_or_deploy_policy = str(policy["thresholds"]["git_push_or_deploy"])
     matched = None
     if git_push_or_deploy_policy == "pause":
-        matched = first_match(NON_DEMOTABLE_SIDE_EFFECT_PATTERNS, body)
+        matched = _first_contextual_non_demotable_match(
+            NON_DEMOTABLE_SIDE_EFFECT_PATTERNS,
+            body,
+            logged_notes,
+            contextual_labels=frozenset({"install dependency"}),
+        )
     if matched:
         return paused(
             mode,
             ["hard_stop_external_side_effect"],
             envelope=envelope,
+            grant_result=grant_result,
             matched_pattern=matched,
-            co_occurring=masked_threshold_reasons,
+            co_occurring=masked_admission_reasons,
         )
 
     matched = _first_sensitive_match(gate3_body, logged_notes, profile, envelope)
@@ -2733,28 +3784,38 @@ def evaluate_autonomy(
             mode,
             ["hard_stop_sensitive_scope"],
             envelope=envelope,
+            grant_result=grant_result,
             matched_pattern=matched,
-            co_occurring=masked_threshold_reasons,
+            co_occurring=masked_admission_reasons,
         )
 
     matched = first_match(CONTENT_SENSITIVITY_PATTERNS, body)
-    if matched:
+    if matched and not content_reply_only:
+        # Fence and negation never demote this class; only the declared
+        # reply-only shape (recorded above) does.
         return paused(
             mode,
             ["hard_stop_content_sensitivity"],
             envelope=envelope,
+            grant_result=grant_result,
             matched_pattern=matched,
-            co_occurring=masked_threshold_reasons,
+            co_occurring=masked_admission_reasons,
         )
 
-    matched = first_match(NON_DEMOTABLE_SENSITIVE_PATTERNS, body)
+    matched = _first_contextual_non_demotable_match(
+        NON_DEMOTABLE_SENSITIVE_PATTERNS,
+        body,
+        logged_notes,
+        contextual_labels=frozenset({"public repo"}),
+    )
     if matched:
         return paused(
             mode,
             ["hard_stop_sensitive_scope"],
             envelope=envelope,
+            grant_result=grant_result,
             matched_pattern=matched,
-            co_occurring=masked_threshold_reasons,
+            co_occurring=masked_admission_reasons,
         )
 
     matched = _first_effective_match(
@@ -2767,84 +3828,62 @@ def evaluate_autonomy(
             mode,
             ["file_scope_ambiguous"],
             envelope=envelope,
+            grant_result=grant_result,
             matched_pattern=matched,
-            co_occurring=masked_threshold_reasons,
+            co_occurring=masked_admission_reasons,
         )
 
-    grant_result: Dict[str, Any] = {"present": False, "enabled": False}
     if envelope is not None:
-        if envelope_source == SCOPE_ENVELOPE_SOURCE_PROFILE:
-            # Continuation grants are a sender-declared surface; a default
-            # envelope declares nothing, so grant interplay is reachable on
-            # exempt types only through a voluntary profile (the supported
-            # override path).
-            grant_result = evaluate_continuation_grant(
-                message,
-                envelope,
-                bool(policy["continuation_grants_enabled"]),
-                audit_dir=audit_dir,
-                receiver=receiver,
-            )
-        declaration_breaches = _profile_declaration_errors(envelope)
-        if declaration_breaches:
+        # Gate-2 admission verdict, read off the ledger in the pinned
+        # evaluation order — the first failing axis names `reason_codes`;
+        # every other axis that held is already in the ledger and lands in
+        # `co_occurring_reason_codes`.
+        if admission_axes["declaration"]:
             return paused(
                 mode,
                 ["declaration_error"],
                 envelope=envelope,
                 grant_result=grant_result,
-                breached=declaration_breaches,
-                co_occurring=masked_threshold_reasons,
+                breached=[
+                    entry["field"] for entry in admission_axes["declaration_errors"]
+                ],
+                co_occurring=masked_admission_reasons,
             )
 
-        grant_breaches = continuation_scope_breaches(envelope, grant_result)
-        if grant_breaches:
+        if "continuation_grant_scope_exceeded" in admission_axes["continuation_grant"]:
             return paused(
                 mode,
                 ["continuation_grant_scope_exceeded"],
                 envelope=envelope,
                 grant_result=grant_result,
-                breached=grant_breaches,
-                co_occurring=masked_threshold_reasons,
+                breached=continuation_scope_breaches(envelope, grant_result),
+                co_occurring=masked_admission_reasons,
             )
 
-        hard_profile_reasons = []
-        if envelope["destructive_ops"]:
-            hard_profile_reasons.append("destructive_ops_pause")
-        if envelope["touches_auth_config_or_secrets"]:
-            hard_profile_reasons.append("auth_config_or_secrets_pause")
-        if envelope["touches_dependencies"]:
-            hard_profile_reasons.append("dependency_changes_pause")
-        if envelope["public_visibility"]:
-            hard_profile_reasons.append("public_visibility_pause")
-        if hard_profile_reasons:
+        if admission_axes["declared_risk"]:
             # Declared-risk-flag pauses are admission pauses, not lexical
             # hard stops: the cause is already named by the per-knob reason
             # codes.
             return paused(
                 mode,
-                hard_profile_reasons,
+                list(admission_axes["declared_risk"]),
                 envelope=envelope,
                 grant_result=grant_result,
-                co_occurring=masked_threshold_reasons,
+                co_occurring=masked_admission_reasons,
             )
 
-        reasons = []
-        if grant_result.get("decision") not in {"accepted", "not_present"}:
-            reasons.extend(grant_result.get("reason_codes") or [])
-        reasons.extend(_threshold_reasons(envelope, policy["thresholds"]))
-        side_effect_reasons = _side_effect_reasons(
-            envelope,
-            grant_result,
-            external_policy,
-            policy["private_repo_allowlist"],
-        )
-        reasons.extend(side_effect_reasons)
+        reasons = [
+            *admission_axes["continuation_grant"],
+            *admission_axes["thresholds"],
+            *admission_axes["side_effects"],
+        ]
         if reasons:
             return paused(
                 mode,
                 reasons,
                 envelope=envelope,
                 grant_result=grant_result,
+                co_occurring=masked_admission_reasons,
             )
 
     checkpoint = evaluate_threshold_checkpoint(
@@ -3006,7 +4045,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.audit_dir is not None and decision.get("reason_codes") != [
             "message_replayed"
         ]:
-            write_audit_record(
+            # Re-evaluations supersede rather than duplicate: an identical
+            # evaluation (same bytes, same policy, same verdict) adopts the
+            # existing record, and a changed one closes every live
+            # predecessor as superseded so exactly one evaluation per
+            # logical message stays live. The whole sequence is one
+            # logical-identity transaction inside persist_evaluation.
+            outcome = persist_evaluation(
                 args.audit_dir,
                 decision,
                 config=config,
@@ -3015,6 +4060,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 policy_path=args.config,
                 receiver=args.receiver,
             )
+            decision["evaluation_id"] = outcome["evaluation_id"]
+            if outcome["action"] == "adopted":
+                decision["adopted_audit_record"] = str(outcome["audit_path"])
+                print(
+                    f"NOTE: adopted existing evaluation "
+                    f"{outcome['evaluation_id']}; no duplicate record written",
+                    file=sys.stderr,
+                )
+            if outcome["superseded"]:
+                print(
+                    f"NOTE: superseded {len(outcome['superseded'])} prior "
+                    "evaluation(s) for this message",
+                    file=sys.stderr,
+                )
         elif args.audit_dir is not None:
             print("NOTE: replay detected; audit record not written", file=sys.stderr)
         print(json.dumps(decision, indent=2))

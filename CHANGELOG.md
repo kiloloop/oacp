@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.4.4] - 2026-08-28
+
+The central debrief store is the headline change: every agent's full end-of-session debrief now lands in the kernel-owned, append-only `org-memory/debriefs/<project>/<YYYY>/<MM>/` layout — one immutable file per session — instead of per-project trees, with `oacp org-memory init` creating the store and `oacp doctor` checking its setup ([org memory](docs/protocol/org_memory.md#debrief-store)).
+
+### Added
+
+- Central session-debrief store under org-memory `debriefs/`, created by `oacp org-memory init` and setup-checked by `oacp doctor` ([org memory](docs/protocol/org_memory.md#debrief-store)).
+- `oacp add-agent` and `oacp init --agents` populate the instance agent registry; `oacp agent sync` backfills existing workspaces ([agent profiles](docs/protocol/agent_profiles.md)).
+- `oacp autonomy-finalize` writes and validates checkpoint and terminal autonomy audit updates under lock; `oacp doctor` sweeps audit directories with the same checks ([autonomy](docs/protocol/autonomy.md#terminal-finalization-and-audit-integrity)).
+- Every persisted autonomy evaluation carries an `evaluation_id`; re-evaluations supersede the prior record through a locked transaction ([autonomy](docs/protocol/autonomy.md#terminal-finalization-and-audit-integrity)).
+- The wheel ships the four kernel protocol docs, the wire message template, and five previously unpackaged scripts under `oacp/_protocol/`, `oacp/_templates/`, and `oacp/_scripts/`.
+- Preflight and CI fail when `scripts/` and the wheel's force-include table drift apart.
+- `waiting_on_peer` checkpoint sub-basis separates peer-reply latency from working time in a realized time breach ([threshold checkpoint](docs/protocol/autonomy.md#threshold-exceeded-checkpoint)).
+- Conformance fixture pinning the default scope envelope stamped on profileless admits.
+
+### Removed
+
+- Zero-consumer scripts `normalize_findings.py`, `create_handoff_packet.py`, and `init_project_workspace.sh` with their Makefile targets; `oacp init` replaces `make init`.
+
+### Changed
+
+- `actual_minutes` is active wall-clock from receiver-stamped `work_started_at_utc`, excluding admission idle and re-authorization pauses ([threshold checkpoint](docs/protocol/autonomy.md#threshold-exceeded-checkpoint)).
+- `expected_files_touched` counts distinct deliverable files only, not receiver bookkeeping, memory, cache, or scratch writes ([autonomy policy](docs/protocol/autonomy.md#message-fields)).
+- Parent-less `oacp send` messages get an automatic thread identifier ([conversation threading](docs/protocol/inbox_outbox.md#conversation-threading)).
+- The README `## Commands` table is generated from `oacp --help` via `make docs`, with a drift test.
+- Moved the runtime capability matrix to the public [Kiloloop research repository](https://github.com/kiloloop/research/blob/main/runtime-comparison/runtime_capability_matrix.md).
+- Moved the prompt-caching guide to the public [Kiloloop research repository](https://github.com/kiloloop/research/blob/main/runtime-comparison/prompt-caching-patterns.md), leaving a redirect at its former path.
+- Raised the optional `cryptography` floor to 50.0.0 and the Python floor to 3.9.2 to exclude known-vulnerable crypto releases.
+- Pinned the development and release toolchain through a shared dependency group and refreshed workflow actions to immutable commits.
+- Folded [`SPEC.md`](SPEC.md) into a thin index over `docs/protocol/`; the package `Documentation` URL is unchanged.
+- Pricing/commercial content sensitivity is an advisory instead of a hard stop for reply-only task profiles ([autonomy](docs/protocol/autonomy.md#four-gate-evaluator)).
+- Enveloped sessions can no longer write the receiver's `audit/autonomy_decisions/` directly; only the canonical `oacp` audit writers can ([autonomy](docs/protocol/autonomy.md#envelope-compilation-phase-2)).
+
+### Fixed
+
+- Autonomy lexical classification records every match with its source span and demotion basis ([autonomy](docs/protocol/autonomy.md#lexical-provenance)).
+- Negated or descriptive public-repository, dependency-install, and merge-method language no longer trips lexical hard stops; stacked negations and later unaccounted occurrences still cannot demote an affirmative match ([autonomy](docs/protocol/autonomy.md#lexical-provenance)).
+- `SPEC.md` describes the archive-never-delete inbox lifecycle instead of saying recipients delete processed messages ([inbox/outbox](docs/protocol/inbox_outbox.md)).
+- The envelope hook no longer counts phantom `files_touched` from heredoc bodies or unexpanded shell variables; variable-spelled write targets escalate to `ask` ([autonomy](docs/protocol/autonomy.md#envelope-compilation-phase-2)).
+- Autonomy audit records carry a complete admission ledger (`admission_axes`), so a hard stop no longer masks the threshold, side-effect, or declaration axes ([autonomy](docs/protocol/autonomy.md#admission-ledger)).
+- `declaration_error` pauses record which profile field failed and why.
+- A granted checkpoint re-authorization widens the live file budget, so extra files no longer stay blocked after a valid grant ([autonomy](docs/protocol/autonomy.md#envelope-drift)).
+
 ## [0.4.3] - 2026-08-12
 
 ### Added
@@ -762,6 +807,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Checkout step in github-release workflow job (#19)
 - Pre-release audit fixes: SHA-pinned actions, dangling doc refs (#15, #16)
 
+[0.4.4]: https://github.com/kiloloop/oacp/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/kiloloop/oacp/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/kiloloop/oacp/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/kiloloop/oacp/compare/v0.4.0...v0.4.1

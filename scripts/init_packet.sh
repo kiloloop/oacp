@@ -28,7 +28,7 @@ TEMPLATE_DIR="$SCRIPT_DIR/../templates"
 
 if [[ ! -d "$PROJECT_ROOT" ]]; then
   echo "Error: project workspace not found: $PROJECT_ROOT"
-  echo "Run: $SCRIPT_DIR/init_project_workspace.sh $PROJECT_NAME"
+  echo "Run: oacp init $PROJECT_NAME"
   exit 2
 fi
 

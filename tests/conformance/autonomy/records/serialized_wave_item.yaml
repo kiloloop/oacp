@@ -1,0 +1,52 @@
+schema_version: 2
+spec_version: "0.4.3"
+created_at_utc: "2026-08-01T01:00:00Z"
+receiver: codex
+sender: iris
+message_id: msg-20260801010000-iris-0284
+message_sha256: 1f0284aa
+decision: auto_accepted
+mode: auto_review
+reason_codes:
+- auto_review_all_gates_passed
+evaluation_id: eval-0000000000000284
+scope_envelope:
+  estimated_minutes: 30
+  expected_files_touched: 5
+  risk_tier: P2
+  target_repo: example-org/private-repo
+  destructive_ops: false
+  external_side_effects: false
+  touches_auth_config_or_secrets: false
+  touches_dependencies: false
+  public_visibility: false
+  creates_or_updates_pr: false
+  comments_on_github: false
+  commits_changes: false
+  merges_pr: false
+  files_issues: false
+  sends_oacp_reply_only: true
+  continuation_grants: {}
+result:
+  final_state: done
+  completion_kind: auto_accepted
+  work_started_at_utc: "2026-08-01T01:20:00Z"
+  actual_minutes: 25
+  actual_files_touched: 1
+  predicted_risk_materialized: false
+  completed_at_utc: "2026-08-01T01:45:00Z"
+  envelope_enforcement: none
+  threshold_checkpoint:
+    evaluated: true
+    actual_minutes: 25
+    actual_files_touched: 1
+    side_effects_actual: {}
+    breached: false
+    breached_fields: []
+    declaration_errors: []
+    breach_basis: null
+    breach_sub_basis: null
+    paused_at_utc: null
+    action: continue
+    predicted_risk_materialized: false
+    completed_at_utc: "2026-08-01T01:45:00Z"
