@@ -1,0 +1,23 @@
+schema_version: 2
+spec_version: "0.4.3"
+created_at_utc: "2026-08-01T01:00:00Z"
+receiver: claude
+sender: alice
+message_id: msg-20260801010000-alice-0009
+message_sha256: 1f0009aa
+decision: paused
+mode: auto_review
+reason_codes:
+- hard_stop_sensitive_scope
+logged_notes:
+- code: lexical_advisory_declared
+  matched_pattern: merge
+logged_notes: []
+result:
+  final_state: paused
+  completion_kind: admission_paused
+  actual_minutes: null
+  actual_files_touched: null
+  predicted_risk_materialized: false
+  completed_at_utc: null
+  envelope_enforcement: none

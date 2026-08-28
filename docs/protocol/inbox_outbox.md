@@ -377,7 +377,7 @@ Agents can maintain continuity across handoffs and multi-step exchanges using op
 
 ### How It Works
 
-1. **Starting a conversation**: The initiating agent generates a `conversation_id` (e.g., `conv-20260211-codex-001`) and includes it in the first message.
+1. **Starting a conversation**: When a parent-less `oacp send` omits `conversation_id`, the CLI generates and stamps one (e.g., `conv-20260211-codex-000137`); an explicit value is preserved.
 2. **Continuing a conversation**: Subsequent messages in the same thread reuse the same `conversation_id` and set `parent_message_id` to the `id` of the message being replied to.
 3. **Handoff messages**: When handing off work (`type: handoff`), the sender SHOULD include `conversation_id` and `context_keys` so the receiving agent can pick up without re-reading the full history.
 4. **Context keys**: A concise summary of decisions made, artifacts produced, and open questions from the prior conversation. This avoids the anti-pattern of forwarding raw conversation transcripts.

@@ -9,6 +9,17 @@ expected:
   matched_pattern: "deploy"
   co_occurring_reason_codes:
     - expected_files_touched_exceeds_threshold
+    - external_side_effects_not_pr_artifact
+  admission_axes:
+    evaluated: true
+    thresholds:
+      - expected_files_touched_exceeds_threshold
+    declared_risk: []
+    declaration: []
+    side_effects:
+      - external_side_effects_not_pr_artifact
+    continuation_grant: []
+    declaration_errors: []
   result:
     final_state: paused
     completion_kind: admission_paused

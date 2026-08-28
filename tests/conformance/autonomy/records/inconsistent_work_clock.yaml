@@ -1,0 +1,21 @@
+schema_version: 2
+spec_version: "0.4.3"
+created_at_utc: "2026-08-01T01:00:00Z"
+receiver: codex
+sender: iris
+message_id: msg-20260801010000-iris-badclock
+message_sha256: badc10cc
+decision: auto_accepted
+mode: auto_review
+reason_codes:
+- auto_review_all_gates_passed
+evaluation_id: eval-0000000000badc10
+result:
+  final_state: done
+  completion_kind: auto_accepted
+  work_started_at_utc: "2026-08-01T00:55:00Z"
+  actual_minutes: 25
+  actual_files_touched: 1
+  predicted_risk_materialized: false
+  completed_at_utc: "2026-08-01T01:45:00Z"
+  envelope_enforcement: none

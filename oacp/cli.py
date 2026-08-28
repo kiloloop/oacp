@@ -21,7 +21,7 @@ Installable Open Agent Coordination Protocol (OACP) CLI.
 Commands:
   init           Create a project workspace under $OACP_HOME/projects/
   add-agent      Add an agent to an existing project workspace
-  agent          Manage global agent profiles (init, show, list)
+  agent          Manage global agent profiles (init, sync, show, list)
   inbox          List pending inbox messages
   watch          Emit inbox delta events for Monitor-friendly polling
   retention      Prune project message history by age and count
@@ -34,6 +34,7 @@ Commands:
   org-memory     Initialize org-level memory at $OACP_HOME/org-memory/
   write-event    Write an event to org-memory/events/
   autonomy-outcome  Record a human approval/decline in an autonomy audit
+  autonomy-finalize  Record checkpoints and terminal states in an autonomy audit
   envelope       Compile, show, or clear the runtime envelope for a task
   doctor         Check environment and workspace health
   validate       Validate an inbox/outbox YAML message
@@ -57,6 +58,7 @@ Examples:
   oacp org-memory init
   oacp write-event --agent claude --project my-project --type decision --slug api-convention --body "Use REST for public APIs"
   oacp autonomy-outcome /path/to/audit.yaml --decision approved
+  oacp autonomy-finalize /path/to/audit.yaml --final-state done --actual-minutes 30 --actual-files-touched 3
   oacp envelope compile /path/to/message.yaml --receiver claude
   oacp envelope show --project my-project
   oacp doctor
@@ -80,6 +82,7 @@ SCRIPT_NAMES = {
     "org-memory": "init_org_memory.py",
     "write-event": "write_event.py",
     "autonomy-outcome": "record_autonomy_outcome.py",
+    "autonomy-finalize": "finalize_autonomy_record.py",
     "envelope": "envelope_compiler.py",
     "doctor": "oacp_doctor.py",
     "validate": "validate_message.py",

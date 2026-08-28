@@ -33,5 +33,5 @@ expected:
         decided_at_utc: "2026-05-12T12:45:00Z"
         source_message_id: msg-20260512124500-sender-reauth1
         disposition: resumed
-        cleared_paused_at_utc: "2026-05-12T12:30:00Z"
+        cleared_paused_at_utc: "2026-05-12T12:45:00Z"
         advisory: []

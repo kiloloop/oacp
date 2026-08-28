@@ -4,7 +4,7 @@ Get from zero to your first agent-to-agent message in 5 minutes.
 
 ## Prerequisites
 
-- Python 3.9+ and Bash 3.2+
+- Python 3.9.2+ and Bash 3.2+
 
 ## 1. Set Up OACP Home
 

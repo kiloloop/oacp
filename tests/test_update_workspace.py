@@ -86,7 +86,7 @@ class TestGuard(unittest.TestCase):
 
 
 class TestDirectoryCreation(unittest.TestCase):
-    """Creates missing dirs that init_project_workspace.sh defines."""
+    """Creates missing dirs that the workspace layout (`oacp init`) defines."""
 
     def test_creates_state_dir(self):
         with tempfile.TemporaryDirectory() as tmp:

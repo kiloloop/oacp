@@ -1,0 +1,32 @@
+schema_version: 2
+spec_version: "0.4.3"
+created_at_utc: "2026-08-01T01:00:00Z"
+receiver: claude
+sender: alice
+message_id: msg-20260801010000-alice-0011
+message_sha256: 1f0011aa
+decision: auto_accepted
+mode: auto_review
+reason_codes:
+- message_valid
+result:
+  final_state: paused
+  completion_kind: checkpoint_paused
+  actual_minutes: 30
+  actual_files_touched: 9
+  predicted_risk_materialized: true
+  completed_at_utc: null
+  envelope_enforcement: none
+  threshold_checkpoint:
+    evaluated: true
+    actual_minutes: 30
+    actual_files_touched: 9
+    side_effects_actual: {}
+    breached: true
+    breached_fields:
+    - files_touched_actual
+    declaration_errors:
+    - github_comments
+    breach_basis: realized
+    paused_at_utc: "2026-08-01T01:40:00Z"
+    action: paused_for_reauthorization

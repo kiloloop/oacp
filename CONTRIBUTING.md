@@ -34,13 +34,16 @@ Please read and follow our [Code of Conduct](https://github.com/kiloloop/.github
 
 ## Development Setup
 
+Development and test tooling requires Python 3.10 or newer. The installed CLI
+continues to support Python 3.9.2 and newer.
+
 ```bash
 # Clone
 git clone https://github.com/kiloloop/oacp.git
 cd oacp
 
-# Install dependencies
-pip install pyyaml pytest
+# Install the package, crypto extra, and pinned development tools
+python -m pip install --group dev -e ".[crypto]"
 
 # Verify setup
 make preflight
@@ -80,6 +83,16 @@ make preflight ARGS="--full"
 - Use imperative mood: "Add feature" not "Added feature"
 - Keep the first line under 72 characters
 - Reference issue numbers where applicable: "Fix message validation (#42)"
+
+## Changelog Entries
+
+Entries in `CHANGELOG.md` follow [Common Changelog](https://common-changelog.org) discipline: a changelog answers "does this affect me, and how", not "how does it work".
+
+- One line, one change — split a multi-facet feature into two or three scoped bullets rather than one long bullet.
+- State the user-visible delta, not the implementation path.
+- Do not inline flag enums or sub-mechanism walkthroughs — link the protocol spec or doc section that carries the detail.
+- One link per bullet, pointing at the best entry point.
+- Each bullet must read as self-describing without its `### Added`/`### Changed` heading.
 
 ## License
 

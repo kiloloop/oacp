@@ -6,6 +6,7 @@
 Fast mode (default):
 - Merge conflict marker scan
 - Makefile `.PHONY`/target consistency checks
+- Packaging boundary: `scripts/` contents == wheel force-include entries
 - YAML syntax validation for `templates/` and `docs/protocol/`
 - `ruff` on all tracked Python files
 - `shellcheck` on all tracked `scripts/**/*.sh`
@@ -154,6 +155,125 @@ def check_makefile(repo_root: Path) -> CheckResult:
         name="makefile-parse",
         passed=True,
         details=f"validated {len(defined)} targets and {len(phony)} .PHONY entries",
+        duration_s=time.monotonic() - start,
+    )
+
+
+FORCE_INCLUDE_HEADER = "[tool.hatch.build.targets.wheel.force-include]"
+_FORCE_INCLUDE_ENTRY = re.compile(r'^"([^"]+)"\s*=\s*"([^"]+)"$')
+
+
+def parse_force_include(pyproject_path: Path) -> Tuple[List[Tuple[str, str]], List[str]]:
+    """Parse the wheel force-include table line-wise.
+
+    Returns (entries, errors) with entries in file order. Line-wise parsing
+    keeps the check dependency-free on Python < 3.11 (no tomllib); the table
+    format is enforced as one `"source" = "destination"` pair per line.
+    """
+    raw = pyproject_path.read_text(encoding="utf-8")
+    entries: List[Tuple[str, str]] = []
+    errors: List[str] = []
+    seen_sources = set()
+    in_table = False
+    table_found = False
+
+    for lineno, line in enumerate(raw.splitlines(), start=1):
+        stripped = line.strip()
+        if stripped == FORCE_INCLUDE_HEADER:
+            in_table = True
+            table_found = True
+            continue
+        if not in_table:
+            continue
+        if stripped.startswith("["):
+            in_table = False
+            continue
+        if not stripped or stripped.startswith("#"):
+            continue
+        match = _FORCE_INCLUDE_ENTRY.match(stripped)
+        if not match:
+            errors.append(
+                f"pyproject.toml:{lineno}: unparseable force-include line: {stripped[:60]}"
+            )
+            continue
+        source, destination = match.group(1), match.group(2)
+        if source in seen_sources:
+            errors.append(
+                f"pyproject.toml:{lineno}: duplicate force-include source: {source}"
+            )
+            continue
+        seen_sources.add(source)
+        entries.append((source, destination))
+
+    if not table_found:
+        errors.append(f"pyproject.toml: missing {FORCE_INCLUDE_HEADER} table")
+    return entries, errors
+
+
+def _iter_script_files(repo_root: Path) -> List[str]:
+    """Repo-relative POSIX paths of all regular files under scripts/."""
+    scripts_root = repo_root / "scripts"
+    if not scripts_root.is_dir():
+        return []
+    files: List[str] = []
+    for path in sorted(scripts_root.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(repo_root)
+        if any(part in SKIP_DIRS or part.startswith(".") for part in rel.parts):
+            continue
+        files.append(rel.as_posix())
+    return files
+
+
+def check_packaging_boundary(repo_root: Path) -> CheckResult:
+    """Enforce `scripts/` == force-include: every script is packaged and every
+    force-include source exists on disk. Fails on drift in either direction."""
+    start = time.monotonic()
+    pyproject_path = repo_root / "pyproject.toml"
+    if not pyproject_path.is_file():
+        return CheckResult(
+            name="packaging-boundary",
+            passed=False,
+            details="pyproject.toml not found",
+            duration_s=time.monotonic() - start,
+        )
+
+    entries, problems = parse_force_include(pyproject_path)
+    sources = [source for source, _ in entries]
+
+    scripts_on_disk = set(_iter_script_files(repo_root))
+    script_sources = {source for source in sources if source.startswith("scripts/")}
+
+    unpackaged = sorted(scripts_on_disk - script_sources)
+    if unpackaged:
+        problems.append(
+            "scripts/ files missing from force-include: " + ", ".join(unpackaged)
+        )
+
+    missing_files = sorted(
+        source for source in sources if not (repo_root / source).is_file()
+    )
+    if missing_files:
+        problems.append(
+            "force-include sources with no file on disk: " + ", ".join(missing_files)
+        )
+
+    if problems:
+        return CheckResult(
+            name="packaging-boundary",
+            passed=False,
+            details="\n".join(problems),
+            duration_s=time.monotonic() - start,
+        )
+
+    return CheckResult(
+        name="packaging-boundary",
+        passed=True,
+        details=(
+            f"scripts/ ({len(scripts_on_disk)} files) matches force-include; "
+            f"all {len(sources)} sources exist"
+        ),
         duration_s=time.monotonic() - start,
     )
 
@@ -396,6 +516,7 @@ def run_preflight(
     results = [
         check_conflict_markers(repo_root, runner=runner),
         check_makefile(repo_root),
+        check_packaging_boundary(repo_root),
         check_yaml_syntax(repo_root, loader=yaml_loader),
         check_ruff(repo_root, runner=runner),
         check_shellcheck(repo_root, runner=runner),

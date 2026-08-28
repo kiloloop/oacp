@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr
+from io import StringIO
 import sys
 import tempfile
 import unittest
@@ -11,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from add_agent import add_agent  # noqa: E402
+from add_agent import add_agent, main  # noqa: E402
 
 
 class TestAddAgent(unittest.TestCase):
@@ -65,6 +67,16 @@ class TestAddAgent(unittest.TestCase):
 
             # 5 gitkeeps + config.yaml + status.yaml + agent_card.yaml = 8
             self.assertEqual(len(result["created_files"]), 8)
+
+            import yaml
+
+            profile = yaml.safe_load(
+                (oacp_root / "agents" / "bob" / "profile.yaml").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(profile["runtime"], "claude")
+            self.assertEqual(profile["projects"], ["demo"])
 
     def test_creates_cursor_status_and_card(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -142,6 +154,64 @@ class TestAddAgent(unittest.TestCase):
             )
             self.assertEqual(len(result2["created_files"]), 0)
             self.assertEqual(len(result2["skipped_files"]), 8)
+            self.assertEqual(result2["registry_update"]["action"], "unchanged")
+
+    def test_registry_update_preserves_hand_edited_identity(self) -> None:
+        import yaml
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            oacp_root = self._make_project(Path(tmpdir))
+            profile_path = oacp_root / "agents" / "alice" / "profile.yaml"
+            profile_path.parent.mkdir(parents=True)
+            profile_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "version": "0.2.0",
+                        "name": "Alice Display",
+                        "runtime": "human",
+                        "model": "hand-edited-model",
+                        "description": "Hand-edited description",
+                        "projects": ["existing"],
+                    },
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+
+            add_agent("demo", "alice", oacp_root=oacp_root, runtime="codex")
+
+            profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+            self.assertEqual(profile["name"], "Alice Display")
+            self.assertEqual(profile["runtime"], "human")
+            self.assertEqual(profile["model"], "hand-edited-model")
+            self.assertEqual(profile["description"], "Hand-edited description")
+            self.assertEqual(profile["projects"], ["existing", "demo"])
+
+    def test_malformed_registry_profile_is_a_clean_cli_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            oacp_root = self._make_project(Path(tmpdir))
+            profile_path = oacp_root / "agents" / "alice" / "profile.yaml"
+            profile_path.parent.mkdir(parents=True)
+            profile_path.write_text(
+                "name: alice\nruntime: [unclosed\n", encoding="utf-8"
+            )
+            stderr = StringIO()
+
+            with redirect_stderr(stderr):
+                rc = main(
+                    [
+                        "demo",
+                        "alice",
+                        "--runtime",
+                        "claude",
+                        "--oacp-dir",
+                        str(oacp_root),
+                    ]
+                )
+
+            self.assertEqual(rc, 1)
+            self.assertIn("invalid YAML", stderr.getvalue())
+            self.assertNotIn("Traceback", stderr.getvalue())
 
     def test_agent_name_max_length(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -1,0 +1,5 @@
+description: Wrong nesting depth, underscore filename, month-dir mismatch, leading-dot project, uppercase session.
+findings:
+  - name: debriefs-layout
+    severity: error
+    message_contains: "5 of 6"

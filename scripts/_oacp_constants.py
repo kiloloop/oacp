@@ -77,6 +77,78 @@ def locked_audit(audit_path: Path):
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def atomic_replace_yaml(path: Path, data: dict) -> None:
+    """Atomically replace a YAML file in place, preserving its mode.
+
+    The shared write half of every audit read-modify-write: dump, fsync a
+    sibling temp file, then rename over the original so readers never see
+    a partial record. Callers must already hold ``locked_audit`` on the
+    target. YAML import stays local so this module keeps loading in
+    environments without pyyaml (doctor degrades gracefully there).
+    """
+    import os
+    import tempfile
+
+    import yaml
+
+    path = Path(path)
+    content = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+    mode = path.stat().st_mode
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+            temp_path = Path(handle.name)
+        os.chmod(temp_path, mode)
+        os.replace(temp_path, path)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
+
+
+def atomic_replace_bytes(path: Path, data: bytes) -> None:
+    """Atomically replace a file with exact bytes, preserving its mode.
+
+    The restore half of a rolled-back multi-file audit transaction: the
+    original bytes go back verbatim (not a re-serialization, which would
+    normalize formatting and collapse duplicate-key evidence). Same
+    fsync + rename discipline as ``atomic_replace_yaml``; callers must
+    already hold ``locked_audit`` on the target.
+    """
+    import os
+    import tempfile
+
+    path = Path(path)
+    mode = path.stat().st_mode
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+            temp_path = Path(handle.name)
+        os.chmod(temp_path, mode)
+        os.replace(temp_path, path)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
+
+
 def _write_if_missing(path: Path, content: str) -> bool:
     """Write content to *path* only if it does not already exist."""
     if path.exists():

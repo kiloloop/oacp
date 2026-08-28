@@ -12,7 +12,7 @@ import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import pytest
 import yaml
@@ -20,10 +20,14 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from autonomy_gate import (  # noqa: E402
+    ADMISSION_AXES,
+    BREACH_BASES,
+    BREACH_SUB_BASES,
     PINNED_COMPLETION_KINDS,
     PINNED_REASON_CODES,
     RUNTIME_MODEL_ENV_VAR,
     _base_result,
+    admission_ledger_codes,
     canonical_policy_sha256,
     evaluate_autonomy,
     evaluate_threshold_checkpoint,
@@ -122,8 +126,49 @@ def test_autonomy_gate_matches_conformance_fixtures(tmp_path: Path) -> None:
                 == expected["co_occurring_reason_codes"]
             ), expected_path.name
 
+        if "admission_axes" in expected:
+            # The ledger is pinned exactly: an extra or missing axis entry
+            # is a contract change, not implementation detail.
+            assert decision["admission_axes"] == expected["admission_axes"], (
+                expected_path.name
+            )
+
         if "task_profile" in expected:
             _assert_subset(expected["task_profile"], decision["task_profile"])
+
+        if "scope_envelope_source" in expected:
+            # Every admitted envelope names where it came from; pinning the
+            # source pins the profileless default-envelope path itself.
+            assert (
+                decision["scope_envelope_source"] == expected["scope_envelope_source"]
+            ), expected_path.name
+
+        if "scope_envelope" in expected:
+            _assert_subset(expected["scope_envelope"], decision["scope_envelope"])
+
+        for hit in decision["matched_patterns"]:
+            assert set(hit) == {
+                "pattern",
+                "category",
+                "span",
+                "demotion_basis",
+            }, expected_path.name
+            assert set(hit["span"]) == {"start", "end"}, expected_path.name
+            start, end = hit["span"]["start"], hit["span"]["end"]
+            assert 0 <= start < end <= len(message["body"]), expected_path.name
+            assert hit["demotion_basis"], expected_path.name
+
+        if decision.get("matched_pattern"):
+            blocking_hits = [
+                hit
+                for hit in decision["matched_patterns"]
+                if hit["pattern"] == decision["matched_pattern"]
+            ]
+            assert blocking_hits, expected_path.name
+            assert any(
+                hit["demotion_basis"] in {"affirmative", "non_demotable"}
+                for hit in blocking_hits
+            ), expected_path.name
 
         assert set(decision["reason_codes"]) <= PINNED_REASON_CODES
         assert "completed_at_utc" in decision["result"]
@@ -264,6 +309,7 @@ def test_autonomy_gate_records_hash_for_always_pause_mode() -> None:
     assert decision["decision"] == "paused"
     assert decision["reason_codes"] == ["mode_always_pause"]
     assert decision["message_sha256"] == expected_hash
+    assert decision["result"]["work_started_at_utc"] is None
 
 
 def test_autonomy_gate_records_hash_for_malformed_config() -> None:
@@ -315,6 +361,399 @@ def test_guardrails_fence_keeps_operative_terms_visible_as_advisories() -> None:
     assert "deploy" in patterns
     assert "auth" in patterns
     assert "lexical_advisory" in decision["reason_codes"]
+
+
+def _lexical_fp_decision(task_text: str) -> tuple[Dict[str, Any], str]:
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml")
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "clean_task.yaml")
+    body = message["body"].replace(
+        "Update one documentation paragraph for clarity.",
+        task_text,
+    )
+    message["body"] = body
+    return evaluate_autonomy(message, config), body
+
+
+def _assert_lexical_hit(
+    decision: Dict[str, Any],
+    body: str,
+    pattern: str,
+    demotion_basis: str,
+) -> None:
+    hits = [
+        hit for hit in decision["matched_patterns"] if hit["pattern"] == pattern
+    ]
+    assert hits
+    for hit in hits:
+        assert set(hit) == {"pattern", "category", "span", "demotion_basis"}
+        assert hit["demotion_basis"] == demotion_basis
+        assert set(hit["span"]) == {"start", "end"}
+        start, end = hit["span"]["start"], hit["span"]["end"]
+        assert 0 <= start < end <= len(body)
+
+
+def test_lexical_fp_merge_method_reference_fixture() -> None:
+    decision, body = _lexical_fp_decision(
+        "Document the repository's squash-only merge method."
+    )
+
+    assert decision["decision"] == "auto_accepted"
+    assert decision["reason_codes"][-2:] == ["lexical_advisory", "workspace_check_required"]
+    _assert_lexical_hit(decision, body, "merge", "reference_only")
+
+
+@pytest.mark.parametrize(
+    "task_text",
+    [
+        "Describe what pip install pulls into the runtime dependencies.",
+        "Explain how install/build is read as dependency-class behavior.",
+    ],
+)
+def test_lexical_fp_descriptive_install_reference_fixture(task_text: str) -> None:
+    decision, body = _lexical_fp_decision(task_text)
+
+    assert decision["decision"] == "auto_accepted"
+    assert decision["reason_codes"][-2:] == ["lexical_advisory", "workspace_check_required"]
+    _assert_lexical_hit(decision, body, "install dependency", "reference_only")
+
+
+def test_lexical_fp_negated_non_demotable_contexts_fixture() -> None:
+    decision, body = _lexical_fp_decision(
+        "Out of scope: anything on the public repo. Do not install dependencies."
+    )
+
+    assert decision["decision"] == "auto_accepted"
+    assert decision["reason_codes"][-2:] == ["lexical_advisory", "workspace_check_required"]
+    _assert_lexical_hit(decision, body, "public repo", "negated")
+    _assert_lexical_hit(decision, body, "install dependency", "negated")
+
+
+def test_non_demotable_context_demotion_does_not_cross_clause() -> None:
+    decision, body = _lexical_fp_decision(
+        "Do not install a local tool. Install dependencies for the task."
+    )
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["hard_stop_external_side_effect"]
+    assert decision["matched_pattern"] == "install dependency"
+    _assert_lexical_hit(decision, body, "install dependency", "non_demotable")
+
+
+def test_install_reference_does_not_demote_affirmative_match_in_same_clause() -> None:
+    decision, _body = _lexical_fp_decision(
+        "Install the new dependencies after you note what pip install pulls "
+        "for runtime dependencies"
+    )
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["hard_stop_external_side_effect"]
+    assert decision["matched_pattern"] == "install dependency"
+    install_hits = [
+        hit
+        for hit in decision["matched_patterns"]
+        if hit["pattern"] == "install dependency"
+    ]
+    assert [hit["demotion_basis"] for hit in install_hits] == [
+        "non_demotable",
+        "reference_only",
+    ]
+
+
+def test_install_reference_does_not_demote_later_affirmative_match() -> None:
+    decision, _body = _lexical_fp_decision(
+        "Describe what pip install pulls for runtime dependencies before you "
+        "install new dependencies"
+    )
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["hard_stop_external_side_effect"]
+    assert decision["matched_pattern"] == "install dependency"
+    install_hits = [
+        hit
+        for hit in decision["matched_patterns"]
+        if hit["pattern"] == "install dependency"
+    ]
+    assert [hit["demotion_basis"] for hit in install_hits] == [
+        "reference_only",
+        "non_demotable",
+    ]
+
+
+def test_public_repo_negation_does_not_cross_exception_in_same_clause() -> None:
+    decision, _body = _lexical_fp_decision(
+        "Out of scope: the public repo except publish to the public repo"
+    )
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["hard_stop_sensitive_scope"]
+    assert decision["matched_pattern"] == "public repo"
+    public_repo_hits = [
+        hit
+        for hit in decision["matched_patterns"]
+        if hit["pattern"] == "public repo"
+    ]
+    assert [hit["demotion_basis"] for hit in public_repo_hits] == [
+        "negated",
+        "non_demotable",
+    ]
+
+
+def test_wrapped_public_repository_provenance_matches_hard_stop() -> None:
+    decision, body = _lexical_fp_decision(
+        "Out of scope: anything on the public\nrepository."
+    )
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["hard_stop_sensitive_scope"]
+    assert decision["matched_pattern"] == "public repo"
+    _assert_lexical_hit(decision, body, "public repo", "non_demotable")
+
+
+def test_install_match_does_not_bridge_negated_and_affirmative_occurrences() -> None:
+    decision, body = _lexical_fp_decision(
+        "Do not install tooling except install the runtime dependencies"
+    )
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["hard_stop_external_side_effect"]
+    assert decision["matched_pattern"] == "install dependency"
+    _assert_lexical_hit(decision, body, "install dependency", "non_demotable")
+
+
+def test_install_match_with_internal_negation_remains_hard() -> None:
+    decision, body = _lexical_fp_decision(
+        "Do not install tooling without runtime dependencies"
+    )
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["hard_stop_external_side_effect"]
+    assert decision["matched_pattern"] == "install dependency"
+    _assert_lexical_hit(decision, body, "install dependency", "non_demotable")
+
+
+def test_one_negation_cannot_demote_two_install_dependency_occurrences() -> None:
+    decision, _body = _lexical_fp_decision(
+        "Do not install development dependencies while install runtime dependencies"
+    )
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["hard_stop_external_side_effect"]
+    assert decision["matched_pattern"] == "install dependency"
+    install_hits = [
+        hit
+        for hit in decision["matched_patterns"]
+        if hit["pattern"] == "install dependency"
+    ]
+    assert [hit["demotion_basis"] for hit in install_hits] == [
+        "negated",
+        "non_demotable",
+    ]
+
+
+def test_fresh_negation_can_govern_later_install_dependency_occurrence() -> None:
+    decision, body = _lexical_fp_decision(
+        "Do not install development dependencies while do not install runtime "
+        "dependencies"
+    )
+
+    assert decision["decision"] == "auto_accepted"
+    assert decision["reason_codes"][-2:] == [
+        "lexical_advisory",
+        "workspace_check_required",
+    ]
+    _assert_lexical_hit(decision, body, "install dependency", "negated")
+
+
+@pytest.mark.parametrize(
+    "intervening_wording",
+    [
+        "aside from",
+        "other than",
+        "apart from",
+        "besides",
+        "save for",
+        "excluding",
+        "though",
+        "whereas",
+        "yet",
+        "instead",
+        "unrecognized connective",
+    ],
+)
+def test_one_negation_cannot_demote_two_public_repo_occurrences(
+    intervening_wording: str,
+) -> None:
+    decision, _body = _lexical_fp_decision(
+        "Out of scope: the public repo "
+        f"{intervening_wording} publish to the public repo"
+    )
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["hard_stop_sensitive_scope"]
+    assert decision["matched_pattern"] == "public repo"
+    public_repo_hits = [
+        hit
+        for hit in decision["matched_patterns"]
+        if hit["pattern"] == "public repo"
+    ]
+    assert [hit["demotion_basis"] for hit in public_repo_hits] == [
+        "negated",
+        "non_demotable",
+    ]
+
+
+def test_fresh_negation_can_govern_later_public_repo_occurrence() -> None:
+    decision, body = _lexical_fp_decision(
+        "Out of scope: the public repo whereas do not publish to the public repo"
+    )
+
+    assert decision["decision"] == "auto_accepted"
+    assert decision["reason_codes"][-2:] == [
+        "lexical_advisory",
+        "workspace_check_required",
+    ]
+    _assert_lexical_hit(decision, body, "public repo", "negated")
+
+
+@pytest.mark.parametrize(
+    "task_text",
+    [
+        "Do not touch the staging config, but publish the docs to the public repo",
+        "Do not touch the staging config, except publish the docs to the public repo",
+        "Do not touch the staging config, however publish the docs to the public repo",
+        "Out of scope: the staging config, but publish the docs to the public repo",
+        "Do not touch the staging config, aside from publish to the public repo",
+        "Do not touch the staging config, then publish to the public repo",
+    ],
+)
+def test_unrelated_negation_does_not_demote_first_public_repo_occurrence(
+    task_text: str,
+) -> None:
+    decision, body = _lexical_fp_decision(task_text)
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["hard_stop_sensitive_scope"]
+    assert decision["matched_pattern"] == "public repo"
+    _assert_lexical_hit(decision, body, "public repo", "non_demotable")
+
+
+@pytest.mark.parametrize(
+    "task_text",
+    [
+        "Do not review anything, but install the runtime dependencies",
+        "Do not change the lockfile except install the runtime dependencies",
+        "Avoid touching the lockfile, but install the runtime dependencies",
+        "Skip the cleanup step, then install the runtime dependencies",
+    ],
+)
+def test_unrelated_negation_does_not_demote_first_install_occurrence(
+    task_text: str,
+) -> None:
+    decision, body = _lexical_fp_decision(task_text)
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["hard_stop_external_side_effect"]
+    assert decision["matched_pattern"] == "install dependency"
+    _assert_lexical_hit(decision, body, "install dependency", "non_demotable")
+
+
+@pytest.mark.parametrize(
+    ("task_text", "pattern"),
+    [
+        ("Do not publish to the public repo", "public repo"),
+        ("Avoid using the public repo", "public repo"),
+        (
+            "Do not run package installs that affect runtime dependencies",
+            "install dependency",
+        ),
+        ("Avoid installing runtime dependencies", "install dependency"),
+    ],
+)
+def test_direct_negation_still_governs_first_hard_stop_occurrence(
+    task_text: str,
+    pattern: str,
+) -> None:
+    decision, body = _lexical_fp_decision(task_text)
+
+    assert decision["decision"] == "auto_accepted"
+    assert decision["reason_codes"][-2:] == [
+        "lexical_advisory",
+        "workspace_check_required",
+    ]
+    _assert_lexical_hit(decision, body, pattern, "negated")
+
+
+@pytest.mark.parametrize(
+    ("task_text", "pattern", "reason_code"),
+    [
+        (
+            "Do not proceed without installing the runtime dependencies",
+            "install dependency",
+            "hard_stop_external_side_effect",
+        ),
+        (
+            "There is no reason to skip installing the runtime dependencies",
+            "install dependency",
+            "hard_stop_external_side_effect",
+        ),
+        (
+            "Do not skip installing the runtime dependencies",
+            "install dependency",
+            "hard_stop_external_side_effect",
+        ),
+        (
+            "Do not avoid installing the runtime dependencies",
+            "install dependency",
+            "hard_stop_external_side_effect",
+        ),
+        (
+            "Never skip installing the runtime dependencies",
+            "install dependency",
+            "hard_stop_external_side_effect",
+        ),
+        (
+            "Do not exclude installing the runtime dependencies",
+            "install dependency",
+            "hard_stop_external_side_effect",
+        ),
+        (
+            "Do not skip the public repo",
+            "public repo",
+            "hard_stop_sensitive_scope",
+        ),
+        (
+            "Do not avoid the public repo",
+            "public repo",
+            "hard_stop_sensitive_scope",
+        ),
+        (
+            "Do not exclude the public repo",
+            "public repo",
+            "hard_stop_sensitive_scope",
+        ),
+        (
+            "Never avoid the public repo",
+            "public repo",
+            "hard_stop_sensitive_scope",
+        ),
+        (
+            "Out of scope: do not publish to the public repo",
+            "public repo",
+            "hard_stop_sensitive_scope",
+        ),
+    ],
+)
+def test_stacked_negation_cannot_demote_first_hard_stop_occurrence(
+    task_text: str,
+    pattern: str,
+    reason_code: str,
+) -> None:
+    decision, body = _lexical_fp_decision(task_text)
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == [reason_code]
+    assert decision["matched_pattern"] == pattern
+    _assert_lexical_hit(decision, body, pattern, "non_demotable")
 
 
 @pytest.mark.parametrize(
@@ -1049,6 +1488,113 @@ def test_invalid_breach_basis_rejected() -> None:
         )
 
 
+# ── Checkpoint sub-basis (waiting_on_peer) ────────────────────────────────────
+
+
+def _time_breach_actuals(**overrides: Any) -> Dict[str, Any]:
+    actuals: Dict[str, Any] = {"actual_minutes": 20, "actual_files_touched": 1}
+    actuals.update(overrides)
+    return actuals
+
+
+def test_waiting_on_peer_sub_basis_stamps_on_realized_time_breach() -> None:
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(),
+        {"present": False},
+        _time_breach_actuals(breach_sub_basis="waiting_on_peer"),
+    )
+    assert checkpoint["breached"] is True
+    assert checkpoint["breached_fields"] == ["actual_minutes"]
+    assert checkpoint["breach_basis"] == "realized"
+    assert checkpoint["breach_sub_basis"] == "waiting_on_peer"
+
+
+def test_sub_basis_is_null_on_every_other_checkpoint() -> None:
+    unbreached = evaluate_threshold_checkpoint(
+        _envelope(),
+        {"present": False},
+        {"actual_minutes": 5, "actual_files_touched": 1},
+    )
+    assert unbreached["breach_sub_basis"] is None
+    breached = evaluate_threshold_checkpoint(
+        _envelope(), {"present": False}, _time_breach_actuals()
+    )
+    assert breached["breach_basis"] == "realized"
+    assert breached["breach_sub_basis"] is None
+    unevaluated = evaluate_threshold_checkpoint(None, {"present": False}, None)
+    assert unevaluated["breach_sub_basis"] is None
+
+
+@pytest.mark.parametrize(
+    ("actuals", "match"),
+    [
+        # unbreached checkpoint: nothing to refine
+        (
+            _time_breach_actuals(actual_minutes=5, breach_sub_basis="waiting_on_peer"),
+            "breached checkpoint",
+        ),
+        # files-only breach: the time axis did not overrun
+        (
+            _time_breach_actuals(
+                actual_minutes=5,
+                actual_files_touched=3,
+                breach_sub_basis="waiting_on_peer",
+            ),
+            "time-axis",
+        ),
+        # prospective breach: nothing realized, so nothing was spent waiting
+        (
+            {
+                "actual_minutes": 1,
+                "actual_files_touched": 0,
+                "declared_intent_fields": ["task_profile.merges_pr"],
+                "breach_sub_basis": "waiting_on_peer",
+            },
+            "realized",
+        ),
+        # off-vocabulary value
+        (_time_breach_actuals(breach_sub_basis="reviewing"), "breach_sub_basis must be"),
+    ],
+)
+def test_sub_basis_rejected_where_it_cannot_apply(
+    actuals: Dict[str, Any], match: str
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        evaluate_threshold_checkpoint(_envelope(), {"present": False}, actuals)
+
+
+def test_breach_basis_grammar_is_enumerated() -> None:
+    # The finite grammar, pinned: a new basis or sub-basis is a contract
+    # change that lands here together with the spec, never silently.
+    assert BREACH_BASES == ("declared_intent", "realized")
+    assert BREACH_SUB_BASES == ("waiting_on_peer",)
+    for basis in BREACH_BASES:
+        for sub_basis in BREACH_SUB_BASES:
+            actuals = _time_breach_actuals(
+                breach_basis=basis, breach_sub_basis=sub_basis
+            )
+            if basis == "realized":
+                checkpoint = evaluate_threshold_checkpoint(
+                    _envelope(), {"present": False}, actuals
+                )
+                assert checkpoint["breach_basis"] == basis
+                assert checkpoint["breach_sub_basis"] == sub_basis
+            else:
+                # declared_intent on a time overrun is already inconsistent
+                # input; a sub-basis never rescues it.
+                with pytest.raises(ValueError):
+                    evaluate_threshold_checkpoint(
+                        _envelope(), {"present": False}, actuals
+                    )
+    for bad in ("", "WAITING_ON_PEER", "waiting-on-peer", "peer_wait", "realized"):
+        with pytest.raises(ValueError, match="breach_sub_basis"):
+            evaluate_threshold_checkpoint(
+                _envelope(),
+                {"present": False},
+                _time_breach_actuals(breach_sub_basis=bad),
+            )
+
+
 def test_unpinned_completion_kind_rejected() -> None:
     checkpoint = evaluate_threshold_checkpoint(None, {"present": False}, None)
     for kind in sorted(PINNED_COMPLETION_KINDS):
@@ -1409,7 +1955,7 @@ def test_reauth_fresh_scopeless_receiver_approval_clears_pause_extent() -> None:
         policy=_REAUTH_POLICY,
     )
     assert checkpoint["reauthorization"]["disposition"] == "resumed"
-    assert checkpoint["reauthorization"]["cleared_paused_at_utc"] == "2026-05-12T12:30:00Z"
+    assert checkpoint["reauthorization"]["cleared_paused_at_utc"] == "2026-05-12T12:50:00Z"
 
 
 def test_reauth_without_breach_records_not_required() -> None:
@@ -2351,3 +2897,748 @@ def test_review_context_only_addressed_audits_do_not_consume_rounds(
     )
     assert decision["decision"] == "auto_accepted"
     assert decision["review_continuation"]["effective_round"] == 2
+
+
+# ── evaluation identity and supersession ─────────────────────────────────
+
+
+def _run_gate_cli(config_path: Path, message_path: Path, audit_dir: Path) -> int:
+    return autonomy_main([
+        "--config",
+        str(config_path),
+        "--message",
+        str(message_path),
+        "--audit-dir",
+        str(audit_dir),
+        "--receiver",
+        "codex",
+    ])
+
+
+def test_audit_record_carries_evaluation_identity(tmp_path: Path) -> None:
+    config_path = FIXTURE_ROOT / "configs" / "auto_review_standard.yaml"
+    message_path = FIXTURE_ROOT / "messages" / "ambiguous_scope.yaml"
+    audit_dir = tmp_path / "audit" / "autonomy_decisions"
+
+    assert _run_gate_cli(config_path, message_path, audit_dir) == 0
+
+    (record_path,) = audit_dir.glob("*.yaml")
+    record = _load_yaml(record_path)
+    assert re.fullmatch(r"eval-[0-9a-f]{16}", record["evaluation_id"])
+    assert record["supersedes_evaluation_id"] is None
+
+
+def test_identical_reevaluation_adopts_instead_of_duplicating(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = FIXTURE_ROOT / "configs" / "auto_review_standard.yaml"
+    message_path = FIXTURE_ROOT / "messages" / "ambiguous_scope.yaml"
+    audit_dir = tmp_path / "audit" / "autonomy_decisions"
+
+    assert _run_gate_cli(config_path, message_path, audit_dir) == 0
+    capsys.readouterr()
+    (record_path,) = audit_dir.glob("*.yaml")
+    record = _load_yaml(record_path)
+
+    assert _run_gate_cli(config_path, message_path, audit_dir) == 0
+    output = capsys.readouterr()
+    decision = json.loads(output.out)
+    assert "adopted existing evaluation" in output.err
+    assert decision["evaluation_id"] == record["evaluation_id"]
+    assert decision["adopted_audit_record"] == str(record_path)
+    assert list(audit_dir.glob("*.yaml")) == [record_path]
+
+
+def test_amended_message_supersedes_prior_evaluation(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = FIXTURE_ROOT / "configs" / "auto_review_standard.yaml"
+    message_path = tmp_path / "message.yaml"
+    shutil.copy(FIXTURE_ROOT / "messages" / "ambiguous_scope.yaml", message_path)
+    audit_dir = tmp_path / "audit" / "autonomy_decisions"
+
+    assert _run_gate_cli(config_path, message_path, audit_dir) == 0
+    capsys.readouterr()
+    (first_path,) = audit_dir.glob("*.yaml")
+    first = _load_yaml(first_path)
+
+    amended = _load_yaml(message_path)
+    amended["body"] += "\n\nAmendment: narrow the sweep to docs/ only.\n"
+    message_path.write_text(
+        yaml.safe_dump(amended, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+    assert _run_gate_cli(config_path, message_path, audit_dir) == 0
+    output = capsys.readouterr()
+    assert "superseded 1 prior evaluation(s)" in output.err
+    decision = json.loads(output.out)
+
+    records = {path: _load_yaml(path) for path in audit_dir.glob("*.yaml")}
+    assert len(records) == 2
+    stale = records[first_path]
+    (successor,) = [rec for path, rec in records.items() if path != first_path]
+    assert stale["result"]["final_state"] == "superseded"
+    assert stale["result"]["completed_at_utc"]
+    assert stale["superseded_by_evaluation_id"] == successor["evaluation_id"]
+    assert successor["supersedes_evaluation_id"] == first["evaluation_id"]
+    assert decision["supersedes_evaluation_id"] == first["evaluation_id"]
+
+
+# ── round-1 review regressions (F-001, F-006) ────────────────────────────
+
+
+def _minimal_paused_decision(message_sha: str) -> Dict[str, Any]:
+    return {
+        "decision": "paused",
+        "mode": "auto_review",
+        "reason_codes": ["estimated_minutes_exceeds_threshold"],
+        "scope_envelope": None,
+        "message_sha256": message_sha,
+        "policy_sha256": "p0licy",
+        "schema_version": 2,
+        "receiver": "codex",
+        "message_id": "msg-20260801010000-alice-race",
+        "result": {
+            "final_state": "paused",
+            "completion_kind": "admission_paused",
+        },
+    }
+
+
+def test_persist_evaluation_serializes_logical_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two concurrent different-byte evaluations leave exactly one live record.
+
+    The sleep after the prior scan guarantees the scans overlap unless the
+    whole scan/write/supersede sequence is serialized by logical identity.
+    """
+    import threading
+    import time
+
+    import autonomy_gate
+
+    audit_dir = tmp_path / "autonomy_decisions"
+    message = {"id": "msg-20260801010000-alice-race", "subject": "race"}
+
+    real_scan = autonomy_gate.find_prior_evaluations
+
+    def slow_scan(*args: Any, **kwargs: Any) -> Any:
+        result = real_scan(*args, **kwargs)
+        time.sleep(0.15)
+        return result
+
+    monkeypatch.setattr(autonomy_gate, "find_prior_evaluations", slow_scan)
+
+    outcomes: Dict[str, Dict[str, Any]] = {}
+
+    def run(sha: str) -> None:
+        outcomes[sha] = autonomy_gate.persist_evaluation(
+            audit_dir,
+            _minimal_paused_decision(sha),
+            config={},
+            message=message,
+            message_path=Path("/dev/null"),
+            policy_path=Path("/dev/null"),
+            receiver="codex",
+        )
+
+    threads = [threading.Thread(target=run, args=(sha,)) for sha in ("aa11", "bb22")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    records = [
+        yaml.safe_load(path.read_text(encoding="utf-8"))
+        for path in audit_dir.glob("*.yaml")
+    ]
+    assert len(records) == 2
+    live = [r for r in records if r["result"]["final_state"] != "superseded"]
+    stale = [r for r in records if r["result"]["final_state"] == "superseded"]
+    assert len(live) == 1
+    assert len(stale) == 1
+    assert stale[0]["superseded_by_evaluation_id"] == live[0]["evaluation_id"]
+
+
+def test_persist_evaluation_adopt_self_heals_crashed_transaction(tmp_path: Path) -> None:
+    """Adoption supersedes a live prior left behind by a crashed writer."""
+    import autonomy_gate
+
+    audit_dir = tmp_path / "autonomy_decisions"
+    message = {"id": "msg-20260801010000-alice-race", "subject": "race"}
+
+    first = autonomy_gate.persist_evaluation(
+        audit_dir,
+        _minimal_paused_decision("aa11"),
+        config={},
+        message=message,
+        message_path=Path("/dev/null"),
+        policy_path=Path("/dev/null"),
+        receiver="codex",
+    )
+    # Simulate the crashed half-transaction: a second different-byte record
+    # written without its predecessor ever being superseded.
+    stale_path = Path(first["audit_path"])
+    stale = yaml.safe_load(stale_path.read_text(encoding="utf-8"))
+    crashed = dict(stale)
+    crashed["message_sha256"] = "bb22"
+    crashed["evaluation_id"] = "eval-00000000000000bb"
+    crashed_path = audit_dir / "20990101T000000Z_msg-crashed.yaml"
+    crashed_path.write_text(yaml.safe_dump(crashed, sort_keys=False), encoding="utf-8")
+
+    outcome = autonomy_gate.persist_evaluation(
+        audit_dir,
+        _minimal_paused_decision("bb22"),
+        config={},
+        message=message,
+        message_path=Path("/dev/null"),
+        policy_path=Path("/dev/null"),
+        receiver="codex",
+    )
+    assert outcome["action"] == "adopted"
+    assert outcome["evaluation_id"] == "eval-00000000000000bb"
+    healed = yaml.safe_load(stale_path.read_text(encoding="utf-8"))
+    assert healed["result"]["final_state"] == "superseded"
+    assert healed["superseded_by_evaluation_id"] == "eval-00000000000000bb"
+
+
+def test_supersede_fails_closed_on_duplicate_key_evidence(tmp_path: Path) -> None:
+    """Automatic supersession must not normalize duplicate-key YAML."""
+    from autonomy_gate import DuplicateKeyError, supersede_audit_record
+
+    fixture = (
+        FIXTURE_ROOT / "records" / "duplicate_yaml_key_logged_notes.yaml"
+    )
+    target = tmp_path / fixture.name
+    shutil.copy(fixture, target)
+    original = target.read_bytes()
+
+    with pytest.raises(DuplicateKeyError):
+        supersede_audit_record(target, superseded_by="eval-0123456789abcdef")
+    assert target.read_bytes() == original
+
+
+def test_persist_evaluation_fails_closed_on_malformed_predecessor(tmp_path: Path) -> None:
+    """A live predecessor that cannot be superseded fails the transaction.
+
+    No successor may be written and no success reported while ambiguous
+    predecessor evidence stays live — partial success recreates exactly
+    the duplicate-live shape the transaction exists to prevent.
+    """
+    import autonomy_gate
+
+    audit_dir = tmp_path / "autonomy_decisions"
+    audit_dir.mkdir(parents=True)
+    malformed = audit_dir / "20260801T010000Z_msg-race.yaml"
+    malformed.write_text(
+        "schema_version: 2\n"
+        "receiver: codex\n"
+        "message_id: msg-20260801010000-alice-race\n"
+        "message_sha256: aa11\n"
+        "policy_sha256: p0licy\n"
+        "decision: paused\n"
+        "logged_notes:\n"
+        "- code: lexical_advisory_declared\n"
+        "  matched_pattern: merge\n"
+        "logged_notes: []\n"
+        "result:\n"
+        "  final_state: paused\n"
+        "  completion_kind: admission_paused\n",
+        encoding="utf-8",
+    )
+    original = malformed.read_bytes()
+
+    with pytest.raises(ValueError, match="logical-identity transaction failed"):
+        autonomy_gate.persist_evaluation(
+            audit_dir,
+            _minimal_paused_decision("bb22"),
+            config={},
+            message={"id": "msg-20260801010000-alice-race", "subject": "race"},
+            message_path=Path("/dev/null"),
+            policy_path=Path("/dev/null"),
+            receiver="codex",
+        )
+    assert malformed.read_bytes() == original
+    remaining = sorted(path.name for path in audit_dir.glob("*.yaml"))
+    assert remaining == [malformed.name]
+
+
+def test_persist_evaluation_oserror_after_write_rolls_back_successor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A filesystem failure during supersession restores the pre-call state.
+
+    Catching only validation errors would leave the just-written successor
+    live next to the never-closed predecessor — two live evaluations for
+    one logical identity.
+    """
+    import autonomy_gate
+
+    audit_dir = tmp_path / "autonomy_decisions"
+    message = {"id": "msg-20260801010000-alice-race", "subject": "race"}
+
+    first = autonomy_gate.persist_evaluation(
+        audit_dir,
+        _minimal_paused_decision("aa11"),
+        config={},
+        message=message,
+        message_path=Path("/dev/null"),
+        policy_path=Path("/dev/null"),
+        receiver="codex",
+    )
+    predecessor_path = Path(first["audit_path"])
+    original = predecessor_path.read_bytes()
+
+    def broken_supersede(*args: Any, **kwargs: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(
+        autonomy_gate, "_supersede_audit_record_locked", broken_supersede
+    )
+    with pytest.raises(ValueError, match="pre-call state restored"):
+        autonomy_gate.persist_evaluation(
+            audit_dir,
+            _minimal_paused_decision("bb22"),
+            config={},
+            message=message,
+            message_path=Path("/dev/null"),
+            policy_path=Path("/dev/null"),
+            receiver="codex",
+        )
+    assert predecessor_path.read_bytes() == original
+    remaining = sorted(path.name for path in audit_dir.glob("*.yaml"))
+    assert remaining == [predecessor_path.name]
+
+
+def test_persist_evaluation_partial_supersession_restores_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Failure after one of two predecessor writes restores both.
+
+    Rolling back only the successor would leave the first predecessor
+    superseded_by an evaluation that no longer exists — the dangling
+    link the sweep flags as superseded_missing_successor.
+    """
+    import autonomy_gate
+
+    audit_dir = tmp_path / "autonomy_decisions"
+    message = {"id": "msg-20260801010000-alice-race", "subject": "race"}
+
+    first = autonomy_gate.persist_evaluation(
+        audit_dir,
+        _minimal_paused_decision("aa11"),
+        config={},
+        message=message,
+        message_path=Path("/dev/null"),
+        policy_path=Path("/dev/null"),
+        receiver="codex",
+    )
+    first_path = Path(first["audit_path"])
+    stale = yaml.safe_load(first_path.read_text(encoding="utf-8"))
+    crashed = dict(stale)
+    crashed["message_sha256"] = "cc33"
+    crashed["evaluation_id"] = "eval-00000000000000cc"
+    crashed_path = audit_dir / "20990101T000000Z_msg-crashed.yaml"
+    crashed_path.write_text(yaml.safe_dump(crashed, sort_keys=False), encoding="utf-8")
+    original_first = first_path.read_bytes()
+    original_crashed = crashed_path.read_bytes()
+
+    real_supersede = autonomy_gate._supersede_audit_record_locked
+    calls = {"count": 0}
+
+    def flaky_supersede(path: Path, **kwargs: Any) -> None:
+        calls["count"] += 1
+        if calls["count"] >= 2:
+            raise ValueError("second predecessor write refused")
+        real_supersede(path, **kwargs)
+
+    monkeypatch.setattr(
+        autonomy_gate, "_supersede_audit_record_locked", flaky_supersede
+    )
+    with pytest.raises(ValueError, match="pre-call state restored"):
+        autonomy_gate.persist_evaluation(
+            audit_dir,
+            _minimal_paused_decision("bb22"),
+            config={},
+            message=message,
+            message_path=Path("/dev/null"),
+            policy_path=Path("/dev/null"),
+            receiver="codex",
+        )
+    assert calls["count"] == 2
+    assert first_path.read_bytes() == original_first
+    assert crashed_path.read_bytes() == original_crashed
+    remaining = sorted(path.name for path in audit_dir.glob("*.yaml"))
+    assert remaining == sorted([first_path.name, crashed_path.name])
+
+
+def test_persist_evaluation_serializes_with_per_record_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A conforming per-record writer is never erased by rollback.
+
+    The transaction holds every affected record's locked_audit across
+    capture, mutation, and restore — a writer that takes the documented
+    per-record lock mid-transaction (human-outcome or message_auth
+    style) blocks until the rollback completes, and its committed update
+    lands on the restored record instead of being overwritten by it.
+    """
+    import threading
+    import time
+
+    import autonomy_gate
+    from _oacp_constants import atomic_replace_yaml, locked_audit
+
+    audit_dir = tmp_path / "autonomy_decisions"
+    message = {"id": "msg-20260801010000-alice-race", "subject": "race"}
+
+    first = autonomy_gate.persist_evaluation(
+        audit_dir,
+        _minimal_paused_decision("aa11"),
+        config={},
+        message=message,
+        message_path=Path("/dev/null"),
+        policy_path=Path("/dev/null"),
+        receiver="codex",
+    )
+    first_path = Path(first["audit_path"])
+    crashed = dict(yaml.safe_load(first_path.read_text(encoding="utf-8")))
+    crashed["message_sha256"] = "cc33"
+    crashed["evaluation_id"] = "eval-00000000000000cc"
+    crashed_path = audit_dir / "20990101T000000Z_msg-crashed.yaml"
+    crashed_path.write_text(yaml.safe_dump(crashed, sort_keys=False), encoding="utf-8")
+
+    real_supersede = autonomy_gate._supersede_audit_record_locked
+    writer_started = threading.Event()
+    writer_done = threading.Event()
+
+    def conforming_writer() -> None:
+        writer_started.set()
+        with locked_audit(first_path):
+            record = yaml.safe_load(first_path.read_text(encoding="utf-8"))
+            record["marker"] = "human-outcome-style-update"
+            atomic_replace_yaml(first_path, record)
+        writer_done.set()
+
+    writer = threading.Thread(target=conforming_writer)
+    calls = {"count": 0}
+
+    def flaky_supersede(path: Path, **kwargs: Any) -> None:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            real_supersede(path, **kwargs)
+            # Launch the writer mid-transaction: the held record lock must
+            # make it serialize, not interleave with the coming rollback.
+            writer.start()
+            writer_started.wait(timeout=5)
+            time.sleep(0.2)
+            assert not writer_done.is_set()
+            return
+        raise ValueError("second predecessor write refused")
+
+    monkeypatch.setattr(
+        autonomy_gate, "_supersede_audit_record_locked", flaky_supersede
+    )
+    with pytest.raises(ValueError, match="pre-call state restored"):
+        autonomy_gate.persist_evaluation(
+            audit_dir,
+            _minimal_paused_decision("bb22"),
+            config={},
+            message=message,
+            message_path=Path("/dev/null"),
+            policy_path=Path("/dev/null"),
+            receiver="codex",
+        )
+    writer.join(timeout=5)
+    assert writer_done.is_set()
+    final = yaml.safe_load(first_path.read_text(encoding="utf-8"))
+    assert final["marker"] == "human-outcome-style-update"
+    assert final["result"]["final_state"] == "paused"
+
+
+def test_persist_evaluation_successor_writer_serializes_with_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A writer targeting the newly published successor cannot be erased.
+
+    The successor's lock is entered before publication and held through
+    predecessor mutation and rollback, so a conforming writer blocks
+    for the whole transaction — after a rollback it finds the record
+    gone (never authoritative) instead of committing an update the
+    rollback then deletes.
+    """
+    import threading
+    import time
+
+    import autonomy_gate
+    from _oacp_constants import atomic_replace_yaml, locked_audit
+
+    audit_dir = tmp_path / "autonomy_decisions"
+    message = {"id": "msg-20260801010000-alice-race", "subject": "race"}
+
+    first = autonomy_gate.persist_evaluation(
+        audit_dir,
+        _minimal_paused_decision("aa11"),
+        config={},
+        message=message,
+        message_path=Path("/dev/null"),
+        policy_path=Path("/dev/null"),
+        receiver="codex",
+    )
+    predecessor_path = Path(first["audit_path"])
+    original = predecessor_path.read_bytes()
+
+    writer_started = threading.Event()
+    writer_done = threading.Event()
+    writer_outcome: Dict[str, Any] = {}
+
+    def successor_writer(successor_path: Path) -> None:
+        writer_started.set()
+        with locked_audit(successor_path):
+            try:
+                record = yaml.safe_load(
+                    successor_path.read_text(encoding="utf-8")
+                )
+                record["marker"] = "successor-update"
+                atomic_replace_yaml(successor_path, record)
+                writer_outcome["committed"] = True
+            except FileNotFoundError:
+                writer_outcome["committed"] = False
+        writer_done.set()
+
+    threads: List[threading.Thread] = []
+
+    def failing_supersede(path: Path, **kwargs: Any) -> None:
+        known = {predecessor_path.name}
+        (successor_path,) = [
+            candidate
+            for candidate in audit_dir.glob("*.yaml")
+            if candidate.name not in known
+        ]
+        thread = threading.Thread(
+            target=successor_writer, args=(successor_path,)
+        )
+        threads.append(thread)
+        thread.start()
+        writer_started.wait(timeout=5)
+        time.sleep(0.2)
+        assert not writer_done.is_set()  # blocked on the held successor lock
+        raise ValueError("predecessor write refused")
+
+    monkeypatch.setattr(
+        autonomy_gate, "_supersede_audit_record_locked", failing_supersede
+    )
+    with pytest.raises(ValueError, match="pre-call state restored"):
+        autonomy_gate.persist_evaluation(
+            audit_dir,
+            _minimal_paused_decision("bb22"),
+            config={},
+            message=message,
+            message_path=Path("/dev/null"),
+            policy_path=Path("/dev/null"),
+            receiver="codex",
+        )
+    threads[0].join(timeout=5)
+    assert writer_done.is_set()
+    assert writer_outcome["committed"] is False
+    assert predecessor_path.read_bytes() == original
+    remaining = sorted(path.name for path in audit_dir.glob("*.yaml"))
+    assert remaining == [predecessor_path.name]
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    [
+        "always_pause_task",
+        "malformed_config_pauses",
+        "invalid_message_pauses",
+        "missing_task_profile_pauses",
+        "unparsable_task_profile_pauses",
+    ],
+)
+def test_admission_ledger_is_explicitly_not_evaluated_before_envelope(
+    fixture: str,
+) -> None:
+    case = _load_yaml(FIXTURE_ROOT / "expected" / f"{fixture}.yaml")
+    decision = evaluate_autonomy(
+        _load_yaml(FIXTURE_ROOT / case["message"]),
+        _load_yaml(FIXTURE_ROOT / case["config"]),
+        receiver="codex",
+    )
+    ledger = decision["admission_axes"]
+    # No envelope, nothing to evaluate against: the record says so instead
+    # of carrying empty lists that would read as "all passed".
+    assert ledger["evaluated"] is False
+    assert all(ledger[axis] is None for axis in ADMISSION_AXES)
+    assert ledger["declaration_errors"] is None
+    assert decision["co_occurring_reason_codes"] == []
+
+
+def test_checkpoint_pause_keeps_the_admission_ledger() -> None:
+    case = _load_yaml(FIXTURE_ROOT / "expected" / "checkpoint_breach_pauses.yaml")
+    decision = evaluate_autonomy(
+        _load_yaml(FIXTURE_ROOT / case["message"]),
+        _load_yaml(FIXTURE_ROOT / case["config"]),
+        actuals=_load_yaml(FIXTURE_ROOT / case["actuals"]),
+        receiver="codex",
+    )
+    assert decision["reason_codes"] == ["threshold_checkpoint_breached"]
+    assert decision["result"]["completion_kind"] == "checkpoint_paused"
+    # Checkpoint reasons never displace admission evidence: the ledger is
+    # the admitted (all-pass) shape and stays separate from the checkpoint.
+    ledger = decision["admission_axes"]
+    assert ledger["evaluated"] is True
+    assert admission_ledger_codes(ledger) == []
+    assert decision["co_occurring_reason_codes"] == []
+
+
+def test_lexical_hard_stop_records_the_evaluated_grant_block() -> None:
+    config = _load_yaml(
+        FIXTURE_ROOT / "configs" / "auto_review_continuation_enabled.yaml"
+    )
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "hard_stop_masking_threshold.yaml")
+    decision = evaluate_autonomy(message, config, receiver="codex")
+    assert decision["reason_codes"] == ["hard_stop_external_side_effect"]
+    # The grant is resolved ahead of Gate 3 now, so a lexical pause records
+    # the real evaluation rather than a disabled placeholder.
+    assert decision["continuation_grant"]["enabled"] is True
+    assert decision["continuation_grant"]["decision"] == "not_present"
+    assert decision["admission_axes"]["evaluated"] is True
+    assert set(decision["co_occurring_reason_codes"]) == set(
+        admission_ledger_codes(decision["admission_axes"])
+    )
+
+
+def _reply_only_research_message(**edits: str) -> Dict[str, Any]:
+    """The reply-only research fixture with body substrings replaced."""
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "sensitive_content_reply_only.yaml")
+    body = message["body"]
+    for old, new in edits.items():
+        assert old in body, old
+        body = body.replace(old, new)
+    message["body"] = body
+    return message
+
+
+_REPLY_ONLY_NOTES = [
+    {"code": "lexical_advisory_reply_only", "matched_pattern": "pricing"},
+    {"code": "lexical_advisory_reply_only", "matched_pattern": "commercial"},
+]
+
+
+def test_content_sensitivity_reply_only_shape_records_every_term() -> None:
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml")
+
+    decision = evaluate_autonomy(_reply_only_research_message(), config)
+
+    assert decision["decision"] == "auto_accepted"
+    assert "hard_stop_content_sensitivity" not in decision["reason_codes"]
+    assert "lexical_advisory" in decision["reason_codes"]
+    assert "matched_pattern" not in decision
+    # Both terms are recorded, not just the first match.
+    assert decision["logged_notes"] == _REPLY_ONLY_NOTES
+
+
+@pytest.mark.parametrize(
+    "edits",
+    [
+        # Fencing never demotes the category; the shape is what decides.
+        {
+            "Survey the hosted-tier landscape": "```oacp-guardrails\nDo not quote pricing.\n```\nSurvey the hosted-tier landscape"
+        },
+        # Neither does a negation heading.
+        {"Survey the hosted-tier landscape": "Out of scope:\n- pricing changes.\n\nSurvey the hosted-tier landscape"},
+    ],
+    ids=["guardrails_fence", "negation_heading"],
+)
+def test_content_sensitivity_carve_out_is_shape_not_wording(edits: Dict[str, str]) -> None:
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml")
+
+    decision = evaluate_autonomy(_reply_only_research_message(**edits), config)
+
+    assert decision["decision"] == "auto_accepted"
+    assert [
+        note for note in decision["logged_notes"] if note["code"] == "lexical_advisory_reply_only"
+    ] == _REPLY_ONLY_NOTES
+
+
+@pytest.mark.parametrize(
+    "edits",
+    [
+        # A side-effect flag true (consistently declared) is another shape.
+        {
+            "external_side_effects: false": "external_side_effects: true",
+            "commits_changes: false": "commits_changes: true",
+        },
+        # Omitting the reply-only declaration is not declaring it.
+        {"  sends_oacp_reply_only: true\n": ""},
+        # A contradictory profile (reply-only plus a commit) keeps the stop.
+        {"commits_changes: false": "commits_changes: true"},
+    ],
+    ids=["side_effect_declared", "reply_only_omitted", "contradictory_profile"],
+)
+def test_content_sensitivity_other_profile_shapes_keep_the_hard_stop(
+    edits: Dict[str, str],
+) -> None:
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml")
+
+    decision = evaluate_autonomy(_reply_only_research_message(**edits), config)
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["hard_stop_content_sensitivity"]
+    assert decision["matched_pattern"] == "pricing"
+    assert not [
+        note for note in decision["logged_notes"] if note["code"] == "lexical_advisory_reply_only"
+    ]
+
+
+def test_content_sensitivity_profileless_default_envelope_keeps_the_hard_stop() -> None:
+    """The default envelope is reply-only by bound but declares nothing."""
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml")
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "brainstorm_side_effect_verbs.yaml")
+    message["body"] = "Explore wording for a pricing page; reply with options only."
+
+    decision = evaluate_autonomy(message, config)
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["hard_stop_content_sensitivity"]
+    assert decision["matched_pattern"] == "pricing"
+
+
+
+@pytest.mark.parametrize(
+    ("edits", "reason_code", "matched_pattern"),
+    [
+        (
+            {"Survey the hosted-tier landscape": "Run rm -rf build first, then survey the hosted-tier landscape"},
+            "hard_stop_destructive_command",
+            "rm -rf",
+        ),
+        (
+            {
+                "Survey the hosted-tier landscape": "Update config.yaml, then survey the hosted-tier landscape",
+                "touches_auth_config_or_secrets: false": "touches_auth_config_or_secrets: true",
+            },
+            "hard_stop_sensitive_scope",
+            "config",
+        ),
+    ],
+    ids=["destructive_token", "declared_sensitive_scope"],
+)
+def test_content_sensitivity_advisory_survives_earlier_hard_stops(
+    edits: Dict[str, str], reason_code: str, matched_pattern: str
+) -> None:
+    """The reply-only advisory is evidence, recorded before any Gate-3 early
+    return: an earlier hard stop keeps its verdict and the notes survive."""
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml")
+
+    decision = evaluate_autonomy(_reply_only_research_message(**edits), config)
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == [reason_code]
+    assert decision["matched_pattern"] == matched_pattern
+    assert [
+        note for note in decision["logged_notes"] if note["code"] == "lexical_advisory_reply_only"
+    ] == _REPLY_ONLY_NOTES

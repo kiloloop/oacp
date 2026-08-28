@@ -1,0 +1,5 @@
+description: A lingering writer staging artifact beside a valid record — interrupted publication.
+findings:
+  - name: debriefs-staging
+    severity: warn
+    message_contains: "interrupted publication"

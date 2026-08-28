@@ -9,15 +9,13 @@ import argparse
 import copy
 import datetime as dt
 import json
-import os
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Tuple
 
 import yaml
 
-from _oacp_constants import locked_audit, utc_now_iso
+from _oacp_constants import atomic_replace_yaml, locked_audit, utc_now_iso
 from autonomy_gate import (
     AUTONOMY_AUDIT_SCHEMA_VERSION,
     PINNED_COMPLETION_KINDS,
@@ -265,30 +263,6 @@ def record_human_outcome(
     return updated
 
 
-def _atomic_write_yaml(path: Path, data: Dict[str, Any]) -> None:
-    content = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
-    mode = path.stat().st_mode
-    temp_path: Optional[Path] = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-            temp_path = Path(handle.name)
-        os.chmod(temp_path, mode)
-        os.replace(temp_path, path)
-    finally:
-        if temp_path is not None and temp_path.exists():
-            temp_path.unlink()
-
-
 def _grant_scope_from_file(path: Optional[Path]) -> Optional[Dict[str, Any]]:
     if path is None:
         return None
@@ -353,7 +327,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 actor=args.actor,
             )
             if not args.dry_run:
-                _atomic_write_yaml(args.audit_file, updated)
+                atomic_replace_yaml(args.audit_file, updated)
 
         outcome = updated["result"]["human_outcome"]
         if args.json:

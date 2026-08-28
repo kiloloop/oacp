@@ -22,6 +22,7 @@ from send_inbox_message import (  # noqa: E402
     _atomic_write_text,
     build_message_dict,
     generate_filename,
+    generate_conversation_id,
     generate_message_id,
     generate_timestamp,
     infer_current_runtime,
@@ -34,7 +35,7 @@ from send_inbox_message import (  # noqa: E402
     main,
 )
 
-from validate_message import validate_message_dict  # noqa: E402
+from validate_message import CONVERSATION_ID_RE, validate_message_dict  # noqa: E402
 
 
 def _write_agent_card(
@@ -80,6 +81,17 @@ class TestGenerateTimestamp(unittest.TestCase):
     def test_format(self):
         ts = generate_timestamp()
         self.assertRegex(ts, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+
+class TestGenerateConversationId(unittest.TestCase):
+    @mock.patch("send_inbox_message.secrets.randbelow", return_value=42)
+    def test_format(self, _randbelow):
+        conversation_id = generate_conversation_id("claude")
+        self.assertRegex(
+            conversation_id,
+            r"^conv-\d{8}-claude-000042$",
+        )
+        self.assertRegex(conversation_id, CONVERSATION_ID_RE)
 
 
 class TestGenerateFilename(unittest.TestCase):
@@ -1173,6 +1185,77 @@ class TestBroadcast(unittest.TestCase):
 
 
 class TestInReplyTo(unittest.TestCase):
+    @mock.patch("send_inbox_message.generate_conversation_id")
+    def test_explicit_conversation_id_wins_without_minting(self, mint):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hub_dir = Path(tmpdir)
+            explicit = "conv-20260828-iris-09"
+            report = send_message(
+                project="test-project",
+                sender="claude",
+                recipient="codex",
+                msg_type="question",
+                subject="Existing thread",
+                body="Question",
+                conversation_id=explicit,
+                oacp_dir=hub_dir,
+            )
+
+            from validate_message import _parse_simple_yaml
+
+            data = _parse_simple_yaml(
+                Path(report["inbox_path"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(data["conversation_id"], explicit)
+            mint.assert_not_called()
+
+    @mock.patch(
+        "send_inbox_message.generate_conversation_id",
+        return_value="conv-20260828-claude-000042",
+    )
+    def test_parentless_send_mints_conversation_and_reply_inherits_it(self, mint):
+        """A new thread gets an ID once; its reply inherits that exact ID."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hub_dir = Path(tmpdir)
+            parent = send_message(
+                project="test-project",
+                sender="claude",
+                recipient="codex",
+                msg_type="question",
+                subject="New thread",
+                body="Question",
+                oacp_dir=hub_dir,
+            )
+
+            from validate_message import _parse_simple_yaml
+
+            parent_data = _parse_simple_yaml(
+                Path(parent["inbox_path"]).read_text(encoding="utf-8")
+            )
+            conversation_id = parent_data["conversation_id"]
+            self.assertRegex(
+                conversation_id,
+                r"^conv-\d{8}-claude-\d{6}$",
+            )
+            self.assertEqual(validate_message_dict(parent_data), [])
+
+            reply = send_message(
+                project="test-project",
+                sender="codex",
+                recipient="claude",
+                msg_type="notification",
+                subject="Re: New thread",
+                body="Answer",
+                oacp_dir=hub_dir,
+                in_reply_to=parent["message_id"],
+            )
+            reply_data = _parse_simple_yaml(
+                Path(reply["inbox_path"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(reply_data["conversation_id"], conversation_id)
+            self.assertEqual(reply_data["parent_message_id"], parent["message_id"])
+            mint.assert_called_once_with("claude")
+
     def test_in_reply_to_inherits_conversation(self):
         """--in-reply-to should find parent and copy conversation_id."""
         with tempfile.TemporaryDirectory() as tmpdir:

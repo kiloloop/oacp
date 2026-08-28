@@ -13,3 +13,13 @@ expected:
     - risk_threshold_passed
     - hard_stops_clear
     - workspace_check_required
+  # Admission-only exemption: the profileless admit runs under the
+  # documented default envelope, and the record names that source.
+  scope_envelope_source: default_profileless
+  scope_envelope:
+    estimated_minutes: 25
+    expected_files_touched: 2
+    risk_tier: P3
+    sends_oacp_reply_only: true
+    creates_or_updates_pr: false
+    external_side_effects: false

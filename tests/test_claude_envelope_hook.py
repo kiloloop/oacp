@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pytest
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
@@ -1751,6 +1752,28 @@ def test_envelope_clear_uses_newest_audit_record(tmp_path: Path) -> None:
     assert decision.action == "deny"
 
 
+def test_envelope_clear_skips_superseded_records(tmp_path: Path) -> None:
+    # A superseded evaluation's authority transferred to its successor: a
+    # newest-but-superseded record must neither sanction the clear (live
+    # work continues under the older record) nor block it once the live
+    # record is terminal.
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    _write_audit_record(tmp_path, final_state="pending", stamp="20260713T000000Z")
+    _write_audit_record(tmp_path, final_state="superseded", stamp="20260714T000000Z")
+    decision = _process_bash(repo, CLEAR_CMD)
+    assert decision.action == "deny"
+
+
+def test_envelope_clear_allowed_when_only_live_record_terminal(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    _write_audit_record(tmp_path, final_state="done", stamp="20260713T000000Z")
+    _write_audit_record(tmp_path, final_state="superseded", stamp="20260714T000000Z")
+    decision = _process_bash(repo, CLEAR_CMD)
+    assert decision.action == "allow"
+
+
 def test_envelope_clear_other_project_asks(tmp_path: Path) -> None:
     repo = _make_workspace(tmp_path)
     _install_envelope(tmp_path, make_envelope())
@@ -1818,16 +1841,29 @@ def _agent_dir(tmp_path: Path) -> Path:
 
 def test_audit_write_exempt_from_file_counter(tmp_path: Path) -> None:
     # Regression (soak shape): tight honest declare, budget already consumed,
-    # then the mandatory completion audit write — must not deny or count.
+    # then a bookkeeping audit write — must not deny or count. The completion
+    # record itself moved out of this exemption: `autonomy_decisions/` became
+    # authority once a recorded re-authorization could widen the live bound,
+    # and its writes go through the canonical CLI writers (see
+    # test_admission_audit_record_write_denied).
     repo = _make_workspace(tmp_path)
     target = _install_envelope(tmp_path, _exhausted_envelope())
-    audit_path = (
-        _agent_dir(tmp_path) / "audit" / "autonomy_decisions" / "x_msg-1.yaml"
-    )
+    audit_path = _agent_dir(tmp_path) / "audit" / "x_msg-1.yaml"
     decision = _process_write(repo, str(audit_path))
     assert decision.action == "allow"
     stored = load_envelope(target)
     assert stored["counters"]["files_touched"] == ["/repo/a.py", "/repo/b.py"]
+
+
+def test_admission_audit_record_write_denied(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, _exhausted_envelope())
+    audit_path = (
+        _agent_dir(tmp_path) / "audit" / "autonomy_decisions" / "x_msg-1.yaml"
+    )
+    decision = _process_write(repo, str(audit_path))
+    assert decision.action == "deny"
+    assert "authority self-modification" in decision.reason
 
 
 def test_scratchpad_write_exempt_from_file_counter(tmp_path: Path) -> None:
@@ -1901,13 +1937,25 @@ def test_trust_root_write_counted_when_auth_declared(tmp_path: Path) -> None:
 def test_bash_redirect_to_audit_dir_exempt(tmp_path: Path) -> None:
     repo = _make_workspace(tmp_path)
     target = _install_envelope(tmp_path, _exhausted_envelope())
-    audit_path = (
-        _agent_dir(tmp_path) / "audit" / "autonomy_decisions" / "y_msg-1.yaml"
-    )
+    audit_path = _agent_dir(tmp_path) / "audit" / "notes.md"
     decision = _process_bash(repo, f"echo done > {audit_path}")
     assert decision.action == "allow"
     stored = load_envelope(target)
     assert stored["counters"]["files_touched"] == ["/repo/a.py", "/repo/b.py"]
+
+
+def test_bash_redirect_to_admission_audit_record_denied(tmp_path: Path) -> None:
+    """`audit/autonomy_decisions/` is authority, not bookkeeping: a recorded
+    re-authorization widens the live bound, so a session able to write its own
+    record would be able to write its own grant."""
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, _exhausted_envelope())
+    audit_path = (
+        _agent_dir(tmp_path) / "audit" / "autonomy_decisions" / "y_msg-1.yaml"
+    )
+    decision = _process_bash(repo, f"echo done > {audit_path}")
+    assert decision.action == "deny"
+    assert "authority self-modification" in decision.reason
 
 
 def test_peer_agent_inbox_not_exempt(tmp_path: Path) -> None:
@@ -2156,3 +2204,802 @@ def test_find_action_predicates_ask() -> None:
     assert bash("find . -name '*.tmp' -delete").action == "ask"
     assert bash("find . -name core -exec rm {} +").action == "ask"
     assert bash("find . -name '*.py' -type f").action == "allow"
+
+
+# ── Heredoc bodies and variable redirect targets (phantom files_touched) ──────
+
+
+PHANTOM_FILE_ROWS = [
+    pytest.param(
+        "python3 - <<'PYEOF'\nprint(f\"{a:>8} -> {c.value:13} ok\")\nPYEOF",
+        id="heredoc_arrow_in_format_string",
+    ),
+    pytest.param(
+        "python3 - <<'PYEOF'\nprint(v, \"-> INSERTED id\", rid)\nPYEOF",
+        id="heredoc_arrow_in_string",
+    ),
+    pytest.param(
+        'printf "x: nan\\n" > /scratchpad/probe/obs_nan.yaml',
+        id="literal_scratchpad_redirect",
+    ),
+    pytest.param(
+        "python3 - <<'PYEOF'\nst = Store(\":memory:\")\nPYEOF",
+        id="heredoc_without_redirect",
+    ),
+]
+
+
+@pytest.mark.parametrize("command", PHANTOM_FILE_ROWS)
+def test_phantom_write_rows_are_not_counted(command: str) -> None:
+    """Nothing outside the exempt scratchpad is written: zero budget suffices."""
+    decision = bash(command, make_envelope(expected_files_touched=0))
+    assert decision.action == "allow", decision.reason
+    assert decision.new_files == []
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        pytest.param(
+            "cat > notes.md <<'EOF'\nline -> arrow\nEOF",
+            ["/repo/notes.md"],
+            id="redirect_before_heredoc_operator",
+        ),
+        pytest.param(
+            "tee notes.md <<'EOF'\nline -> arrow\nEOF",
+            ["/repo/notes.md"],
+            id="tee_with_heredoc_body",
+        ),
+    ],
+)
+def test_real_write_on_heredoc_line_still_counted(command: str, expected: list) -> None:
+    """The operator line is shell; only the body is data."""
+    decision = bash(command)
+    assert decision.action == "allow", decision.reason
+    assert decision.new_files == expected
+
+
+def test_live_incident_heredoc_shape_allowed_with_zero_budget() -> None:
+    command = (
+        "python3 - <<'PYEOF'\n"
+        "import json\n"
+        "for rid in ids:\n"
+        '    print(rid, "-> INSERTED")\n'
+        'print("a -> b")\n'
+        "PYEOF"
+    )
+    decision = bash(command, make_envelope(expected_files_touched=0))
+    assert decision.action == "allow", decision.reason
+    assert decision.new_files == []
+
+
+def test_unterminated_heredoc_asks() -> None:
+    decision = bash("python3 - <<'PYEOF'\nprint('x')\n")
+    assert decision.action == "ask", decision.reason
+    assert "heredoc" in decision.reason
+
+
+# ── Fail-closed boundaries of the phantom-count fix ──────────────────────────
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param(
+            "cat <<EOF\n$(touch escaped-by-hook.md)\nEOF",
+            id="unquoted_delimiter_command_substitution",
+        ),
+        pytest.param(
+            "cat <<EOF\n`touch escaped-by-hook.md`\nEOF",
+            id="unquoted_delimiter_backtick",
+        ),
+        pytest.param(
+            "cat <<-EOF\n\t$(touch escaped-by-hook.md)\n\tEOF",
+            id="unquoted_dash_delimiter_substitution",
+        ),
+    ],
+)
+def test_expanding_heredoc_body_with_substitution_asks(command: str) -> None:
+    """An unquoted delimiter leaves the body subject to expansion: a command
+    or backtick substitution in it executes, so the body is not data."""
+    decision = bash(command, make_envelope(expected_files_touched=0))
+    assert decision.action == "ask", decision.reason
+    assert "heredoc" in decision.reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("cat <<'EOF'\n$(touch not-run.md)\nEOF", id="single_quoted_delimiter"),
+        pytest.param('cat <<"EOF"\n`touch not-run.md`\nEOF', id="double_quoted_delimiter"),
+        pytest.param("cat <<\\EOF\n$(touch not-run.md)\nEOF", id="backslashed_delimiter"),
+        pytest.param("cat <<EOF\nhello $USER -> ${HOME}\nEOF", id="expanding_body_no_substitution"),
+    ],
+)
+def test_literal_or_substitution_free_heredoc_bodies_allowed(command: str) -> None:
+    decision = bash(command, make_envelope(expected_files_touched=0))
+    assert decision.action == "allow", decision.reason
+    assert decision.new_files == []
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        pytest.param("touch -- '<notes.md'", ["/repo/<notes.md"], id="quoted_operand_like_input_redirect"),
+        pytest.param("touch -- '<<NOT_A_HEREDOC'", ["/repo/<<NOT_A_HEREDOC"], id="quoted_operand_like_heredoc"),
+        pytest.param('tee "<notes.md" <<\'EOF\'\nline -> arrow\nEOF', ["/repo/<notes.md"], id="quoted_operand_with_heredoc"),
+    ],
+)
+def test_quoted_writer_operands_keep_lexical_provenance(command: str, expected: list) -> None:
+    """shlex dequotes, so a literal operand spelled like redirection syntax is
+    still an operand; only the real `<<WORD` operator is removed."""
+    decision = bash(command)
+    assert decision.action == "allow", decision.reason
+    assert decision.new_files == expected
+    zero = bash(command, make_envelope(expected_files_touched=0))
+    assert zero.action == "deny"
+    assert "expected 0, now 1" in zero.reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The issue rows that spell a scratchpad target through a variable.
+        pytest.param(
+            'OUT=/scratchpad/pytest.log; { python3 -m pytest -q; } > "$OUT"',
+            id="var_redirect_assigned_in_same_command",
+        ),
+        pytest.param(
+            'S=/scratchpad/probe; printf "x: nan\\n" > $S/obs_nan.yaml',
+            id="var_redirect_path_segment",
+        ),
+        pytest.param('echo x > "$OUT"', id="never_assigned"),
+        pytest.param('OUT=/scratchpad/x.log python3 -m pytest > "$OUT"', id="prefix_assignment"),
+        pytest.param('OUT=$TMPDIR/x.log; echo x > "$OUT"', id="assigned_from_a_variable"),
+        pytest.param('D=/scratchpad; F=probe.log; echo x > "${D}/$F"', id="braced_and_bare"),
+        pytest.param('OUT=/scratchpad/x; touch "$OUT"', id="writer_program_operand"),
+        pytest.param('cp notes.md "$DEST"', id="cp_destination"),
+        pytest.param('echo x > "$(mktemp)"', id="command_substitution_target"),
+        pytest.param("echo x > `mktemp`", id="backtick_target"),
+        pytest.param('OUT=/repo/notes.md; echo x > "$OUT"', id="task_scope_value_is_not_counted_but_asked"),
+    ],
+)
+def test_variable_write_target_asks(command: str) -> None:
+    """A target the shell would expand from state the classifier cannot see
+    escalates: neither counted as a cwd-relative phantom nor trusted."""
+    decision = bash(command)
+    assert decision.action == "ask", decision.reason
+    assert "variable" in decision.reason
+    zero = bash(command, make_envelope(expected_files_touched=0))
+    assert zero.action == "ask", zero.reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param('false && OUT=/scratchpad/skipped; touch "$OUT/actual.md"', id="and_conditional"),
+        pytest.param('true || OUT=/scratchpad/skipped; touch "$OUT/actual.md"', id="or_conditional"),
+        pytest.param('OUT=/scratchpad/x | cat; echo x > "$OUT"', id="pipeline_subshell"),
+        pytest.param('OUT=/scratchpad/x & echo x > "$OUT"', id="background_subshell"),
+        pytest.param('OUT=/scratchpad/a; true && OUT=/repo/b; echo x > "$OUT"', id="conditional_reassignment"),
+        pytest.param('OUT=/scratchpad/a; read OUT; echo x > "$OUT"', id="read_builtin"),
+        pytest.param('OUT=/scratchpad/a; export OUT=/repo/b; echo x > "$OUT"', id="export_builtin"),
+        pytest.param('OUT=/scratchpad/a; readonly OUT=/repo/actual.md; touch "$OUT"', id="readonly_builtin"),
+        pytest.param('OUT=/scratchpad/a; printf -v OUT /repo/b; echo x > "$OUT"', id="printf_v"),
+        pytest.param('OUT=/scratchpad/a; eval "OUT=/repo/b"; echo x > "$OUT"', id="eval"),
+        pytest.param('OUT=/scratchpad/a; for OUT in /repo/b; do echo x > "$OUT"; done', id="for_loop"),
+        pytest.param('OUT=/scratchpad; OUT+=../repo; echo x > "$OUT/x.md"', id="append_assignment"),
+        pytest.param(
+            'OUT=/repo; echo "$(OUT=/scratchpad/safe)" "$(touch "$OUT/actual.md")"',
+            id="assignment_in_a_separate_substitution",
+        ),
+    ],
+)
+def test_shell_state_is_not_modeled(command: str) -> None:
+    """No assignment shape — conditional, subshell, builtin-mediated, or a
+    separate command substitution — resolves a variable target: the
+    classifier holds no shell-state model, so every such use escalates."""
+    decision = bash(command, make_envelope(expected_files_touched=0))
+    assert decision.action == "ask", decision.reason
+    # `eval` already escalates as shell indirection before any target is read.
+    assert "variable" in decision.reason or "indirection" in decision.reason
+
+
+# ── Extraction coverage: every redirect / writer destination is collected ────
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param('OUT=/repo/actual.md; echo x >| "$OUT"', id="noclobber_override_spaced"),
+        pytest.param('OUT=/repo/actual.md; echo x >|"$OUT"', id="noclobber_override_unspaced"),
+        pytest.param("echo x >| $OUT", id="noclobber_override_bare"),
+        pytest.param('cmd 2>| "$ERR"', id="noclobber_override_stderr"),
+        pytest.param('DEST=/repo; cp --target-directory="$DEST" /scratchpad/source.md', id="cp_target_directory_equals"),
+        pytest.param('DEST=/repo; cp --target-directory "$DEST" /scratchpad/source.md', id="cp_target_directory_separate"),
+        pytest.param('DEST=/repo; install -t "$DEST" /scratchpad/source.md', id="install_t"),
+        pytest.param('DEST=/repo; mv -t"$DEST" /scratchpad/source.md', id="mv_t_attached"),
+        pytest.param('DEST=/repo; cp -rt "$DEST" /scratchpad/source.md', id="cp_short_cluster_ending_in_t"),
+        pytest.param('install -m 644 -t "$DEST" /scratchpad/source.md', id="install_option_argument_before_t"),
+        pytest.param("echo x > >(tee $OUT)", id="process_substitution_writer_variable"),
+    ],
+)
+def test_uncollected_destination_syntaxes_now_ask(command: str) -> None:
+    """A destination the extractor never collected could not reach the
+    variable check: the noclobber override, GNU target-directory options,
+    and a writer inside a process substitution are collected now."""
+    decision = bash(command, make_envelope(expected_files_touched=0))
+    assert decision.action == "ask", decision.reason
+    assert "variable" in decision.reason
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        pytest.param("echo x >| notes.md", ["/repo/notes.md"], id="noclobber_literal"),
+        pytest.param("echo x >|notes.md", ["/repo/notes.md"], id="noclobber_literal_unspaced"),
+        pytest.param("cp -t docs notes.md", ["/repo/docs"], id="cp_t_literal"),
+        pytest.param("install --target-directory=docs notes.md", ["/repo/docs"], id="install_target_directory_literal"),
+        pytest.param("cat <(touch /repo/x.md)", ["/repo/x.md"], id="process_substitution_input_writer"),
+        pytest.param("echo x > >(tee /repo/x.md)", ["/repo/x.md"], id="process_substitution_output_writer"),
+        pytest.param("cp -- src dst", ["/repo/dst"], id="double_dash_ends_options"),
+    ],
+)
+def test_collected_literal_destinations_count(command: str, expected: list) -> None:
+    decision = bash(command)
+    assert decision.action == "allow", decision.reason
+    assert decision.new_files == expected
+    zero = bash(command, make_envelope(expected_files_touched=0))
+    assert zero.action == "deny"
+    assert "expected 0, now 1" in zero.reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("echo x >| /scratchpad/x", id="noclobber_scratchpad"),
+        pytest.param("cp --target-directory=/scratchpad/out notes.md", id="target_directory_scratchpad"),
+        pytest.param("diff <(git ls-files | sort) <(cat list)", id="read_only_process_substitutions"),
+        pytest.param("comm -23 <(git ls-files|sort) <(cat x|sort)", id="read_only_process_substitutions_with_pipes"),
+        pytest.param("echo x > >(cat)", id="process_substitution_without_writer"),
+        pytest.param("cmd 2>&1 | grep x", id="pipe_after_dup_redirect"),
+        pytest.param("cp -S.txt a /scratchpad/b", id="short_option_value_without_t"),
+    ],
+)
+def test_extraction_coverage_controls_allow(command: str) -> None:
+    decision = bash(command, make_envelope(expected_files_touched=0))
+    assert decision.action == "allow", decision.reason
+    assert decision.new_files == []
+
+
+def test_nested_process_substitution_asks() -> None:
+    decision = bash("diff <(sort a) <($(cat list))")
+    assert decision.action == "ask", decision.reason
+    assert "process substitution" in decision.reason
+
+
+# ── Option spellings the supported GNU writers accept ────────────────────────
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param('DEST=/repo; cp --target-dir="$DEST" /scratchpad/source.md', id="cp_abbreviated_attached"),
+        pytest.param('cp --target-dir "$DEST" /scratchpad/source.md', id="cp_abbreviated_separate"),
+        pytest.param('install --t="$DEST" /scratchpad/source.md', id="install_shortest_prefix"),
+        pytest.param('mv --targ "$DEST" /scratchpad/source.md', id="mv_prefix"),
+        pytest.param('sed --in-place s/a/b/ "$F"', id="sed_long_in_place"),
+        pytest.param('sed --in-p=.bak s/a/b/ "$F"', id="sed_abbreviated_in_place_suffix"),
+        pytest.param('sed --i s/a/b/ "$F"', id="sed_shortest_in_place_prefix"),
+        pytest.param('sed -ni s/a/b/ "$F"', id="sed_cluster_with_i"),
+        pytest.param('sed -Ei.bak s/a/b/ "$F"', id="sed_cluster_with_i_and_suffix"),
+        pytest.param('sed -i -e s/a/b/ "$F"', id="sed_separate_expression"),
+        pytest.param('sed -i -es/a/b/ "$F"', id="sed_attached_expression"),
+        pytest.param('sed -ie s/a/b/ "$F"', id="sed_cluster_i_then_e"),
+        pytest.param('sed -i --expression=s/a/b/ "$F"', id="sed_long_expression"),
+        pytest.param('sed -i --expr s/a/b/ "$F"', id="sed_abbreviated_expression"),
+        pytest.param('sed -i -f prog.sed "$F"', id="sed_script_file"),
+        pytest.param('sed -i -l 80 s/a/b/ "$F"', id="sed_line_length_value_skipped"),
+        pytest.param('sed -i s/a/b/ -- "$F"', id="sed_double_dash"),
+        pytest.param('tee -- "$F"', id="tee_double_dash"),
+    ],
+)
+def test_accepted_option_spellings_reach_the_variable_check(command: str) -> None:
+    """GNU getopt_long accepts unambiguous long-option abbreviations and
+    short-option clusters; every spelling of a destination-bearing option
+    must expose its destination to the fail-closed check."""
+    decision = bash(command, make_envelope(expected_files_touched=0))
+    assert decision.action == "ask", decision.reason
+    assert "variable" in decision.reason
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        pytest.param("cp --target-dir=/repo/out /scratchpad/source.md", ["/repo/out"], id="cp_abbreviated_literal"),
+        pytest.param("install --t=docs notes.md", ["/repo/docs"], id="install_shortest_prefix_literal"),
+        pytest.param("cp --recursive src dst", ["/repo/dst"], id="unrelated_long_option_not_a_destination"),
+        pytest.param("cp --no-target-directory src dst", ["/repo/dst"], id="negated_option_not_a_destination"),
+        pytest.param("mv --suffix=.bak src dst", ["/repo/dst"], id="valued_long_option_not_a_destination"),
+        pytest.param("sed --in-place s/a/b/ notes.md", ["/repo/notes.md"], id="sed_long_in_place_literal"),
+        pytest.param("sed -i -e s/a/b/ -e s/c/d/ notes.md", ["/repo/notes.md"], id="sed_expressions_are_not_files"),
+        pytest.param("sed -i.bak s/a/b/ notes.md", ["/repo/notes.md"], id="sed_suffix_literal"),
+        pytest.param("sed -ni s/a/b/p notes.md", ["/repo/notes.md"], id="sed_cluster_literal"),
+        pytest.param("sed -i -l 80 s/a/b/ notes.md", ["/repo/notes.md"], id="sed_line_length_literal"),
+        pytest.param("sed -i -f prog.sed notes.md", ["/repo/notes.md"], id="sed_script_file_literal"),
+        pytest.param("touch -- -weird", ["/repo/-weird"], id="double_dash_operand_with_dash"),
+    ],
+)
+def test_accepted_option_spellings_count_literal_destinations(command: str, expected: list) -> None:
+    decision = bash(command)
+    assert decision.action == "allow", decision.reason
+    assert decision.new_files == expected
+    zero = bash(command, make_envelope(expected_files_touched=0))
+    assert zero.action == "deny"
+    assert "expected 0, now 1" in zero.reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("sed -ne s/a/b/p notes.md", id="sed_not_in_place"),
+        pytest.param("sed --expression=s/a/b/ notes.md", id="sed_long_expression_not_in_place"),
+        pytest.param("sed -i s/a/b/ /scratchpad/x", id="sed_in_place_scratchpad"),
+        pytest.param("install --t=/scratchpad/out notes.md", id="abbreviated_target_scratchpad"),
+    ],
+)
+def test_accepted_option_spellings_controls_allow(command: str) -> None:
+    decision = bash(command, make_envelope(expected_files_touched=0))
+    assert decision.action == "allow", decision.reason
+    assert decision.new_files == []
+
+
+# ── The Bash output-redirect grammar, every spelling ─────────────────────────
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param('OUT=/repo/actual.md; echo x >& "$OUT"', id="combined_output_spaced"),
+        pytest.param('echo x >&"$OUT"', id="combined_output_unspaced"),
+        pytest.param("echo x >&$OUT", id="combined_output_bare"),
+        pytest.param('echo x 2>& "$ERR"', id="combined_output_numbered"),
+        pytest.param('echo x > "$O"', id="plain"),
+        pytest.param('echo x >> "$O"', id="append"),
+        pytest.param('echo x >| "$O"', id="noclobber_override"),
+        pytest.param('echo x &> "$O"', id="ampersand_combined"),
+        pytest.param('echo x &>> "$O"', id="ampersand_combined_append"),
+        pytest.param('echo x 2> "$O"', id="numbered"),
+        pytest.param('echo x 1>> "$O"', id="numbered_append"),
+        pytest.param('cmd 3<> "$O"', id="read_write"),
+        pytest.param('cmd {fd}> "$O"', id="named_descriptor"),
+        pytest.param('cmd {fd}>> "$O"', id="named_descriptor_append"),
+        pytest.param('cmd >"$O" 2>&1', id="file_then_dup"),
+        pytest.param('cmd 2>&1 >"$O"', id="dup_then_file"),
+        pytest.param('cmd &>"$O" </dev/null', id="combined_with_input"),
+    ],
+)
+def test_every_output_redirect_spelling_reaches_the_variable_check(command: str) -> None:
+    decision = bash(command, make_envelope(expected_files_touched=0))
+    assert decision.action == "ask", decision.reason
+    assert "variable" in decision.reason
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        pytest.param("echo x >&/repo/actual.md", ["/repo/actual.md"], id="combined_output_literal_unspaced"),
+        pytest.param("echo x >& notes.md", ["/repo/notes.md"], id="combined_output_literal_spaced"),
+        pytest.param("echo x &> notes.md", ["/repo/notes.md"], id="ampersand_combined_literal"),
+        pytest.param("echo x &>>notes.md", ["/repo/notes.md"], id="ampersand_combined_append_literal"),
+        pytest.param("cmd 3<>notes.md", ["/repo/notes.md"], id="read_write_literal"),
+        pytest.param("cmd {fd}>notes.md", ["/repo/notes.md"], id="named_descriptor_literal"),
+        pytest.param("echo x > 1", ["/repo/1"], id="plain_redirect_to_a_file_named_1"),
+        pytest.param("echo x >> -", ["/repo/-"], id="append_to_a_file_named_dash"),
+        pytest.param("cmd >notes.md 2>&1", ["/repo/notes.md"], id="file_then_dup_literal"),
+    ],
+)
+def test_every_output_redirect_spelling_counts_literal_files(command: str, expected: list) -> None:
+    decision = bash(command)
+    assert decision.action == "allow", decision.reason
+    assert decision.new_files == expected
+    zero = bash(command, make_envelope(expected_files_touched=0))
+    assert zero.action == "deny"
+    assert "expected 0, now 1" in zero.reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("echo x >&2", id="dup_stdout_to_stderr"),
+        pytest.param("cmd 2>&1", id="dup_stderr_to_stdout"),
+        pytest.param("cmd >&-", id="close_stdout"),
+        pytest.param("cmd 2>&-", id="close_stderr"),
+        pytest.param("cmd 1>&3", id="dup_to_descriptor_3"),
+        pytest.param("cmd {fd}>&-", id="close_named_descriptor"),
+        pytest.param("cmd <&0", id="dup_input"),
+        pytest.param("cmd <&-", id="close_input"),
+        pytest.param("cmd 2>&1 | grep x", id="dup_then_pipe"),
+        pytest.param("cmd >&2 | tee /scratchpad/log", id="dup_then_pipe_to_scratchpad"),
+        pytest.param("cat < notes.md", id="input_redirect"),
+        pytest.param("echo x >& /scratchpad/x", id="combined_output_scratchpad"),
+    ],
+)
+def test_descriptor_duplication_and_closure_are_not_files(command: str) -> None:
+    decision = bash(command, make_envelope(expected_files_touched=0))
+    assert decision.action == "allow", decision.reason
+    assert decision.new_files == []
+
+
+# ── Granted re-authorization: audit-record overlay at enforcement time ───────
+
+
+REAUTH_SHA = "0" * 64
+
+
+def _write_reauth_record(
+    tmp_path: Path,
+    *,
+    disposition: str = "resumed",
+    files: Optional[int] = 4,
+    minutes: Optional[int] = 90,
+    scope_less: bool = False,
+    message_sha256: str = REAUTH_SHA,
+    message_id: str = "msg-1",
+    stamp: str = "20260828T000000Z",
+    requested_files: Optional[int] = None,
+    final_state: str = "pending",
+) -> Path:
+    """Write an audit record carrying a §E re-authorization block, shaped
+    exactly as the gate writes it (see ``_default_reauthorization_block``)."""
+    scope: Optional[Dict[str, Any]] = None
+    if not scope_less:
+        scope = {}
+        if files is not None:
+            scope["max_actual_files_touched"] = files
+        if minutes is not None:
+            scope["max_actual_minutes"] = minutes
+    requested = (
+        {"max_actual_files_touched": requested_files}
+        if requested_files is not None
+        else None
+    )
+    record = {
+        "message_id": message_id,
+        "receiver": "claude",
+        "message_sha256": message_sha256,
+        "result": {
+            "final_state": final_state,
+            "threshold_checkpoint": {
+                "evaluated": True,
+                "reauthorization": {
+                    "presented": True,
+                    "channel": "receiver_human",
+                    "decision": "approved",
+                    "disposition": disposition,
+                    "requested_scope": requested,
+                    "scope": scope,
+                },
+            },
+        },
+    }
+    return _write_audit_record(
+        tmp_path,
+        message_id=message_id,
+        stamp=stamp,
+        body=yaml.safe_dump(record, sort_keys=False),
+    )
+
+
+def _at_ceiling(tmp_path: Path) -> Path:
+    """Envelope compiled for 2 files, both already spent."""
+    envelope = make_envelope()  # expected_files_touched: 2
+    envelope["counters"]["files_touched"] = ["/repo/a.py", "/repo/b.py"]
+    return _install_envelope(tmp_path, envelope)
+
+
+def test_granted_reauthorization_widens_the_live_file_bound(
+    tmp_path: Path,
+) -> None:
+    """Pause at N, grant N+k, then a real (non-exempt) write of file N+1
+    proceeds while N+k+1 still blocks. The envelope is never recompiled —
+    the grant is read from the audit record at enforcement time."""
+    repo = _make_workspace(tmp_path)
+    target = _at_ceiling(tmp_path)
+    _write_reauth_record(tmp_path)  # N=2 → granted 4
+
+    third = _process_write(repo, "c.py")
+    assert third.action == "allow", third.reason
+    fourth = _process_write(repo, "d.py")
+    assert fourth.action == "allow", fourth.reason
+
+    fifth = _process_write(repo, "e.py")
+    assert fifth.action == "deny"
+    assert fifth.reason.startswith(hook.BLOCKED_OPENER)
+    assert "expected 4, now 5" in fifth.reason
+
+    stored = load_envelope(target)
+    assert stored["constraints"]["expected_files_touched"] == 2
+    assert len(stored["counters"]["files_touched"]) == 4
+
+
+def test_ceiling_blocks_without_a_granted_reauthorization(tmp_path: Path) -> None:
+    """The pre-fix behavior on the unchanged path: no grant, no widening."""
+    repo = _make_workspace(tmp_path)
+    _at_ceiling(tmp_path)
+    decision = _process_write(repo, "c.py")
+    assert decision.action == "deny"
+    assert "expected 2, now 3" in decision.reason
+
+
+def test_unresumed_reauthorization_does_not_widen(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _at_ceiling(tmp_path)
+    _write_reauth_record(tmp_path, disposition="insufficient")
+    decision = _process_write(repo, "c.py")
+    assert decision.action == "deny"
+    assert "expected 2, now 3" in decision.reason
+
+
+def test_scopeless_reauthorization_does_not_widen(tmp_path: Path) -> None:
+    """A fresh scope-less approval clears exactly its own pause and records
+    nothing durable — it must not raise the bound for later writes."""
+    repo = _make_workspace(tmp_path)
+    _at_ceiling(tmp_path)
+    _write_reauth_record(tmp_path, scope_less=True)
+    decision = _process_write(repo, "c.py")
+    assert decision.action == "deny"
+    assert "expected 2, now 3" in decision.reason
+
+
+def test_requested_scope_never_widens_past_the_effective_grant(
+    tmp_path: Path,
+) -> None:
+    """Only the gate's policy-capped ``scope`` governs; the sender's
+    ``requested_scope`` is provenance and must not reach enforcement."""
+    repo = _make_workspace(tmp_path)
+    _at_ceiling(tmp_path)
+    _write_reauth_record(
+        tmp_path,
+        files=3,
+        requested_files=99,
+    )
+    third = _process_write(repo, "c.py")
+    assert third.action == "allow", third.reason
+    fourth = _process_write(repo, "d.py")
+    assert fourth.action == "deny"
+    assert "expected 3, now 4" in fourth.reason
+
+
+def test_grant_below_the_compiled_bound_never_narrows_it(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())  # 2 files, none spent
+    _write_reauth_record(tmp_path, files=1)
+    first = _process_write(repo, "a.py")
+    assert first.action == "allow", first.reason
+    second = _process_write(repo, "b.py")
+    assert second.action == "allow", second.reason
+    assert _process_write(repo, "c.py").action == "deny"
+
+
+def test_reauthorization_for_other_message_bytes_does_not_widen(
+    tmp_path: Path,
+) -> None:
+    """Content binding: a record whose ``message_sha256`` is not this
+    envelope's cannot widen it, even under a matching message id."""
+    repo = _make_workspace(tmp_path)
+    _at_ceiling(tmp_path)
+    _write_reauth_record(tmp_path, message_sha256="1" * 64)
+    decision = _process_write(repo, "c.py")
+    assert decision.action == "deny"
+    assert "expected 2, now 3" in decision.reason
+
+
+def test_superseded_record_does_not_widen(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _at_ceiling(tmp_path)
+    _write_reauth_record(tmp_path, final_state="superseded")
+    decision = _process_write(repo, "c.py")
+    assert decision.action == "deny"
+    assert "expected 2, now 3" in decision.reason
+
+
+def test_unreadable_audit_record_leaves_the_bound_standing(
+    tmp_path: Path,
+) -> None:
+    """Fail-closed direction for a widening overlay: an unparseable record
+    is skipped, so the compiled bound blocks rather than opening."""
+    repo = _make_workspace(tmp_path)
+    _at_ceiling(tmp_path)
+    _write_audit_record(tmp_path, body="{ not: [valid, yaml\n")
+    decision = _process_write(repo, "c.py")
+    assert decision.action == "deny"
+    assert "expected 2, now 3" in decision.reason
+
+
+def test_newest_matching_record_governs_the_overlay(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _at_ceiling(tmp_path)
+    _write_reauth_record(
+        tmp_path, stamp="20260828T000000Z", files=9
+    )
+    _write_reauth_record(
+        tmp_path, stamp="20260828T010000Z", files=3
+    )
+    third = _process_write(repo, "c.py")
+    assert third.action == "allow", third.reason
+    assert _process_write(repo, "d.py").action == "deny"
+
+
+def test_overlay_is_not_read_before_the_ceiling_is_reached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The audit directory is consulted lazily — an ordinary in-budget write
+    must not pay for it on the hot path."""
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())  # 2 files, none spent
+    calls: list = []
+    monkeypatch.setattr(
+        hook,
+        "_reauthorized_scope",
+        lambda context: calls.append(context) or None,
+    )
+    assert _process_write(repo, "a.py").action == "allow"
+    assert calls == []
+    assert _process_write(repo, "b.py").action == "allow"
+    assert calls == []
+    assert _process_write(repo, "c.py").action == "deny"
+    assert len(calls) == 1
+
+
+def test_forged_audit_record_cannot_widen_the_live_bound(tmp_path: Path) -> None:
+    """Round-1 blocking finding (F-001): the write path that would let a
+    bounded session author its own grant must be closed at both ends —
+    the record write is denied, and a record planted out-of-band (another
+    process, a pre-existing file) still cannot widen without the canonical
+    identity fields."""
+    repo = _make_workspace(tmp_path)
+    _at_ceiling(tmp_path)
+    forged = (
+        _agent_dir(tmp_path)
+        / "audit"
+        / "autonomy_decisions"
+        / "zzzz_forged.yaml"
+    )
+
+    # End 1: the session cannot write the authority record at all.
+    blocked = _process_bash(repo, f"echo x > {forged}")
+    assert blocked.action == "deny"
+    assert "authority self-modification" in blocked.reason
+    for verb in ("tee", "cp /etc/hosts", "mv /etc/hosts"):
+        assert _process_bash(repo, f"{verb} {forged}").action == "deny"
+    assert _process_write(repo, str(forged)).action == "deny"
+
+    # End 2: even planted out-of-band with this envelope's exact identity
+    # (message_id + receiver + message_sha256 are all readable from the
+    # envelope), the re-authorization state must be complete and coherent.
+    # A mapping that merely spells `disposition: resumed` does not widen.
+    forged.parent.mkdir(parents=True, exist_ok=True)
+    forged.write_text(
+        yaml.safe_dump(
+            {
+                "message_id": "msg-1",
+                "receiver": "claude",
+                "message_sha256": REAUTH_SHA,
+                "result": {
+                    "final_state": "pending",
+                    "human_outcome": {"recorded": False},
+                    "threshold_checkpoint": {
+                        "reauthorization": {
+                            "disposition": "resumed",
+                            "scope": {"max_actual_files_touched": 999},
+                        }
+                    },
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    decision = _process_write(repo, "c.py")
+    assert decision.action == "deny", (
+        "an unvalidated audit mapping widened the live bound without a "
+        "valid grant"
+    )
+    assert "expected 2, now 3" in decision.reason
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        pytest.param({"presented": False}, id="not_presented"),
+        pytest.param({"channel": "gh_comment"}, id="non_governing_channel"),
+        pytest.param({"channel": None}, id="no_channel"),
+        pytest.param({"decision": "declined"}, id="declined"),
+        pytest.param({"decision": "sure"}, id="unknown_decision"),
+        pytest.param({"decision": None}, id="no_decision"),
+    ],
+)
+def test_incomplete_reauthorization_state_does_not_widen(
+    tmp_path: Path, mutation: Dict[str, Any]
+) -> None:
+    """The whole re-authorization block is validated, not `disposition`
+    alone — a partial or incoherent block widens nothing."""
+    repo = _make_workspace(tmp_path)
+    _at_ceiling(tmp_path)
+    record_path = _write_reauth_record(tmp_path)
+    record = yaml.safe_load(record_path.read_text(encoding="utf-8"))
+    record["result"]["threshold_checkpoint"]["reauthorization"].update(mutation)
+    record_path.write_text(yaml.safe_dump(record, sort_keys=False), encoding="utf-8")
+
+    decision = _process_write(repo, "c.py")
+    assert decision.action == "deny"
+    assert "expected 2, now 3" in decision.reason
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        pytest.param("rm {rec}", id="rm"),
+        pytest.param("rm -f {rec}", id="rm_force"),
+        pytest.param("rm -- {rec}", id="rm_end_of_options"),
+        pytest.param("unlink {rec}", id="unlink"),
+        pytest.param("mv {rec} /tmp/stashed.yaml", id="mv_source"),
+        pytest.param("mv -t /tmp {rec}", id="mv_target_dir_source"),
+        pytest.param("cp {rec} /tmp/copied.yaml", id="cp_source"),
+        pytest.param("truncate -s 0 {rec}", id="truncate"),
+        pytest.param("shred {rec}", id="shred"),
+        pytest.param("ln -s /dev/null {rec}", id="ln_alias"),
+        pytest.param("install /etc/hosts {rec}", id="install_dest"),
+        pytest.param("tee {rec}", id="tee_dest"),
+        pytest.param("sed -i s/a/b/ {rec}", id="sed_in_place"),
+        pytest.param("echo x > {rec}", id="redirect"),
+        pytest.param("echo x >> {rec}", id="append_redirect"),
+    ],
+)
+def test_authority_record_mutations_denied_regardless_of_role(
+    tmp_path: Path, template: str
+) -> None:
+    """Round-2 blocking finding: the write-target gate sees only
+    destinations, so `rm`/`unlink`/`mv`-as-source escaped it. Both gates now
+    consume the same authority-roots list — deleting or relocating a record
+    changes which record governs, so role cannot matter."""
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    record = (
+        _agent_dir(tmp_path)
+        / "audit"
+        / "autonomy_decisions"
+        / "20260828T000000Z_msg-1.yaml"
+    )
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text("message_id: msg-1\n", encoding="utf-8")
+    command = template.format(rec=record)
+    decision = _process_bash(repo, command)
+    assert decision.action == "deny", f"{command} -> {decision.action}"
+    assert "self-modification" in decision.reason
+
+
+def test_authority_roots_cover_state_and_audit_together(tmp_path: Path) -> None:
+    """The two gates must never protect one surface and miss the other:
+    both read WorkspaceContext.authority_roots()."""
+    context = hook.WorkspaceContext(
+        oacp_root=tmp_path / "home",
+        project="test-proj",
+        receiver="claude",
+        message_id="msg-1",
+        message_sha256="0" * 64,
+    )
+    roots = {label: path for label, path in context.authority_roots()}
+    assert set(roots) == {"envelope state", "autonomy audit record"}
+    assert roots["envelope state"] == context.state_dir()
+    assert roots["autonomy audit record"] == context.audit_dir()
+
+
+def test_authority_mutation_with_expansion_escalates(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    audit_dir = _agent_dir(tmp_path) / "audit" / "autonomy_decisions"
+    decision = _process_bash(repo, f"rm {audit_dir}/*.yaml")
+    assert decision.action == "ask"
+    assert "expansion" in decision.reason

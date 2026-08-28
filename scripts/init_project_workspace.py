@@ -12,7 +12,14 @@ from pathlib import Path
 import sys
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from _oacp_constants import AGENT_RE, SPEC_VERSION, _template_path, _write_if_missing
+from _oacp_constants import (
+    AGENT_RE,
+    CREATABLE_RUNTIMES,
+    SPEC_VERSION,
+    _template_path,
+    _write_if_missing,
+)
+from agent_profile import upsert_global_profile
 
 DEFAULT_AGENTS = ("claude", "codex", "cursor")
 
@@ -201,6 +208,13 @@ def initialize_workspace(
     receiver_config = _receiver_config_template()
     for agent in agents:
         _write_if_missing(project_root / "agents" / agent / "config.yaml", receiver_config)
+        runtime = agent if agent in CREATABLE_RUNTIMES else "unknown"
+        upsert_global_profile(
+            oacp_root,
+            agent,
+            runtime,
+            projects=[project_name],
+        )
 
     workspace_path = project_root / "workspace.json"
     now = dt.datetime.now(dt.timezone.utc).isoformat()

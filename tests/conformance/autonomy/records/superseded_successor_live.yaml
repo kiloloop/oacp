@@ -1,0 +1,21 @@
+schema_version: 2
+spec_version: "0.4.3"
+created_at_utc: "2026-08-01T02:30:00Z"
+receiver: claude
+sender: alice
+message_id: msg-20260801010000-alice-0006
+message_sha256: 1f0006bb
+decision: paused
+mode: auto_review
+reason_codes:
+- expected_files_touched_exceeds_threshold
+evaluation_id: eval-00000000000006bb
+supersedes_evaluation_id: eval-00000000000006aa
+result:
+  final_state: paused
+  completion_kind: admission_paused
+  actual_minutes: null
+  actual_files_touched: null
+  predicted_risk_materialized: false
+  completed_at_utc: null
+  envelope_enforcement: none

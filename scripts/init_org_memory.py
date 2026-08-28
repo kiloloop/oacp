@@ -9,6 +9,7 @@ Creates the directory structure with scaffold files:
     decisions.md
     rules.md
     events/
+    debriefs/
 
 Usage:
     init_org_memory.py [--oacp-dir <path>]
@@ -59,15 +60,25 @@ def initialize_org_memory(oacp_root: Path) -> dict:
     """
     org_memory_dir = oacp_root / "org-memory"
     events_dir = org_memory_dir / "events"
+    debriefs_dir = org_memory_dir / "debriefs"
 
     # Create directories
     org_memory_dir.mkdir(parents=True, exist_ok=True)
     events_dir.mkdir(parents=True, exist_ok=True)
+    debriefs_dir.mkdir(parents=True, exist_ok=True)
 
     template_dir = _find_template_dir()
 
     created = []
     skipped = []
+
+    # .gitkeep so the empty debriefs/ tree survives git-based memory sync
+    gitkeep = debriefs_dir / ".gitkeep"
+    if gitkeep.exists():
+        skipped.append("debriefs/.gitkeep")
+    else:
+        gitkeep.write_text("", encoding="utf-8")
+        created.append("debriefs/.gitkeep")
 
     for filename in _TEMPLATE_FILES:
         target = org_memory_dir / filename

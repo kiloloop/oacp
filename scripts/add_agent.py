@@ -22,6 +22,7 @@ from _oacp_constants import (
     _write_if_missing,
     utc_now_iso,
 )
+from agent_profile import load_global_profile, upsert_global_profile
 
 AGENT_SUBDIRS = (
     "inbox",
@@ -219,20 +220,16 @@ def add_agent(
 
     # Check for global profile defaults
     global_profile = None
-    global_profile_path = oacp_root / "agents" / agent_name / "profile.yaml"
-    if global_profile_path.is_file():
-        try:
-            if yaml is not None:
-                global_profile = yaml.safe_load(
-                    global_profile_path.read_text(encoding="utf-8")
-                )
-                if not isinstance(global_profile, dict):
-                    global_profile = None
-        except Exception as exc:
-            print(f"Warning: could not load global profile for '{agent_name}': {exc}", file=sys.stderr)
-            global_profile = None
+    try:
+        global_profile = load_global_profile(oacp_root, agent_name)
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            f"could not load global profile for '{agent_name}': {exc}"
+        ) from exc
 
     # Optional runtime-specific files
+    registry_model: Optional[str] = None
+    registry_description: Optional[str] = None
     if runtime is not None:
         caps = _load_runtime_capabilities().get(runtime, {})
         # If global profile exists, use its identity fields as defaults
@@ -254,10 +251,26 @@ def add_agent(
         else:
             skipped_files.append(str(card_path.relative_to(project_dir)))
 
+        registry_model = str(caps.get("model", runtime))
+        registry_description = f"{agent_name} agent ({runtime} runtime)"
+
+    registry_runtime = runtime or (
+        agent_name if agent_name in CREATABLE_RUNTIMES else "unknown"
+    )
+    registry_update = upsert_global_profile(
+        oacp_root,
+        agent_name,
+        registry_runtime,
+        projects=[project_name],
+        model=registry_model,
+        description=registry_description,
+    )
+
     return {
         "agent_dir": agent_dir,
         "created_files": created_files,
         "skipped_files": skipped_files,
+        "registry_update": registry_update,
     }
 
 
@@ -287,6 +300,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if result["skipped_files"]:
         for f in result["skipped_files"]:
             print(f"  ~ {f} (already exists, skipped)")
+    registry = result["registry_update"]
+    marker = "+" if registry["action"] == "created" else "~"
+    print(
+        f"  {marker} {registry['path']} "
+        f"(registry {registry['action']})"
+    )
     return 0
 
 

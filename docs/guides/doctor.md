@@ -22,7 +22,7 @@ Verifies that required and optional CLI tools are installed and reachable on `PA
 | Check | Required? | What it looks for |
 |-------|-----------|-------------------|
 | `git` | Yes | Git CLI |
-| `python3` | Yes | Python 3.9+ interpreter |
+| `python3` | Yes | Python 3.9.2+ interpreter |
 | `gh` | Yes | GitHub CLI (for PR and issue workflows) |
 | `ruff` | No | Python linter (optional, used in preflight) |
 | `shellcheck` | No | Shell script linter (optional) |
@@ -176,7 +176,7 @@ The exit code reflects the overall result:
 | Issue | Fix |
 |-------|-----|
 | `git — not found` | Install Git: https://git-scm.com/downloads |
-| `python3 — not found` | Install Python 3.9+: https://www.python.org/downloads/ |
+| `python3 — not found` | Install Python 3.9.2+: https://www.python.org/downloads/ |
 | `gh — not found` | Install GitHub CLI: `brew install gh` or https://cli.github.com/ |
 | `pyyaml — not importable` | `pip install pyyaml` |
 | `ruff — not installed` | `pip install ruff` (optional, for linting) |

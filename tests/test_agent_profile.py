@@ -17,11 +17,15 @@ import yaml  # noqa: E402
 from agent_profile import (  # noqa: E402
     cmd_init,
     cmd_list,
+    cmd_sync,
     cmd_show,
+    discover_project_memberships,
     load_global_profile,
     load_project_card,
     merge_profiles,
     resolve_agent_profile,
+    sync_agent_registry,
+    upsert_global_profile,
 )
 
 
@@ -336,9 +340,9 @@ class TestAgentInit(unittest.TestCase):
             self.assertEqual(rc, 0)
             profile_path = root / "agents" / "claude" / "profile.yaml"
             self.assertTrue(profile_path.is_file())
-            content = profile_path.read_text(encoding="utf-8")
-            self.assertIn('name: "claude"', content)
-            self.assertIn('runtime: "claude"', content)
+            content = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+            self.assertEqual(content["name"], "claude")
+            self.assertEqual(content["runtime"], "claude")
 
     def test_idempotent(self) -> None:
         """Running init twice doesn't overwrite existing profile."""
@@ -415,6 +419,7 @@ class TestAgentList(unittest.TestCase):
             self.assertIn("claude", out)
             self.assertIn("codex", out)
             self.assertIn("global", out)
+            self.assertIn("runtime=claude", out)
 
     def test_project_agents(self) -> None:
         """Lists agents from a project."""
@@ -490,6 +495,140 @@ class TestAgentList(unittest.TestCase):
             lines = [ln.strip() for ln in out.strip().split("\n") if ln.strip()]
             names = [ln.split()[0] for ln in lines]
             self.assertEqual(names, ["alpha", "mike", "zulu"])
+
+
+class TestAgentRegistry(unittest.TestCase):
+    def test_workspace_init_registers_custom_agents(self) -> None:
+        from init_project_workspace import initialize_workspace
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            result = initialize_workspace(
+                "demo", oacp_root=root, agents=["alice", "bob"]
+            )
+
+            self.assertEqual(result["project_root"], root / "projects" / "demo")
+            alice = load_global_profile(root, "alice")
+            bob = load_global_profile(root, "bob")
+            assert alice is not None
+            assert bob is not None
+            self.assertEqual(alice["runtime"], "unknown")
+            self.assertEqual(alice["projects"], ["demo"])
+            self.assertEqual(bob["projects"], ["demo"])
+
+    def test_upsert_preserves_identity_and_appends_memberships(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _global_profile(root, "claude", {
+                "name": "Claude Custom",
+                "runtime": "human",
+                "model": "custom-model",
+                "description": "Custom description",
+                "projects": ["alpha"],
+            })
+
+            result = upsert_global_profile(
+                root,
+                "claude",
+                "claude",
+                projects=["alpha", "beta"],
+                model="default-model",
+                description="Default description",
+            )
+
+            self.assertEqual(result["action"], "updated")
+            profile = load_global_profile(root, "claude")
+            self.assertIsNotNone(profile)
+            assert profile is not None
+            self.assertEqual(profile["name"], "Claude Custom")
+            self.assertEqual(profile["runtime"], "human")
+            self.assertEqual(profile["model"], "custom-model")
+            self.assertEqual(profile["description"], "Custom description")
+            self.assertEqual(profile["projects"], ["alpha", "beta"])
+
+            repeated = upsert_global_profile(
+                root,
+                "claude",
+                "claude",
+                projects=["beta"],
+            )
+            self.assertEqual(repeated["action"], "unchanged")
+
+    def test_sync_backfills_deduped_agents_and_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _project_card(root, "alpha", "claude", {
+                "name": "claude",
+                "runtime": "claude",
+                "model": "opus",
+                "description": "Claude agent",
+            })
+            _project_card(root, "beta", "claude", {
+                "name": "claude",
+                "runtime": "claude",
+            })
+            _project_card(root, "beta", "carol", {
+                "name": "carol",
+                "runtime": "claude",
+            })
+
+            memberships = discover_project_memberships(root)
+            self.assertEqual(memberships, {
+                "claude": ["alpha", "beta"],
+                "carol": ["beta"],
+            })
+
+            first = sync_agent_registry(root)
+            self.assertEqual(first["agents"], 2)
+            self.assertEqual(first["memberships"], 3)
+            self.assertEqual(first["created"], 2)
+            claude = load_global_profile(root, "claude")
+            carol = load_global_profile(root, "carol")
+            assert claude is not None
+            assert carol is not None
+            self.assertEqual(claude["projects"], ["alpha", "beta"])
+            self.assertEqual(carol["runtime"], "claude")
+
+            second = sync_agent_registry(root)
+            self.assertEqual(second["unchanged"], 2)
+            self.assertEqual(second["created"], 0)
+            self.assertEqual(second["updated"], 0)
+
+            args = _make_args()
+            rc, out = _capture_stdout(cmd_sync, args, root)
+            self.assertEqual(rc, 0)
+            self.assertIn("2 agent(s), 3 project membership(s)", out)
+
+    def test_malformed_profile_is_a_clean_sync_and_list_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _project_card(root, "alpha", "claude", {"name": "claude"})
+            profile_path = root / "agents" / "claude" / "profile.yaml"
+            profile_path.parent.mkdir(parents=True)
+            profile_path.write_text(
+                "name: claude\nruntime: [unclosed\n", encoding="utf-8"
+            )
+
+            sync_rc, sync_err = _capture_stderr(cmd_sync, _make_args(), root)
+            list_rc, list_err = _capture_stderr(
+                cmd_list, _make_args(project=None), root
+            )
+
+            self.assertEqual(sync_rc, 1)
+            self.assertEqual(list_rc, 1)
+            self.assertIn("invalid YAML", sync_err)
+            self.assertIn("invalid YAML", list_err)
+            self.assertNotIn("Traceback", sync_err + list_err)
+
+            profile_path.write_text(
+                "name: claude\nruntime: claude\nprojects: invalid\n",
+                encoding="utf-8",
+            )
+            schema_rc, schema_err = _capture_stderr(
+                cmd_list, _make_args(project=None), root
+            )
+            self.assertEqual(schema_rc, 1)
+            self.assertIn("projects must be a list of strings", schema_err)
 
 
 # ---------------------------------------------------------------------------

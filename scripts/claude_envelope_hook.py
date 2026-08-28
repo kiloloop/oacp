@@ -16,6 +16,9 @@ constraints and emits a PreToolUse ``permissionDecision``:
   outside the receiver allowlist, or drifts past ``expected_files_touched``
   (denied with the canonical ``[oacp-envelope] Blocked: autonomy threshold
   exceeded`` opener so the session pivots to the §E checkpoint protocol).
+  The file ceiling is the compiled bound widened by any granted §E
+  re-authorization: the envelope stays immutable, and the grant recorded in
+  the task's audit record is read as an overlay at enforcement time.
 - ``ask``   — the hook cannot confidently classify the call (exotic compound
   command, unresolvable repo). The exact command is escalated for
   just-in-time human review instead of blanket-denied or silently allowed.
@@ -74,8 +77,28 @@ BLOCKED_OPENER = f"{REASON_PREFIX} Blocked: autonomy threshold exceeded"
 # protected path while its literal spelling does not. Such operands escalate.
 EXPANSION_SYNTAX_RE = re.compile(r"[*?\[\]{}]")
 SUBSTITUTION_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
-REDIRECT_TARGET_RE = re.compile(r">>?\s*([^\s;|&]+)")
+# Every Bash output-redirect spelling that names a file: `>`, `>>`, the
+# noclobber override `>|` (the scanner keeps `>|` inside its segment, so
+# the `|` here is never a pipe), `<>`, `&>` / `&>>`, and the combined
+# stdout+stderr form `>&word`. The same `>&` prefix also spells file
+# descriptor duplication and closure (`>&2`, `2>&1`, `>&-`): the word
+# after a `dup` match is a file only when it is not digits or `-`.
+REDIRECT_TARGET_RE = re.compile(
+    r">>?(?:(?P<dup>&)|\|)?\s*(?P<word>[^\s;|&]+)"
+)
+# `<(cmd)` / `>(cmd)`: the inner command runs in its own process and is
+# classified as a segment, like `$(cmd)`.
+PROCESS_SUBSTITUTION_RE = re.compile(r"[<>]\(([^()]*)\)")
+# A short-option cluster ending in GNU `-t` (`-t`, `-rt`, `-vtDIR`): the
+# target-directory flag of cp/mv/install. Case-sensitive — `-T` is the
+# opposite flag.
+SHORT_TARGET_DIRECTORY_RE = re.compile(r"^-[A-Za-z]*t(.*)$")
 ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# `<<WORD`, `<<-WORD`, `<<'WORD'`, `<<"WORD"`, `<<\WORD` (not the `<<<`
+# here-string). The delimiter word is what ends the body.
+HEREDOC_OPERATOR_RE = re.compile(
+    r"<<(-?)\s*(?:'([^']+)'|\"([^\"]+)\"|(\\)?([A-Za-z_][A-Za-z0-9_]*))"
+)
 GIT_URL_RE = re.compile(
     r"(?:[/:])(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
 )
@@ -258,19 +281,25 @@ def _with_message_id(decision: Decision, message_id: str) -> Decision:
 class WorkspaceContext:
     """Workspace facts resolved by ``process()`` that classification needs
     beyond the envelope's own constraints: where the receiver's bookkeeping
-    surfaces live, and which audit records can sanction a completion clear.
-    ``None`` (no resolved workspace, e.g. direct ``classify`` calls) keeps
-    every context-dependent decision fail-closed."""
+    surfaces live, and which audit records can sanction a completion clear or
+    widen the file budget. ``None`` (no resolved workspace, e.g. direct
+    ``classify`` calls) keeps every context-dependent decision fail-closed."""
 
-    __slots__ = ("oacp_root", "project", "receiver", "message_id")
+    __slots__ = ("oacp_root", "project", "receiver", "message_id", "message_sha256")
 
     def __init__(
-        self, oacp_root: Path, project: str, receiver: str, message_id: str
+        self,
+        oacp_root: Path,
+        project: str,
+        receiver: str,
+        message_id: str,
+        message_sha256: str = "",
     ) -> None:
         self.oacp_root = oacp_root
         self.project = project
         self.receiver = receiver
         self.message_id = message_id
+        self.message_sha256 = message_sha256
 
     def agent_dir(self) -> Path:
         return (
@@ -282,6 +311,23 @@ class WorkspaceContext:
 
     def state_dir(self) -> Path:
         return self.agent_dir() / "state"
+
+    def authority_roots(self) -> List[Tuple[str, Path]]:
+        """Receiver surfaces the enveloped session may never modify itself.
+
+        Both enforcement sites — the write-target gate and the role-agnostic
+        filesystem-mutator operand gate — consume this one list, so the two
+        boundaries cannot drift apart. ``state/`` holds the active envelope;
+        ``audit/autonomy_decisions/`` holds the records whose recorded
+        re-authorization can widen that envelope's live bound. Modifying
+        either from inside the session is self-authorization, and that is
+        true regardless of operand role: deleting or relocating a record
+        changes which record governs just as surely as rewriting one.
+        """
+        return [
+            ("envelope state", self.state_dir()),
+            ("autonomy audit record", self.audit_dir()),
+        ]
 
     def trust_roots(self) -> List[Path]:
         return [
@@ -1027,6 +1073,16 @@ def _classify_envelope_clear(
             str(record.get("message_id") or "") == context.message_id
             and str(record.get("receiver") or "") == context.receiver
         ):
+            record_result = record.get("result")
+            state_value = (
+                record_result.get("final_state")
+                if isinstance(record_result, dict)
+                else None
+            )
+            if state_value == "superseded":
+                # A superseded evaluation's authority transferred to its
+                # successor; it must neither sanction nor block the clear.
+                continue
             matches.append((candidate.name, record))
     if not matches:
         return _deny(
@@ -1160,6 +1216,107 @@ def _mutator_operands(tokens: List[str]) -> List[str]:
     return operands
 
 
+def _target_directory_option(tokens: List[str]) -> Optional[str]:
+    """Value of a GNU target-directory option (`-t DIR`, `-tDIR`, a short
+    cluster ending in `t`, `--target-directory DIR`, `--target-directory=DIR`,
+    and — because GNU getopt_long accepts unambiguous abbreviations — any
+    `--t…` prefix of the long name, attached or separate) — the destination
+    of every operand when present. `--` ends option processing. None when
+    the invocation carries no such option."""
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            return None
+        if token.startswith("--"):
+            name, attached, value = token[2:].partition("=")
+            if name and "target-directory".startswith(name):
+                if attached:
+                    return value
+                return tokens[index + 1] if index + 1 < len(tokens) else None
+            index += 1
+            continue
+        if token.startswith("-"):
+            match = SHORT_TARGET_DIRECTORY_RE.match(token)
+            if match is not None:
+                if match.group(1):
+                    return match.group(1)
+                return tokens[index + 1] if index + 1 < len(tokens) else None
+        index += 1
+    return None
+
+
+def _operands(tokens: List[str]) -> List[str]:
+    """Non-option operands of an argv, honouring `--` (everything after it
+    is an operand even when it starts with a dash)."""
+    operands: List[str] = []
+    options_ended = False
+    for token in tokens[1:]:
+        if options_ended or token == "-" or not token.startswith("-"):
+            operands.append(token)
+        elif token == "--":
+            options_ended = True
+    return operands
+
+
+def _sed_in_place_targets(tokens: List[str]) -> Optional[List[str]]:
+    """File operands of an in-place sed invocation; None when sed is not
+    editing in place (its output then goes to stdout and any redirect is
+    gated separately).
+
+    In-place spellings: `-i[SUFFIX]`, a short cluster containing `i`
+    (`-ni`, `-Ei.bak`), `--in-place[=SUFFIX]` and its unambiguous prefixes
+    (`--i…`). Script options (`-e`/`-f`, attached or separate,
+    `--expression`/`--file` with prefixes) make every operand a file;
+    without one the first operand is the script. `-l`/`--line-length`
+    values are skipped so they never read as operands.
+    """
+    in_place = False
+    script_option = False
+    operands: List[str] = []
+    options_ended = False
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if options_ended or token == "-" or not token.startswith("-"):
+            operands.append(token)
+            continue
+        if token == "--":
+            options_ended = True
+            continue
+        if token.startswith("--"):
+            name, attached, _value = token[2:].partition("=")
+            if not name:
+                continue
+            if "in-place".startswith(name):
+                in_place = True
+            elif "expression".startswith(name) or (
+                len(name) >= 2 and "file".startswith(name)
+            ):
+                script_option = True
+                if not attached:
+                    index += 1
+            elif "line-length".startswith(name) and not attached:
+                index += 1
+            continue
+        for position, letter in enumerate(token[1:]):
+            if letter == "i":
+                # The rest of the cluster is the optional backup suffix.
+                in_place = True
+                break
+            if letter in ("e", "f", "l"):
+                # Value is the rest of the cluster, or the next token.
+                if letter != "l":
+                    script_option = True
+                if position == len(token) - 2:
+                    index += 1
+                break
+    if not in_place:
+        return None
+    return operands if script_option else operands[1:]
+
+
 def _segment_write_targets(tokens: List[str], segment: str) -> List[str]:
     """Determinable file-write targets of one shell segment (F-004).
 
@@ -1168,27 +1325,143 @@ def _segment_write_targets(tokens: List[str], segment: str) -> List[str]:
     targets — the secret/dependency/counter gate then simply does not fire.
     """
     targets = [
-        match.group(1).strip("'\"")
+        match.group("word").strip("'\"")
         for match in REDIRECT_TARGET_RE.finditer(segment)
+        # `> >(cmd)`: the destination is the inner command, classified as
+        # its own segment; the operator spelling is not a path.
+        if not match.group("word").startswith((">(", "<("))
+        # `>&N` / `>&-` duplicate or close a descriptor; only a non-numeric
+        # word after `>&` is Bash's combined-output redirect to a file.
+        and not (
+            match.group("dup")
+            and (match.group("word").isdigit() or match.group("word") == "-")
+        )
     ]
     if not tokens:
         return targets
     prog = tokens[0].rsplit("/", 1)[-1]
-    positional = [token for token in tokens[1:] if not token.startswith("-")]
+    positional = _operands(tokens)
     if prog in ("touch", "tee"):
         targets.extend(positional)
-    elif prog in ("cp", "mv", "install") and len(positional) >= 2:
-        targets.append(positional[-1])
+    elif prog in ("cp", "mv", "install"):
+        target_directory = _target_directory_option(tokens)
+        if target_directory is not None:
+            targets.append(target_directory)
+        elif len(positional) >= 2:
+            targets.append(positional[-1])
     elif prog == "truncate":
         targets.extend(positional)
-    elif prog == "sed" and any(token.startswith("-i") for token in tokens[1:]):
-        # First positional is the script; the rest are edited in place.
-        targets.extend(positional[1:])
+    elif prog == "sed":
+        targets.extend(_sed_in_place_targets(tokens) or [])
     elif prog == "dd":
         targets.extend(
             token[len("of="):] for token in tokens[1:] if token.startswith("of=")
         )
     return targets
+
+
+def _reauthorized_scope(
+    context: Optional[WorkspaceContext],
+) -> Optional[Dict[str, Any]]:
+    """The durable scope a resumed §E re-authorization granted this task.
+
+    The envelope is immutable once compiled, so a granted re-authorization
+    reaches enforcement as an overlay read here rather than as a recompile
+    (``oacp envelope compile --extend`` is in-session-denied by design).
+    Only the audit record's *effective* ``scope`` is consulted — the
+    policy-capped value the gate wrote, never the raw ``requested_scope`` a
+    sender asked for. A fresh scope-less approval records no scope: it
+    cleared exactly one pause and creates nothing durable, so it widens
+    nothing here either.
+
+    Record selection mirrors the completion clear: content identity only
+    (``message_id`` + ``receiver``, plus the envelope's ``message_sha256`` so
+    a record for different message bytes can never widen this envelope),
+    filenames are never trusted, ``superseded`` evaluations are skipped, and
+    the newest match governs. Every failure path returns ``None`` — an
+    absent, unreadable, or malformed record leaves the compiled bound
+    standing, which is the fail-closed direction for a widening overlay.
+    """
+    if context is None or not context.message_id or not context.message_sha256:
+        return None
+    audit_dir = context.audit_dir()
+    if not audit_dir.is_dir():
+        return None
+    from _oacp_constants import locked_audit
+
+    matches: List[Tuple[str, Dict[str, Any]]] = []
+    for candidate in sorted(audit_dir.glob("*.yaml")):
+        try:
+            # Read under the record's own audit lock: the canonical writers
+            # hold it across their read-modify-replace, so a concurrent
+            # checkpoint write cannot be observed half-applied.
+            with locked_audit(candidate):
+                record = load_yaml_file(candidate)
+        except Exception:
+            # An unreadable record cannot widen anything; the compiled bound
+            # stands and the write blocks with the canonical opener.
+            continue
+        if not isinstance(record, dict):
+            continue
+        if (
+            str(record.get("message_id") or "") != context.message_id
+            or str(record.get("receiver") or "") != context.receiver
+            or str(record.get("message_sha256") or "") != context.message_sha256
+        ):
+            continue
+        result = record.get("result")
+        if not isinstance(result, dict):
+            continue
+        if result.get("final_state") == "superseded":
+            continue
+        matches.append((candidate.name, record))
+    if not matches:
+        return None
+    governing = max(matches, key=lambda item: item[0])[1]["result"]
+    checkpoint = governing.get("threshold_checkpoint")
+    if not isinstance(checkpoint, dict):
+        return None
+    reauth = checkpoint.get("reauthorization")
+    if not isinstance(reauth, dict):
+        return None
+    # Validate the whole re-authorization state, not just `disposition`: a
+    # partial or malformed block must not widen anything. The vocabulary is
+    # imported from the evaluator that writes it, never re-spelled here, so
+    # the two cannot drift. `human_outcome` is deliberately NOT required —
+    # the governing channel may be `sender_reply`, whose authority is the
+    # sender's signed follow-up, not a receiver-side human ruling.
+    from autonomy_gate import REAUTH_DECISIONS, REAUTH_GOVERNING_CHANNELS
+
+    if (
+        reauth.get("disposition") != "resumed"
+        or reauth.get("presented") is not True
+        or reauth.get("channel") not in REAUTH_GOVERNING_CHANNELS
+        or reauth.get("decision") not in REAUTH_DECISIONS
+        or reauth.get("decision") == "declined"
+    ):
+        return None
+    scope = reauth.get("scope")
+    return scope if isinstance(scope, dict) else None
+
+
+def _reauthorized_file_budget(
+    scope: Optional[Dict[str, Any]], declared: int
+) -> int:
+    """``declared``, widened to a granted bound but never narrowed by one.
+
+    A grant can only ever open room the envelope did not already have: the
+    overlay widens exactly to the recorded scope and no further, and a scope
+    at or below the compiled bound is a no-op, so existing envelopes keep
+    their outcomes unchanged. Only the files axis is overlaid — the grant's
+    ``max_actual_minutes`` has no hook enforcement point (``estimated_minutes``
+    is recorded for the §E self-check and carries no runtime semantics).
+    """
+    if not scope:
+        return declared
+    granted = scope.get("max_actual_files_touched")
+    if isinstance(granted, bool) or not isinstance(granted, int):
+        return declared
+    return granted if granted > declared else declared
 
 
 def _gate_write_paths(
@@ -1205,9 +1478,13 @@ def _gate_write_paths(
     the `expected_files_touched` ceiling (F-004: `touch a b c`). Bookkeeping
     surfaces pass the secret/dependency gates but never reach the counter:
     completion instrumentation must not compete with the task's declared
-    file budget."""
+    file budget. The ceiling is the compiled ``expected_files_touched``,
+    widened at enforcement time to a granted §E re-authorization when one
+    governs the task — resolved lazily on first contact with the ceiling so
+    the ordinary path never reads the audit directory."""
     touched = list(counters.get("files_touched") or [])
-    expected = int(constraints.get("expected_files_touched") or 0)
+    declared = int(constraints.get("expected_files_touched") or 0)
+    expected: Optional[int] = None
     new_files: List[str] = []
     for path in paths:
         normalized = _normalize_file_path(path, cwd)
@@ -1222,12 +1499,15 @@ def _gate_write_paths(
             )
         if context is not None:
             canonical = os.path.realpath(normalized)
-            if _within(canonical, os.path.realpath(str(context.state_dir()))):
-                return _deny(
-                    f"{verb} of envelope state {normalized!r} from inside the "
-                    "enveloped session is envelope self-modification; the "
-                    "active envelope is never written directly"
-                )
+            for label, root in context.authority_roots():
+                if _within(canonical, os.path.realpath(str(root))):
+                    return _deny(
+                        f"{verb} of {label} {normalized!r} from inside the "
+                        "enveloped session is authority self-modification; "
+                        "these surfaces govern the envelope's own bound and "
+                        "are never written directly (the canonical oacp "
+                        "writers are classified as commands)"
+                    )
             if not constraints.get("touches_auth_config_or_secrets"):
                 for root in context.trust_roots():
                     if _within(canonical, os.path.realpath(str(root))):
@@ -1252,11 +1532,16 @@ def _gate_write_paths(
             continue
         if normalized in touched or normalized in new_files:
             continue
-        if len(touched) + len(new_files) >= expected:
-            return _deny(
-                f"{BLOCKED_OPENER} — files_touched expected {expected}, "
-                f"now {len(touched) + len(new_files) + 1}"
-            )
+        if len(touched) + len(new_files) >= declared:
+            if expected is None:
+                expected = _reauthorized_file_budget(
+                    _reauthorized_scope(context), declared
+                )
+            if len(touched) + len(new_files) >= expected:
+                return _deny(
+                    f"{BLOCKED_OPENER} — files_touched expected {expected}, "
+                    f"now {len(touched) + len(new_files) + 1}"
+                )
         new_files.append(normalized)
     if new_files:
         return Decision("allow", new_files=new_files)
@@ -1338,6 +1623,12 @@ def _split_shell_segments(command: str) -> List[str]:
             index += 1
             continue
 
+        if char == "|" and current and current[-1] == ">":
+            # `>|` (noclobber override) is a redirection, not a pipe; its
+            # target stays visible to the redirect gate.
+            current.append(char)
+            index += 1
+            continue
         if char in (";", "\n", "|"):
             flush()
             index += 1
@@ -1366,6 +1657,96 @@ def _split_shell_segments(command: str) -> List[str]:
     return segments
 
 
+def _heredoc_delimiters(line: str) -> Optional[List[Tuple[str, bool, bool, int, int]]]:
+    """Heredoc operators a line opens, outside quotes, in operator order.
+
+    Each entry is ``(word, strip_leading_tabs, body_expands, start, end)``:
+    the delimiter word, whether ``<<-`` tab-stripping applies, whether the
+    body undergoes shell expansion (a bare, unquoted, unescaped word — a
+    quoted or backslashed delimiter makes the body literal data), and the
+    operator's span on the line. Returns None when the line carries a
+    ``<<`` outside quotes with no parseable delimiter — the body's extent
+    is then unknowable and the caller escalates.
+    """
+    delimiters: List[Tuple[str, bool, bool, int, int]] = []
+    quote: Optional[str] = None
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            continue
+        if quote is not None:
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in ("'", '"'):
+            quote = char
+            index += 1
+            continue
+        if line.startswith("<<<", index):
+            index += 3
+            continue
+        if line.startswith("<<", index):
+            match = HEREDOC_OPERATOR_RE.match(line, index)
+            if match is None:
+                return None
+            word = match.group(2) or match.group(3) or match.group(5)
+            expands = match.group(5) is not None and match.group(4) is None
+            delimiters.append(
+                (word, bool(match.group(1)), expands, match.start(), match.end())
+            )
+            index = match.end()
+            continue
+        index += 1
+    return delimiters
+
+
+def _strip_heredoc_bodies(command: str) -> str:
+    """Drop heredoc bodies, their terminator lines, and the `<<WORD` operators.
+
+    A heredoc body is data handed to the program on stdin, not shell: the
+    redirect scanner must not read `->` inside a string literal there as a
+    write. The operator line itself stays, minus the operator, so a redirect
+    or writer program on it (`cat > path <<EOF`, `tee path <<EOF`) is still
+    a real write that counts, while the `<<EOF` word never reads as an
+    operand. With a quoted or backslashed delimiter the body is literal and
+    is dropped whole; with a bare delimiter the shell still expands the
+    body, so a command or backtick substitution inside it can execute a
+    write — that body is not dropped but escalated. Raises ValueError on an
+    unterminated heredoc, an operator without a parseable delimiter, or an
+    executable substitution inside an expanding body (the caller escalates
+    rather than guessing).
+    """
+    kept: List[str] = []
+    pending: List[Tuple[str, bool, bool]] = []
+    for line in command.split("\n"):
+        if pending:
+            word, strip_tabs, expands = pending[0]
+            candidate = line.lstrip("\t") if strip_tabs else line
+            if candidate == word:
+                pending.pop(0)
+                continue
+            if expands and ("$(" in line or "`" in line):
+                raise ValueError(
+                    "command substitution inside an expanding (unquoted) heredoc body"
+                )
+            continue
+        delimiters = _heredoc_delimiters(line)
+        if delimiters is None:
+            raise ValueError("heredoc operator without a delimiter")
+        for word, strip_tabs, expands, start, end in reversed(delimiters):
+            line = line[:start] + line[end:]
+        pending.extend(
+            (word, strip_tabs, expands) for word, strip_tabs, expands, _s, _e in delimiters
+        )
+        kept.append(line)
+    if pending:
+        raise ValueError("unterminated heredoc")
+    return "\n".join(kept)
+
+
 def _segments_of(command: str) -> List[str]:
     """Return top-level and command-substitution segments (F-002)."""
     segments = _split_shell_segments(command)
@@ -1382,6 +1763,11 @@ def _segments_of(command: str) -> List[str]:
     for match in substitutions:
         inner = match.group(1) or match.group(2) or ""
         segments.extend(_split_shell_segments(inner))
+    process_substitutions = list(PROCESS_SUBSTITUTION_RE.finditer(command))
+    if command.count("<(") + command.count(">(") != len(process_substitutions):
+        raise ValueError("nested or parenthesized process substitution")
+    for match in process_substitutions:
+        segments.extend(_split_shell_segments(match.group(1)))
     return segments
 
 
@@ -1513,14 +1899,20 @@ def _classify_segment(
                 )
     if prog in FS_MUTATORS and context is not None:
         # Operand gate, role-agnostic: deleting, relocating, copying out, or
-        # aliasing envelope state is self-modification just as much as
+        # aliasing an authority surface is self-modification just as much as
         # writing it, and the same for trust-root material under the auth
         # gate — the write-target gate alone sees only destinations. The
-        # operands judged must be the ones the utility will actually use:
-        # GNU target-directory spellings are parsed, `--` ends option
-        # processing, and expansion syntax escalates (the shell expands it
-        # after classification, so its literal spelling proves nothing).
-        state_root = os.path.realpath(str(context.state_dir()))
+        # authority roots come from the same list the write-target gate
+        # consumes, so a surface can never be protected against writes but
+        # left open to `rm`/`mv`. The operands judged must be the ones the
+        # utility will actually use: GNU target-directory spellings are
+        # parsed, `--` ends option processing, and expansion syntax escalates
+        # (the shell expands it after classification, so its literal
+        # spelling proves nothing).
+        authority_roots = [
+            (label, os.path.realpath(str(root)))
+            for label, root in context.authority_roots()
+        ]
         trust_roots = [os.path.realpath(str(r)) for r in context.trust_roots()]
         for operand in _mutator_operands(tokens):
             if EXPANSION_SYNTAX_RE.search(operand) or "$" in operand:
@@ -1530,11 +1922,13 @@ def _classify_segment(
                     "explicit literal paths"
                 )
             canonical = os.path.realpath(_normalize_file_path(operand, cwd))
-            if _within(canonical, state_root):
-                return _deny(
-                    f"{prog} touching envelope state {operand!r} from inside "
-                    "the enveloped session is envelope self-modification"
-                )
+            for label, root in authority_roots:
+                if _within(canonical, root):
+                    return _deny(
+                        f"{prog} touching {label} {operand!r} from inside "
+                        "the enveloped session is authority "
+                        "self-modification"
+                    )
             if not constraints.get("touches_auth_config_or_secrets"):
                 for root in trust_roots:
                     if _within(canonical, root):
@@ -1599,9 +1993,9 @@ def classify_bash(
 
     write_targets: List[str] = []
     try:
-        segments = _segments_of(command)
-    except ValueError:
-        return _ask(f"cannot segment shell command: {command!r}")
+        segments = _segments_of(_strip_heredoc_bodies(command))
+    except ValueError as error:
+        return _ask(f"cannot segment shell command ({error}): {command!r}")
     # A command with exactly one segment has no earlier shell state (cd,
     # export) that could retarget a target-sensitive subcommand after
     # validation — the completion clear is sanctioned only in that form.
@@ -1626,6 +2020,17 @@ def classify_bash(
             return decision
 
     for target in write_targets:
+        # A target spelled through a shell variable or substitution takes
+        # its value from shell state the classifier cannot see; escalate
+        # instead of normalizing the unexpanded spelling to a cwd-relative
+        # phantom path (which both miscounts the budget and can hide a
+        # real write elsewhere).
+        if "$" in target or "`" in target:
+            return _ask(
+                f"write target {target!r} references a shell variable or "
+                "substitution that cannot be statically resolved; use a "
+                "literal path"
+            )
         # Bash-derived targets are shell-expanded after classification —
         # a pattern can reach a path its literal spelling does not. File-tool
         # paths (Edit/Write) never pass here and may contain literal brackets.
@@ -2051,6 +2456,7 @@ def process(payload: Dict[str, Any], receiver: str = "claude") -> Decision:
             project=str(envelope.get("project") or project),
             receiver=str(envelope.get("receiver") or receiver),
             message_id=str(envelope.get("message_id") or ""),
+            message_sha256=str(envelope.get("message_sha256") or ""),
         )
         decision = classify(
             str(payload.get("tool_name") or ""),

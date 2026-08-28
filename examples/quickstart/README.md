@@ -13,7 +13,7 @@ you (alice)                    AI agent (bob)
 
 ## Prerequisites
 
-- Python 3.9+
+- Python 3.9.2+
 - `pip install oacp-cli`
 - An AI agent runtime — [Claude Code](https://claude.ai/code), [Codex](https://openai.com/index/codex/), or any agent that can read/write files
 

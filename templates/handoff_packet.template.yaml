@@ -1,5 +1,5 @@
 # Structured handoff packet template
-# Copy into a project packet folder (or use `make handoff`) before sending.
+# Copy into a project packet folder before sending.
 
 source_agent: "<source_agent>"
 target_agent: "<target_agent>"
