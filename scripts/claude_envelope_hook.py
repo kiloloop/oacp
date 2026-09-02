@@ -146,7 +146,12 @@ BOOKKEEPING_AGENT_SUBDIRS = ("audit", "inbox", "outbox")
 # Runtime scratchpad roots (reply/body-file composition). Deliberately
 # narrower than the OS temp root: exempting all of /tmp would let arbitrary
 # staging escape the counter, and would swallow test fixtures on CI.
-SCRATCHPAD_PREFIXES = ("/tmp/claude-", "/private/tmp/claude-")
+SCRATCHPAD_PREFIXES = (
+    "/tmp/claude-",
+    "/private/tmp/claude-",
+    "/tmp/claude/",
+    "/private/tmp/claude/",
+)
 
 DEPENDENCY_FILENAMES = {
     "pyproject.toml",

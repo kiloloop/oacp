@@ -58,7 +58,7 @@ Examples:
   oacp org-memory init
   oacp write-event --agent claude --project my-project --type decision --slug api-convention --body "Use REST for public APIs"
   oacp autonomy-outcome /path/to/audit.yaml --decision approved
-  oacp autonomy-finalize /path/to/audit.yaml --final-state done --actual-minutes 30 --actual-files-touched 3
+  oacp autonomy-finalize /path/to/audit.yaml --final-state done --started-at 2026-08-30T10:05:00Z --actual-files-touched 3
   oacp envelope compile /path/to/message.yaml --receiver claude
   oacp envelope show --project my-project
   oacp doctor

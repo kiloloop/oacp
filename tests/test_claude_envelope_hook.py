@@ -26,6 +26,9 @@ from envelope_compiler import (  # noqa: E402
 )
 
 
+RUNTIME_SCRATCHPAD_PREFIXES = hook.SCRATCHPAD_PREFIXES
+
+
 CONSTRAINTS: Dict[str, Any] = {
     "estimated_minutes": 30,
     "expected_files_touched": 2,
@@ -1873,6 +1876,25 @@ def test_scratchpad_write_exempt_from_file_counter(tmp_path: Path) -> None:
     assert decision.action == "allow"
     stored = load_envelope(target)
     assert stored["counters"]["files_touched"] == ["/repo/a.py", "/repo/b.py"]
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("/tmp/claude/x.txt", True),
+        ("/private/tmp/claude/x.txt", True),
+        ("/tmp/claude-501/x.txt", True),
+        ("/tmp/claudeevil/x.txt", False),
+    ],
+)
+def test_runtime_scratchpad_prefixes_are_separator_anchored(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    expected: bool,
+) -> None:
+    monkeypatch.setattr(hook, "SCRATCHPAD_PREFIXES", RUNTIME_SCRATCHPAD_PREFIXES)
+
+    assert hook.is_bookkeeping_path(path, None) is expected
 
 
 def test_inbox_outbox_writes_exempt(tmp_path: Path) -> None:

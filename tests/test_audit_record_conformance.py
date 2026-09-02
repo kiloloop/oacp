@@ -69,7 +69,7 @@ def test_all_finding_codes_have_fixture_coverage() -> None:
     ``record_unparsable``, ``missing_completion_kind``,
     ``terminal_paused_without_outcome``, ``decision_kind_incoherent``,
     ``invalid_human_outcome``, ``off_enum_breach_basis``, and the advisory
-    ``terminal_missing_actuals``
+    ``terminal_missing_actuals`` plus canonical-writer provenance findings
     are covered by unit tests instead — their shapes are synthetic, not
     corpus-observed.
     """

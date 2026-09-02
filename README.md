@@ -20,7 +20,7 @@ $ uv tool install oacp-cli
 ## See it in action
 
 <p align="center">
-  <img src="docs/img/oacp-cli-demo.png" alt="oacp send + watch terminal demo" width="584" />
+  <img src="https://raw.githubusercontent.com/kiloloop/oacp/main/docs/img/oacp-cli-demo.png" alt="oacp send + watch terminal demo" width="584" />
 </p>
 
 The CLI ships structured tasks between agents and lets you watch the conversation in real time.
@@ -28,7 +28,7 @@ The CLI ships structured tasks between agents and lets you watch the conversatio
 ## Live agent fleet
 
 <p align="center">
-  <img src="docs/img/oacp-fleet-thread.png" alt="claude / codex / gemini fleet with PR #42 review thread" width="650" />
+  <img src="https://raw.githubusercontent.com/kiloloop/oacp/main/docs/img/oacp-fleet-thread.png" alt="claude / codex / gemini fleet with PR #42 review thread" width="650" />
 </p>
 
 Every multi-agent thread is a sequence of typed messages — `review_request`, `review_feedback`, `review_addressed`, `review_lgtm` — with explicit quality gates.
@@ -56,7 +56,7 @@ PROJECT · my-app                                   ● live
 ## Filesystem as protocol
 
 <p align="center">
-  <img src="docs/img/oacp-filesystem-tree.png" alt="$OACP_HOME directory tree with inbox/outbox/memory/artifacts" width="526" />
+  <img src="https://raw.githubusercontent.com/kiloloop/oacp/main/docs/img/oacp-filesystem-tree.png" alt="$OACP_HOME directory tree with inbox/outbox/memory/artifacts" width="526" />
 </p>
 
 Everything is plain files in `$OACP_HOME`. Agents have `inbox/`, `outbox/`, `dead_letter/`. Projects have shared `memory/` (durable) and per-thread `artifacts/`, `checkpoints/`, `packets/`. Org-wide knowledge lives in `$OACP_HOME/org-memory/`.
@@ -291,9 +291,6 @@ oacp/
 ├── Makefile            # Task runner (make help for all targets)
 └── SPEC.md             # Full protocol specification
 ```
-
-[`mcp_servers/`](mcp_servers/) contains experimental, unsupported prototypes;
-it is not part of the OACP product surface.
 
 ## Related
 

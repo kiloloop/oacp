@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -122,24 +121,33 @@ def _verify_file_status(path: Path) -> Dict[str, Any]:
     return item
 
 
-def _parse_capabilities_from_status(raw: str) -> List[str]:
-    caps: List[str] = []
-    in_caps = False
+def _parse_capabilities_from_status(raw: str) -> Optional[List[str]]:
+    """Return configured capabilities without depending on YAML indentation."""
+    payload = yaml.safe_load(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("status.yaml must contain a top-level mapping")
+    if "capabilities" not in payload:
+        return None
 
-    for line in raw.splitlines():
-        if not in_caps:
-            if re.match(r"^capabilities:\s*$", line):
-                in_caps = True
-            continue
+    raw_capabilities = payload["capabilities"]
+    if not isinstance(raw_capabilities, list):
+        raise ValueError("status.yaml capabilities must be a list")
 
-        if line and not line.startswith((" ", "\t")):
-            break
-
-        match = re.match(r"^\s*-\s*([A-Za-z0-9_]+)\s*(?:#.*)?$", line)
-        if match:
-            caps.append(match.group(1))
-
-    return caps
+    capabilities: List[str] = []
+    for capability in raw_capabilities:
+        if (
+            not isinstance(capability, str)
+            or not capability
+            or not all(
+                char.isascii() and (char.isalnum() or char == "_")
+                for char in capability
+            )
+        ):
+            raise ValueError(
+                "status.yaml capabilities must use non-empty alphanumeric or underscore keys"
+            )
+        capabilities.append(capability)
+    return capabilities
 
 
 def _render_status_yaml(
@@ -173,18 +181,30 @@ def _upsert_status_yaml(
     current_task: str,
     dry_run: bool,
 ) -> Dict[str, Any]:
-    existing_caps: List[str] = []
+    existing_caps: Optional[List[str]] = None
     existed = status_path.exists()
-    read_error: Optional[str] = None
 
     if existed:
         try:
             existing_raw = status_path.read_text(encoding="utf-8")
             existing_caps = _parse_capabilities_from_status(existing_raw)
         except Exception as exc:
-            read_error = str(exc)
+            # An unreadable or invalid existing file proves nothing about what
+            # was configured. Defaults may substitute only for an absent
+            # capabilities key — never for a present value that failed
+            # validation — so refuse the rewrite and keep the file byte-exact.
+            return {
+                "path": str(status_path),
+                "state": "error",
+                "used_existing_capabilities": False,
+                "warning": (
+                    f"existing status.yaml is invalid; left unchanged: {exc}"
+                ),
+            }
 
-    capabilities = existing_caps or DEFAULT_CAPABILITIES
+    capabilities = (
+        existing_caps if existing_caps is not None else list(DEFAULT_CAPABILITIES)
+    )
     rendered = _render_status_yaml(
         model=model,
         status=status,
@@ -196,10 +216,8 @@ def _upsert_status_yaml(
         "path": str(status_path),
         "state": "dry-run" if dry_run else ("updated" if existed else "created"),
         "capabilities_count": len(capabilities),
-        "used_existing_capabilities": bool(existing_caps),
+        "used_existing_capabilities": existing_caps is not None,
     }
-    if read_error:
-        result["warning"] = f"failed to read existing status.yaml: {read_error}"
 
     if not dry_run:
         status_path.parent.mkdir(parents=True, exist_ok=True)
@@ -463,7 +481,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
-        default=os.environ.get("CODEX_MODEL", "codex"),
+        default=os.environ.get("CODEX_MODEL") or "unknown",
         help="Model identifier written to status.yaml",
     )
     parser.add_argument(
@@ -511,7 +529,15 @@ def main() -> int:
     try:
         hub_dir = resolve_oacp_home(args.hub_dir).resolve()
         cwd = Path(str(hook_input.get("cwd") or Path.cwd())).expanduser().resolve()
-        model = str(hook_input.get("model") or args.model)
+        hook_model = str(hook_input.get("model") or "").strip()
+        model = hook_model or str(args.model).strip() or "unknown"
+        model_warning = ""
+        if args.hook and not hook_model:
+            model = "unknown"
+            model_warning = (
+                "SessionStart hook input omitted the active model; "
+                "status.yaml records model: unknown"
+            )
 
         memory_sync = (
             _pull_memory_report(hub_dir=hub_dir, dry_run=args.dry_run)
@@ -528,6 +554,8 @@ def main() -> int:
             current_task=args.current_task,
             dry_run=args.dry_run,
         )
+        if model_warning:
+            report["warnings"].append(model_warning)
     except Exception as exc:
         if not args.hook:
             raise

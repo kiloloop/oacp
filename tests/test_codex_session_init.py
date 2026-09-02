@@ -238,6 +238,103 @@ class TestCodexSessionInit(unittest.TestCase):
             self.assertIn("headless", payload["capabilities"])
             self.assertIn("shell_access", payload["capabilities"])
 
+    def test_rendered_status_round_trips_capabilities(self) -> None:
+        capabilities = ["headless", "custom_capability"]
+        rendered = session_init._render_status_yaml(
+            model="gpt-test",
+            status="available",
+            current_task="",
+            capabilities=capabilities,
+        )
+
+        self.assertEqual(
+            session_init._parse_capabilities_from_status(rendered),
+            capabilities,
+        )
+
+    def test_valid_empty_capability_list_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            status_path = Path(tmp) / "status.yaml"
+            status_path.write_text(
+                session_init._render_status_yaml(
+                    model="old-model",
+                    status="available",
+                    current_task="",
+                    capabilities=[],
+                ),
+                encoding="utf-8",
+            )
+
+            result = session_init._upsert_status_yaml(
+                status_path=status_path,
+                model="gpt-test",
+                status="busy",
+                current_task="demo#1",
+                dry_run=False,
+            )
+
+            payload = yaml.safe_load(status_path.read_text(encoding="utf-8"))
+            self.assertTrue(result["used_existing_capabilities"])
+            self.assertEqual(payload["capabilities"], [])
+
+    def test_present_invalid_capabilities_refuses_rewrite(self) -> None:
+        cases = {
+            "non-list-value": "runtime: codex\ncapabilities: not-a-list\n",
+            "invalid-list-item": (
+                "runtime: codex\ncapabilities:\n  - ok_cap\n  - 'bad key!'\n"
+            ),
+            "non-mapping-file": "- a list, not a mapping\n",
+        }
+        for name, body in cases.items():
+            with self.subTest(name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    status_path = Path(tmp) / "status.yaml"
+                    status_path.write_text(body, encoding="utf-8")
+                    before = status_path.read_bytes()
+
+                    result = session_init._upsert_status_yaml(
+                        status_path=status_path,
+                        model="gpt-test",
+                        status="busy",
+                        current_task="demo#1",
+                        dry_run=False,
+                    )
+
+                    self.assertEqual(result["state"], "error")
+                    self.assertFalse(result["used_existing_capabilities"])
+                    self.assertIn("left unchanged", result["warning"])
+                    self.assertEqual(status_path.read_bytes(), before)
+
+    def test_session_init_surfaces_invalid_status_without_rewriting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hub_dir = root / "oacp"
+            repo_dir = root / "repo"
+            project_dir = _seed_memory(hub_dir, "demo")
+            protocol_dir = _seed_protocol(repo_dir)
+
+            status_path = project_dir / "agents" / "codex" / "status.yaml"
+            _write(status_path, "runtime: codex\ncapabilities: not-a-list\n")
+            before = status_path.read_bytes()
+
+            report = run_session_init(
+                project="demo",
+                hub_dir=hub_dir,
+                cwd=repo_dir,
+                model="codex-latest",
+                status="busy",
+                current_task="demo#12",
+                dry_run=False,
+                protocol_dir=protocol_dir,
+            )
+
+            self.assertEqual(report["status_yaml"]["state"], "error")
+            self.assertIn("status_yaml=error", report["ack"])
+            self.assertTrue(
+                any("left unchanged" in warning for warning in report["warnings"])
+            )
+            self.assertEqual(status_path.read_bytes(), before)
+
     def test_no_project_detected_skips_memory_and_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -383,11 +480,19 @@ class TestCodexSessionInit(unittest.TestCase):
             "project": "demo",
             "hub_dir": "/tmp/oacp",
             "protocol": {
-                name: {"path": f"/tmp/protocol/{name}", "state": "verified", "bytes": 1}
+                name: {
+                    "path": f"/tmp/protocol/{name}",
+                    "state": "verified",
+                    "bytes": 1,
+                }
                 for name in session_init.PROTOCOL_FILES
             },
             "memory": {
-                name: {"path": f"/tmp/memory/{name}", "state": "verified", "bytes": 1}
+                name: {
+                    "path": f"/tmp/memory/{name}",
+                    "state": "verified",
+                    "bytes": 1,
+                }
                 for name in session_init.MEMORY_FILES
             },
             "status_yaml": {"state": "updated"},
@@ -417,6 +522,49 @@ class TestCodexSessionInit(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(
             payload["hookSpecificOutput"]["hookEventName"], "SessionStart"
+        )
+
+    def test_hook_mode_records_unknown_when_model_is_missing(self) -> None:
+        hook_payload = {
+            "hook_event_name": "SessionStart",
+            "cwd": "/tmp",
+            "source": "startup",
+        }
+        report = {
+            "project": "demo",
+            "hub_dir": "/tmp/oacp",
+            "protocol": {
+                name: {"path": f"/tmp/protocol/{name}", "state": "verified", "bytes": 1}
+                for name in session_init.PROTOCOL_FILES
+            },
+            "memory": {
+                name: {"path": f"/tmp/memory/{name}", "state": "verified", "bytes": 1}
+                for name in session_init.MEMORY_FILES
+            },
+            "status_yaml": {"state": "updated"},
+            "warnings": [],
+            "ack": "project=demo;context=manifest",
+        }
+
+        def fake_init(**kwargs):
+            self.assertEqual(kwargs["model"], "unknown")
+            return report
+
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", ["codex_session_init.py", "--hook"]),
+            mock.patch.object(sys, "stdin", io.StringIO(json.dumps(hook_payload))),
+            mock.patch.object(sys, "stdout", stdout),
+            mock.patch.object(session_init, "run_session_init", side_effect=fake_init),
+        ):
+            code = session_init.main()
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertIn("systemMessage", payload)
+        self.assertIn(
+            "status.yaml records model: unknown",
+            payload["hookSpecificOutput"]["additionalContext"],
         )
 
     def test_invalid_hook_input_degrades_without_blocking(self) -> None:

@@ -12,7 +12,12 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from add_agent import add_agent
+from add_agent import (
+    CLAUDE_SUPPORTED_MESSAGE_TYPES,
+    CODEX_SUPPORTED_MESSAGE_TYPES,
+    add_agent,
+    ensure_agent_card_message_types,
+)
 from _oacp_constants import (
     CODEX_SESSION_START_CONTEXT_LIMIT,
     CREATABLE_RUNTIMES,
@@ -520,6 +525,29 @@ def setup_runtime(
         else:
             warning_files.append(str(settings_file.relative_to(repo_dir)))
 
+        if project_name:
+            if oacp_root is None:
+                from _oacp_env import resolve_oacp_home
+
+                oacp_root = resolve_oacp_home()
+            project_dir = oacp_root / "projects" / project_name
+            card_path = project_dir / "agents" / "claude" / "agent_card.yaml"
+            if card_path.is_file():
+                relative_card = str(card_path.relative_to(project_dir))
+                try:
+                    card_changed = ensure_agent_card_message_types(
+                        card_path,
+                        CLAUDE_SUPPORTED_MESSAGE_TYPES,
+                    )
+                except (OSError, ValueError) as exc:
+                    _warn_claude_settings(card_path, str(exc))
+                    warning_files.append(str(card_path))
+                else:
+                    target = (
+                        project_created_files if card_changed else project_skipped_files
+                    )
+                    target.append(relative_card)
+
     elif runtime == "codex":
         agents_md = repo_dir / "AGENTS.md"
         if _write_if_missing(agents_md, CODEX_AGENTS_MD):
@@ -539,6 +567,29 @@ def setup_runtime(
             skipped_files.append(str(hooks_file.relative_to(repo_dir)))
         else:
             warning_files.append(str(hooks_file.relative_to(repo_dir)))
+
+        if project_name:
+            if oacp_root is None:
+                from _oacp_env import resolve_oacp_home
+
+                oacp_root = resolve_oacp_home()
+            project_dir = oacp_root / "projects" / project_name
+            card_path = project_dir / "agents" / "codex" / "agent_card.yaml"
+            if card_path.is_file():
+                relative_card = str(card_path.relative_to(project_dir))
+                try:
+                    card_changed = ensure_agent_card_message_types(
+                        card_path,
+                        CODEX_SUPPORTED_MESSAGE_TYPES,
+                    )
+                except (OSError, ValueError) as exc:
+                    _warn_codex_hooks(card_path, str(exc))
+                    warning_files.append(str(card_path))
+                else:
+                    target = (
+                        project_created_files if card_changed else project_skipped_files
+                    )
+                    target.append(relative_card)
 
     elif runtime == "gemini":
         rules_file = repo_dir / ".agent" / "rules" / "oacp.md"

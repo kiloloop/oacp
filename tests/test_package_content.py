@@ -39,6 +39,7 @@ REMOVED_SCRIPTS = [
     "oacp/_scripts/normalize_findings.py",
     "oacp/_scripts/create_handoff_packet.py",
     "oacp/_scripts/init_project_workspace.sh",
+    "oacp/_scripts/session_lifecycle_hooks.py",
 ]
 
 
@@ -115,6 +116,9 @@ RETIRED_REFERENCE_PATTERNS = [
     re.compile(r"\bmake init\b"),
     re.compile(r"\bmake handoff\b"),
     re.compile(r"\bmake normalize\b"),
+    re.compile(r"\bsession_lifecycle_hooks\b"),
+    re.compile(r"\boacp_coordinator\b"),
+    re.compile(r"\bmcp_servers\b"),
 ]
 
 

@@ -39,6 +39,7 @@ from _oacp_constants import (
     ALL_RUNTIMES,
     CANONICAL_CAPABILITIES,
     REPO_SLUG_RE,
+    _template_path,
     is_agent_dir,
     utc_now_iso,
 )
@@ -2055,6 +2056,20 @@ def print_json(categories: List[DoctorCategory], *, fixed: Optional[List[str]] =
 # ── Fix ───────────────────────────────────────────────────────────────────
 
 
+def _bundled_status_template() -> Optional[str]:
+    """Text of the bundled ``agent_status.template.yaml``: the repo copy on a
+    checkout, the packaged ``oacp/_templates/`` copy on a wheel install, or
+    ``None`` when neither exists (the fix is skipped with a hint, never a
+    crash)."""
+    try:
+        with _template_path("agent_status.template.yaml") as path:
+            if path.is_file():
+                return path.read_text(encoding="utf-8")
+    except Exception:
+        return None
+    return None
+
+
 def apply_fixes(
     categories: List[DoctorCategory],
     oacp_dir: Path,
@@ -2064,8 +2079,6 @@ def apply_fixes(
     fixed: List[str] = []
     project_dir = oacp_dir / "projects" / project
     template_path = oacp_dir / "templates" / "agent_status.template.yaml"
-    # Fall back to repo-bundled template
-    repo_template = Path(__file__).resolve().parent.parent / "templates" / "agent_status.template.yaml"
 
     for cat in categories:
         for result in cat.results:
@@ -2087,10 +2100,18 @@ def apply_fixes(
 
             elif result.fixable == "create_status":
                 status_file = agent_dir / "status.yaml"
-                # Find template: workspace copy first, then repo-bundled
-                tmpl = template_path if template_path.is_file() else repo_template
-                if tmpl.is_file():
-                    content = tmpl.read_text(encoding="utf-8")
+                # Find template: workspace copy first, then the bundled copy
+                # (repo checkout or installed wheel).
+                if template_path.is_file():
+                    content = template_path.read_text(encoding="utf-8")
+                else:
+                    content = _bundled_status_template()
+                if content is None:
+                    result.fix_hint = (
+                        "agent_status.template.yaml not found in the workspace "
+                        "templates/ or the installed package"
+                    )
+                else:
                     now_str = utc_now_iso()
                     # Set runtime to agent name (if recognized) or "unknown"
                     runtime = agent_name if agent_name in VALID_RUNTIMES else "unknown"

@@ -363,6 +363,69 @@ def test_guardrails_fence_keeps_operative_terms_visible_as_advisories() -> None:
     assert "lexical_advisory" in decision["reason_codes"]
 
 
+@pytest.mark.parametrize(
+    ("opening_fence", "closing_fence"),
+    [("```yaml", "```"), ("~~~~yaml", "~~~~")],
+    ids=["backticks", "tildes"],
+)
+def test_fenced_profile_decoy_does_not_shadow_real_declaration(
+    opening_fence: str,
+    closing_fence: str,
+) -> None:
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml")
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "clean_task.yaml")
+    message["body"] = (
+        "## Example\n"
+        f"{opening_fence}\n"
+        "task_profile:\n"
+        "  estimated_minutes: [malformed decoy\n"
+        f"{closing_fence}\n\n"
+        f"{message['body']}"
+    )
+
+    decision = evaluate_autonomy(message, config)
+
+    assert decision["decision"] == "auto_accepted"
+    assert decision["task_profile"]["estimated_minutes"] == 20
+    assert decision["task_profile"]["expected_files_touched"] == 1
+
+
+@pytest.mark.parametrize(
+    ("opening_fence", "closing_fence"),
+    [("```yaml", "```"), ("~~~~yaml", "~~~~")],
+    ids=["backticks", "tildes"],
+)
+def test_fenced_only_profile_remains_operational(
+    opening_fence: str,
+    closing_fence: str,
+) -> None:
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml")
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "clean_task.yaml")
+    message["body"] = (
+        f"{opening_fence}\n"
+        f"{message['body']}\n"
+        f"{closing_fence}"
+    )
+
+    decision = evaluate_autonomy(message, config)
+
+    assert decision["decision"] == "auto_accepted"
+    assert decision["task_profile"]["estimated_minutes"] == 20
+    assert decision["task_profile"]["expected_files_touched"] == 1
+
+
+def test_unclosed_fence_does_not_hide_only_profile() -> None:
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml")
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "clean_task.yaml")
+    message["body"] = f"```yaml\n{message['body']}"
+
+    decision = evaluate_autonomy(message, config)
+
+    assert decision["decision"] == "auto_accepted"
+    assert decision["task_profile"]["estimated_minutes"] == 20
+    assert decision["task_profile"]["expected_files_touched"] == 1
+
+
 def _lexical_fp_decision(task_text: str) -> tuple[Dict[str, Any], str]:
     config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml")
     message = _load_yaml(FIXTURE_ROOT / "messages" / "clean_task.yaml")

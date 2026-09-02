@@ -177,10 +177,10 @@ registers a `SessionStart` handler that runs memory pull and `oacp session-init`
 sequentially after the user reviews and trusts it with `/hooks`. The manual
 fallback is `oacp session-init --pull-memory --project <project>`.
 
-`scripts/session_lifecycle_hooks.py` maintains the separate
-`session_lifecycle_state.json` telemetry consumed by the coordinator. Its packet
-states follow `packet_states.yaml`; it does not load runtime context or write
-`status.yaml`.
+Session telemetry beyond `status.yaml` is a runtime responsibility: the kernel
+neither defines a schema for it nor ships a reference implementation. A runtime
+that keeps its own session or packet telemetry stores it separately from
+`status.yaml`, which remains the status surface `oacp doctor` validates.
 
 ### Hub Doctor
 
@@ -279,8 +279,8 @@ The card schema is inspired by Google's A2A Agent Card spec (v0.3.0). Key differ
 - **Agent Profiles**: `docs/protocol/agent_profiles.md` — two-tier global profile + project card system
 - **Parity Matrix**: [Cross-runtime parity matrix](https://github.com/kiloloop/research/blob/main/runtime-comparison/runtime_capability_matrix.md) — detailed per-runtime capability comparison
 - **Inbox Protocol**: `docs/protocol/inbox_outbox.md` — agent messaging format
-- **Session telemetry**: `scripts/session_lifecycle_hooks.py` — coordinator
-  compatibility state, separate from runtime startup and `status.yaml`
+- **Session telemetry**: runtime-owned, no kernel reference implementation —
+  see [Runtime startup and session telemetry](#runtime-startup-and-session-telemetry)
 - **Workspace Setup**: `scripts/init_project_workspace.py` (`oacp init`) — project initialization
 - **Agent Card Template**: `templates/agent_card.template.yaml` — card template
 - **Card Validator**: `scripts/validate_agent_card.py` — schema validation

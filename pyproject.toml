@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "oacp-cli"
-version = "0.4.4"
+version = "0.4.5"
 description = "Open Agent Coordination Protocol CLI for file-based multi-agent workflows"
 readme = "README.md"
 license = "Apache-2.0"
@@ -81,7 +81,6 @@ packages = ["oacp"]
 "scripts/message_verify.py" = "oacp/_scripts/message_verify.py"
 "scripts/trust_root.py" = "oacp/_scripts/trust_root.py"
 "scripts/trust_cli.py" = "oacp/_scripts/trust_cli.py"
-"scripts/session_lifecycle_hooks.py" = "oacp/_scripts/session_lifecycle_hooks.py"
 "scripts/validate_message.py" = "oacp/_scripts/validate_message.py"
 "scripts/add_agent.py" = "oacp/_scripts/add_agent.py"
 "scripts/agent_profile.py" = "oacp/_scripts/agent_profile.py"
@@ -117,6 +116,7 @@ packages = ["oacp"]
 "templates/agent_card.template.yaml" = "oacp/_templates/agent_card.template.yaml"
 "templates/agent_profile.template.yaml" = "oacp/_templates/agent_profile.template.yaml"
 "templates/receiver_config.template.yaml" = "oacp/_templates/receiver_config.template.yaml"
+"templates/agent_status.template.yaml" = "oacp/_templates/agent_status.template.yaml"
 "templates/claude/agents/role_agent.template.md" = "oacp/_templates/claude/agents/role_agent.template.md"
 
 [tool.ruff]

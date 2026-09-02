@@ -115,6 +115,17 @@ receiver also writes an audit record, reply body, and cache entries; a
 reply-only analysis that uses scratch files but produces no file deliverable
 declares `0`.
 
+`estimated_minutes` is the **declared admission cap**, not an expected-duration
+estimate: it is the value Gate 2 compares against `max_estimated_minutes`, and
+the bound the post-accept checkpoint measures `actual_minutes` against. A
+sender that tracks expected duration separately keeps it out of the profile
+(for example as provenance prose in the brief), and any future
+expected-duration field is a distinct key, so an adapter that maps a caller's
+declared cap onto `estimated_minutes` never inverts. For example, a leg
+expected to take 25 minutes that is declared under a two-round review
+multiplier carries `estimated_minutes: 50`: the gate admits against 50, and
+the checkpoint fires past 50, not 25.
+
 ### Default scope envelope (profileless admissions)
 
 `allow_without_task_profile` is an **admission-only exemption**: the sender
@@ -307,7 +318,7 @@ Every autonomy decision writes one YAML file:
 
 ```yaml
 schema_version: 2
-spec_version: "0.4.3"
+spec_version: "0.4.5"
 created_at_utc: "2026-05-12T13:23:25Z"
 receiver: codex
 sender: iris
@@ -418,23 +429,38 @@ signer_kid, reason}` — the policy-file authorization outcome (see
 `policy_sha256` the record commits to an *authorized* policy identity,
 not just which bytes ran. An `invalid` status fails closed with reason
 code `policy_auth_invalid` before any gate consumes the config.
-`spec_version: "0.4.3"` preserves every autonomy field and rule pinned by
-0.4.2 — Gate 1 integrity
-enforcement, the recalibrated Gate 2/3 policy, full task-profile capture, the
-explicit `breached` list, the outcome block shown above, session-scoped
-envelope enforcement, the enforce-mode trust-pin completeness gate, and
-preserved `always_pause` defaults for configs without an `autonomy` block —
-plus intake verification as mechanism (`verify_mode: enforce` rejects at
-the gate), the `policy_auth` authorized-policy block, the default scope
-envelope for profileless admissions (with `scope_envelope_source` and the
-null-on-admitted writer refusal), and the recorded none-by-rule
-enforcement branch for approved public-visibility tasks. The spec version
-advances because 0.4.3 adds the project-wide message-retention policy and the
-processed-inbound archive convention; autonomy semantics are unchanged. Audit
-`schema_version: 2` adds thread identity and
-the structured `result.human_outcome` block. Recorders may upgrade a v1 audit
-to v2 when the first human outcome is written; standing grants trust only v2
-records.
+Audit `schema_version: 2` adds thread identity and the structured
+`result.human_outcome` block. Recorders may upgrade a v1 audit to v2 when the
+first human outcome is written; standing grants trust only v2 records.
+
+### Contract version
+
+`spec_version` names the protocol contract an artifact was produced under.
+The tooling stamps one value — `SPEC_VERSION` in `scripts/_oacp_constants.py`
+— into audit records, compiled envelopes, and `workspace.json` at workspace
+init, and the `spec_version` literals in this document move with it.
+
+The stamp moves by the kernel admission test. A release advances
+`spec_version` when it adds or changes something every receiver must
+understand to verify or exchange a message, or to produce and finalize an
+artifact another receiver reads: a key a receiver must stamp, a changed
+meaning of an existing field, or a block that enforcement or finalization now
+reads. Additive-and-ignorable changes — an advisory, an optional provenance
+key, a value a reader may skip without changing its decision — do not move it,
+and neither do userland or tooling changes. The value is the `oacp-cli`
+version of the release that carries the move, and every release states the
+outcome in its notes: the new stamp, or "no contract change".
+
+History: 0.4.3 preserved every autonomy field and rule pinned by 0.4.2 and
+advanced the stamp for the project-wide message-retention policy and the
+processed-inbound archive convention. 0.4.4 added the receiver-stamped
+`work_started_at_utc` work clock and the checkpoint `reauthorization` block
+that enforcement reads, which moved the contract, but shipped with the stamp
+unchanged; 0.4.5 carries that move and makes the work clock mandatory at
+terminal finalization. Records, envelopes, and workspaces written between the
+0.4.4 release (2026-08-28) and the 0.4.5 release are therefore stamped
+`0.4.3` under a contract that had already moved — readers tolerate that
+stamp on artifacts dated in the window and read them by the 0.4.5 shape.
 
 `evaluator` is **gate-emitted, not receiver-composed**: the evaluator
 self-stamps its provenance into every decision it returns, and receivers
@@ -635,6 +661,32 @@ shape must itself carry `checkpoint_paused` (the checkpoint
 re-evaluation is what updated the result block; any other kind there is
 refused as inconsistent).
 
+On a checkpoint pause whose record **already carries a recorded human
+outcome** (typically the admission approval), the new decision is a
+checkpoint clear, and the recorder routes it into
+`result.threshold_checkpoint.reauthorization` as a scope-less
+`receiver_human` answer through the same arbitration the checkpoint
+evaluator uses — a fresh approval lands as `disposition: resumed`, a
+decline as `declined` — while the recorded outcome (timestamp, latency,
+reason codes, and any standing grant resolved from its `grant` block)
+survives untouched. `--replace` is refused in that state: it would
+destroy the admission ledger entry, and can revoke a standing
+continuation grant as a side effect. The recorder mutates only **live**
+records, on both of its routes: a record already closed by completion
+evidence (a terminal `final_state`, or `completed_at_utc`) is
+historical evidence and refuses every human-outcome write — checkpoint
+clear and admission answer alike — byte-identically. A historical
+correction is a deliberate finalizer supersession, never a rewrite. A
+recorder-based clear is
+scope-less by construction; a scoped budget or boundary-action grant
+goes through `oacp autonomy-finalize --checkpoint` with
+`reauthorization.receiver_human.scope`. The validator flags the damage
+signature of the pre-routing overwrite (an admission-paused record whose
+only recorded outcome answers a checkpoint pause) as the advisory
+`admission_outcome_replaced_by_checkpoint_clear` — advisory, not error,
+because records written before this routing existed had no
+non-destructive way to record the clear.
+
 Latency values on checkpoint records written before `paused_at_utc` existed
 measure from admission and are not comparable with post-fix records.
 
@@ -673,7 +725,7 @@ oacp autonomy-finalize <audit.yaml> --checkpoint --actuals <actuals.yaml>
 
 # terminal update
 oacp autonomy-finalize <audit.yaml> --final-state done \
-  --actual-minutes 30 --actual-files-touched 3 \
+  --started-at <YYYY-MM-DDTHH:MM:SSZ> --actual-files-touched 3 \
   --realized creates_or_updates_pr --realized commits_changes \
   --reply-message-id <msg-id>
 ```
@@ -682,6 +734,37 @@ Hand-edited terminal blocks are what produced off-enum vocabulary,
 duplicate live evaluations, and terminal records still carrying a paused
 checkpoint action; the finalizer enforces the pinned enums and
 cross-field invariants at write time, under the shared audit lock.
+
+The finalizer resolves the receiver's admission policy for
+re-authorization arbitration from the record's `policy_path` (override
+with `--config`), so sender_reply answers are capped at the receiver's
+thresholds instead of extending nothing. The read goes through the
+authorized policy path (one bounded snapshot: signature, receiver and
+context binding, and enrollment downgrade resistance verified, then
+parsed from those same bytes) — a policy that fails authorization
+grants nothing. When the policy cannot be resolved or authorized and
+the actuals present a sender answer, the degradation is surfaced on
+stderr and the sender channel stays fail-closed (an explicit `--config`
+that fails is a hard error that leaves the record unchanged); the
+receiver_human channel is unaffected either way.
+
+**Work-clock binding and writer provenance.** Canonical checkpoint and
+`done`/`error` writes require `result.work_started_at_utc`. The first write may
+supply it with `--started-at` (or the equivalent actuals field); later writes
+reuse the record stamp automatically. An explicit value that conflicts with
+the existing stamp is refused, and omitting both sources is an error. With a
+stamp present, omitting `actual_minutes` derives it from the active work clock.
+Each successful canonical write stamps `result.finalizer` with
+`name: oacp autonomy-finalize` and `schema_version: 1`; supersession is exempt
+because it transfers authority rather than reporting task execution. The
+marker lets validation enforce the required clock on new receipts without
+rewriting history: an unmarked legacy terminal receipt with no start gets the
+advisory `terminal_missing_work_started_at`, while a marked checkpoint or
+terminal receipt missing it gets the error
+`canonical_writer_missing_work_started_at`. A malformed marker is
+`invalid_finalizer_provenance`. Legacy terminal receipts remain byte-preserved;
+correct one through a linked superseding evaluation rather than rewriting it
+in place with `--replace`.
 
 **Run-state vocabulary.** `result.final_state` splits by lifecycle phase:
 `pending`, `paused`, and `blocked` are live states; `done`, `superseded`,
@@ -792,8 +875,10 @@ reports pinned finding codes (`off_enum_completion_kind`,
 `terminal_paused_without_outcome`, `superseded_missing_successor`,
 `breached_empty_fields`, `invalid_human_outcome`,
 `decision_kind_incoherent`, `off_enum_breach_basis`,
-`breach_basis_incoherent`, `record_unparsable`; advisory:
-`noncanonical_checkpoint_axis`, `terminal_missing_actuals`), and
+`breach_basis_incoherent`, `canonical_writer_missing_work_started_at`,
+`invalid_finalizer_provenance`, `record_unparsable`; advisory:
+`noncanonical_checkpoint_axis`, `terminal_missing_actuals`,
+`terminal_missing_work_started_at`), and
 `oacp doctor` sweeps every receiver's audit directory with the same
 checks. Duplicate YAML keys are refused
 outright — plain YAML loading silently keeps the later value. The
@@ -899,7 +984,10 @@ the hard stop.
 ## Threshold-Exceeded Checkpoint
 
 `result.work_started_at_utc` is the receiver-stamped time of its first action
-on that task. `actual_minutes` is active wall-clock time from that stamp to
+on that task. The canonical finalizer requires that stamp on every checkpoint
+and `done`/`error` write, reuses the record's value when the caller omits
+`--started-at`, and rejects a conflicting replacement. `actual_minutes` is
+active wall-clock time from that stamp to
 completion or the current checkpoint, rounded up to a whole minute, excluding
 each represented re-authorization pause from `paused_at_utc` through
 `cleared_paused_at_utc`. If a terminal outcome leaves that pause uncleared,
@@ -1057,7 +1145,9 @@ Arbitration rules:
   visibility) are receiver-side authority only, on the scoped and
   scope-less paths alike. The party whose under-declaration caused the
   breach cannot self-serve unlimited scope. Without a resolvable receiver
-  policy the sender channel extends nothing (fail closed).
+  policy the sender channel extends nothing (fail closed) — the finalizer
+  resolves the policy from the record's `policy_path`, overridable with
+  `--config`.
 - **GH comments never clear a checkpoint.** They sit outside the protocol's
   identity and verification boundary; any decision they carry is recorded as
   advisory, and a checkpoint answered only by a GH comment stays paused.
@@ -1240,7 +1330,7 @@ The envelope is written to
 ```json
 {
   "envelope_version": 1,
-  "spec_version": "0.4.3",
+  "spec_version": "0.4.5",
   "compiler": "envelope_compiler.py",
   "compiled_at_utc": "2026-07-12T02:00:00Z",
   "project": "my-project",

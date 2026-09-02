@@ -11,9 +11,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from add_agent import add_agent, main  # noqa: E402
+from add_agent import (  # noqa: E402
+    CLAUDE_SUPPORTED_MESSAGE_TYPES,
+    CODEX_SUPPORTED_MESSAGE_TYPES,
+    add_agent,
+    main,
+)
 
 
 class TestAddAgent(unittest.TestCase):
@@ -93,6 +100,51 @@ class TestAddAgent(unittest.TestCase):
             self.assertIn('name: "cursor"', card)
             self.assertIn('runtime: "cursor"', card)
             self.assertIn('description: "cursor agent (cursor runtime)"', card)
+            self.assertNotIn("handoff_complete", card)
+
+    def test_claude_runtime_uses_truthful_status_and_complete_message_types(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            oacp_root = self._make_project(Path(tmpdir))
+            result = add_agent(
+                "demo", "claude", oacp_root=oacp_root, runtime="claude"
+            )
+
+            agent_dir = result["agent_dir"]
+            status = yaml.safe_load(
+                (agent_dir / "status.yaml").read_text(encoding="utf-8")
+            )
+            card = yaml.safe_load(
+                (agent_dir / "agent_card.yaml").read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(status["model"], "unknown")
+            message_types = card["protocol"]["supported_message_types"]
+            self.assertEqual(set(message_types), set(CLAUDE_SUPPORTED_MESSAGE_TYPES))
+            self.assertEqual(len(message_types), len(CLAUDE_SUPPORTED_MESSAGE_TYPES))
+
+    def test_codex_runtime_uses_truthful_status_and_complete_message_types(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            oacp_root = self._make_project(Path(tmpdir))
+            result = add_agent(
+                "demo", "codex", oacp_root=oacp_root, runtime="codex"
+            )
+
+            agent_dir = result["agent_dir"]
+            status = yaml.safe_load(
+                (agent_dir / "status.yaml").read_text(encoding="utf-8")
+            )
+            card = yaml.safe_load(
+                (agent_dir / "agent_card.yaml").read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(status["model"], "unknown")
+            message_types = card["protocol"]["supported_message_types"]
+            self.assertEqual(set(message_types), set(CODEX_SUPPORTED_MESSAGE_TYPES))
+            self.assertEqual(len(message_types), len(CODEX_SUPPORTED_MESSAGE_TYPES))
 
     def test_no_optional_files_without_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
