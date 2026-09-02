@@ -1,0 +1,65 @@
+schema_version: 2
+spec_version: "0.4.3"
+created_at_utc: "2026-08-01T01:09:00Z"
+receiver: claude
+sender: alice
+message_id: msg-20260801010900-alice-0290
+message_sha256: 1f0290aa
+decision: paused
+mode: auto_review
+reason_codes:
+- estimated_minutes_exceeds_threshold
+evaluation_id: eval-0000000000000290
+supersedes_evaluation_id: null
+result:
+  final_state: done
+  completion_kind: checkpoint_paused
+  actual_minutes: 69
+  actual_files_touched: 3
+  work_started_at_utc: "2026-08-01T01:12:00Z"
+  predicted_risk_materialized: true
+  completed_at_utc: "2026-08-01T02:25:00Z"
+  envelope_enforcement: none
+  reply_message_id: msg-20260801022500-claude-0290
+  artifacts: []
+  threshold_checkpoint:
+    evaluated: true
+    actual_minutes: 69
+    actual_files_touched: 3
+    side_effects_actual: {}
+    breached: true
+    breached_fields:
+    - actual_minutes
+    declaration_errors: []
+    breach_basis: realized
+    breach_sub_basis: null
+    paused_at_utc: "2026-08-01T02:21:00Z"
+    action: resumed_after_reauthorization
+    predicted_risk_materialized: true
+    completed_at_utc: "2026-08-01T02:25:00Z"
+    reauthorization:
+      presented: false
+      channel: null
+      decision: null
+      decided_at_utc: null
+      actor: null
+      source_message_id: null
+      requested_scope: null
+      scope: null
+      disposition: unanswered
+      cleared_paused_at_utc: null
+      advisory: []
+  human_outcome:
+    recorded: true
+    actor: alice
+    decision: approved
+    decided_at_utc: "2026-08-01T02:24:00Z"
+    decision_latency_seconds: 180
+    pause_reason_codes:
+    - threshold_checkpoint_breached
+    grant:
+      decision: not_recorded
+      request_present: false
+      request_error: null
+      requested_scope: null
+      granted_scope: null

@@ -3,9 +3,12 @@
 # scripts/finalize_autonomy_record.py FINDING_SEVERITIES; the runner is
 # tests/test_audit_record_conformance.py, which sweeps this directory and
 # compares exact code multisets.
+admission_outcome_replaced_by_clear.yaml:
+- admission_outcome_replaced_by_checkpoint_clear
 breached_empty_fields.yaml:
 - breached_empty_fields
 breach_basis_source_mismatch.yaml:
+- terminal_missing_work_started_at
 - breach_basis_incoherent
 clean_terminal_done.yaml: []
 duplicate_live_a.yaml:
@@ -41,6 +44,7 @@ superseded_unrelated_successor.yaml:
 unrelated_identity_holder_live.yaml: []
 paused_terminal_action_unreconciled.yaml:
 - paused_terminal_checkpoint_action
+- terminal_missing_work_started_at
 paused_terminal_completed_stamp.yaml:
 - paused_terminal_completed
 serialized_wave_item.yaml: []

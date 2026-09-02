@@ -12,8 +12,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
+from add_agent import (  # noqa: E402
+    CLAUDE_SUPPORTED_MESSAGE_TYPES,
+    CODEX_SUPPORTED_MESSAGE_TYPES,
+)
 from setup_runtime import setup_runtime  # noqa: E402
 
 
@@ -100,6 +106,195 @@ class TestSetupRuntime(unittest.TestCase):
             self.assertEqual(handler["timeout"], 60)
             self.assertIn("AGENTS.md", result["created_files"])
             self.assertIn(".codex/hooks.json", result["created_files"])
+
+    def test_claude_setup_refreshes_only_missing_agent_card_message_types(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_dir = root / "repo"
+            oacp_root = root / "oacp-home"
+            card_path = (
+                oacp_root
+                / "projects"
+                / "demo"
+                / "agents"
+                / "claude"
+                / "agent_card.yaml"
+            )
+            card_path.parent.mkdir(parents=True)
+            card_path.write_text(
+                """# preserve this comment
+version: "0.2.0"
+name: claude
+runtime: claude
+protocol:
+  inbox_path: agents/claude/inbox/
+  outbox_path: agents/claude/outbox/
+  supported_message_types:
+    - task_request
+    - review_request
+""",
+                encoding="utf-8",
+            )
+
+            first = setup_runtime(
+                "claude",
+                repo_dir=repo_dir,
+                project_name="demo",
+                oacp_root=oacp_root,
+            )
+            second = setup_runtime(
+                "claude",
+                repo_dir=repo_dir,
+                project_name="demo",
+                oacp_root=oacp_root,
+            )
+
+            raw = card_path.read_text(encoding="utf-8")
+            card = yaml.safe_load(raw)
+            self.assertIn("# preserve this comment", raw)
+            message_types = card["protocol"]["supported_message_types"]
+            self.assertEqual(set(message_types), set(CLAUDE_SUPPORTED_MESSAGE_TYPES))
+            self.assertEqual(len(message_types), len(CLAUDE_SUPPORTED_MESSAGE_TYPES))
+            self.assertIn(
+                "agents/claude/agent_card.yaml", first["project_created_files"]
+            )
+            self.assertIn(
+                "agents/claude/agent_card.yaml", second["project_skipped_files"]
+            )
+
+    def test_claude_setup_without_project_leaves_agent_cards_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir) / "repo"
+
+            result = setup_runtime("claude", repo_dir=repo_dir)
+
+            self.assertEqual(result["project_created_files"], [])
+            self.assertEqual(result["project_skipped_files"], [])
+
+    def test_codex_setup_refreshes_only_missing_agent_card_message_types(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo_dir = root / "repo"
+            oacp_root = root / "oacp-home"
+            card_path = (
+                oacp_root / "projects" / "demo" / "agents" / "codex" / "agent_card.yaml"
+            )
+            card_path.parent.mkdir(parents=True)
+            card_path.write_text(
+                """# preserve this comment
+version: "0.2.0"
+name: codex
+runtime: codex
+protocol:
+  inbox_path: agents/codex/inbox/
+  outbox_path: agents/codex/outbox/
+  supported_message_types:
+    - task_request
+""",
+                encoding="utf-8",
+            )
+
+            first = setup_runtime(
+                "codex",
+                repo_dir=repo_dir,
+                project_name="demo",
+                oacp_root=oacp_root,
+            )
+            second = setup_runtime(
+                "codex",
+                repo_dir=repo_dir,
+                project_name="demo",
+                oacp_root=oacp_root,
+            )
+
+            raw = card_path.read_text(encoding="utf-8")
+            card = yaml.safe_load(raw)
+            self.assertIn("# preserve this comment", raw)
+            message_types = card["protocol"]["supported_message_types"]
+            self.assertEqual(set(message_types), set(CODEX_SUPPORTED_MESSAGE_TYPES))
+            self.assertEqual(len(message_types), len(CODEX_SUPPORTED_MESSAGE_TYPES))
+            self.assertIn(
+                "agents/codex/agent_card.yaml", first["project_created_files"]
+            )
+            self.assertIn(
+                "agents/codex/agent_card.yaml", second["project_skipped_files"]
+            )
+
+    def test_agent_card_refresh_handles_valid_formatting_variants(self) -> None:
+        variants = {
+            "indentationless-sequence": (
+                'version: "0.2.0"\n'
+                "name: {agent}\n"
+                "runtime: {agent}\n"
+                "protocol:\n"
+                "  inbox_path: agents/{agent}/inbox/\n"
+                "  outbox_path: agents/{agent}/outbox/\n"
+                "  supported_message_types:\n"
+                "  - task_request\n"
+                "  - review_request\n"
+            ),
+            "no-final-newline": (
+                'version: "0.2.0"\n'
+                "name: {agent}\n"
+                "runtime: {agent}\n"
+                "protocol:\n"
+                "  inbox_path: agents/{agent}/inbox/\n"
+                "  outbox_path: agents/{agent}/outbox/\n"
+                "  supported_message_types:\n"
+                "    - task_request\n"
+                "    - review_request"
+            ),
+        }
+        required = {
+            "claude": CLAUDE_SUPPORTED_MESSAGE_TYPES,
+            "codex": CODEX_SUPPORTED_MESSAGE_TYPES,
+        }
+        for runtime, required_types in required.items():
+            for label, template in variants.items():
+                with self.subTest(runtime=runtime, variant=label):
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        root = Path(tmpdir)
+                        repo_dir = root / "repo"
+                        oacp_root = root / "oacp-home"
+                        card_path = (
+                            oacp_root
+                            / "projects"
+                            / "demo"
+                            / "agents"
+                            / runtime
+                            / "agent_card.yaml"
+                        )
+                        card_path.parent.mkdir(parents=True)
+                        card_path.write_text(
+                            template.format(agent=runtime), encoding="utf-8"
+                        )
+
+                        setup_runtime(
+                            runtime,
+                            repo_dir=repo_dir,
+                            project_name="demo",
+                            oacp_root=oacp_root,
+                        )
+                        after_first = card_path.read_text(encoding="utf-8")
+                        setup_runtime(
+                            runtime,
+                            repo_dir=repo_dir,
+                            project_name="demo",
+                            oacp_root=oacp_root,
+                        )
+                        after_second = card_path.read_text(encoding="utf-8")
+
+                        existing = ["task_request", "review_request"]
+                        expected = existing + [
+                            item
+                            for item in required_types
+                            if item not in existing
+                        ]
+                        card = yaml.safe_load(after_first)
+                        self.assertEqual(
+                            card["protocol"]["supported_message_types"], expected
+                        )
+                        self.assertEqual(after_second, after_first)
 
     def test_gemini_creates_rules_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -32,6 +32,36 @@ AGENT_SUBDIRS = (
     "audit/autonomy_decisions",
 )
 
+CODEX_SUPPORTED_MESSAGE_TYPES = (
+    "task_request",
+    "question",
+    "notification",
+    "handoff",
+    "handoff_complete",
+    "review_request",
+    "review_feedback",
+    "review_addressed",
+    "review_lgtm",
+    "follow_up",
+    "brainstorm_request",
+    "brainstorm_followup",
+)
+
+CLAUDE_SUPPORTED_MESSAGE_TYPES = (
+    "task_request",
+    "question",
+    "notification",
+    "handoff",
+    "handoff_complete",
+    "review_request",
+    "review_feedback",
+    "review_addressed",
+    "review_lgtm",
+    "follow_up",
+    "brainstorm_request",
+    "brainstorm_followup",
+)
+
 
 def _load_runtime_capabilities() -> Dict[str, Any]:
     """Load runtime_capabilities.yaml template."""
@@ -58,9 +88,12 @@ def _render_status_yaml(
     agent_name: str, runtime: str, caps: Dict[str, Any]
 ) -> str:
     """Render a status.yaml for the agent from the capabilities template."""
+    model = str(caps.get("model", runtime)).strip() or "unknown"
+    if runtime in ("claude", "codex") and model == runtime:
+        model = "unknown"
     lines = [
         f"runtime: {runtime}",
-        f"model: {caps.get('model', runtime)}",
+        f"model: {model}",
         "status: available",
         'current_task: ""',
         "capabilities:",
@@ -139,7 +172,116 @@ def _render_agent_card_yaml(
         f'outbox_path: "agents/{agent_name}/outbox/"',
         1,
     )
+    if runtime == "claude":
+        template, _ = _merge_supported_message_types_yaml(
+            template,
+            CLAUDE_SUPPORTED_MESSAGE_TYPES,
+        )
+    elif runtime == "codex":
+        template, _ = _merge_supported_message_types_yaml(
+            template,
+            CODEX_SUPPORTED_MESSAGE_TYPES,
+        )
     return template
+
+
+def _merge_supported_message_types_yaml(
+    raw: str,
+    required_types: Sequence[str],
+) -> tuple[str, bool]:
+    """Append missing message types while preserving an agent card's formatting."""
+    if yaml is None:
+        raise RuntimeError("PyYAML is required: pip install pyyaml")
+    try:
+        payload = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"invalid agent card YAML: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("agent card must contain a top-level mapping")
+    protocol = payload.get("protocol")
+    if not isinstance(protocol, dict):
+        raise ValueError("agent card protocol must be a mapping")
+    current_types = protocol.get("supported_message_types")
+    if not isinstance(current_types, list) or not all(
+        isinstance(item, str) for item in current_types
+    ):
+        raise ValueError("agent card supported_message_types must be a list of strings")
+
+    missing_types = [item for item in required_types if item not in current_types]
+    if not missing_types:
+        return raw, False
+
+    lines = raw.splitlines(keepends=True)
+    field_index: Optional[int] = None
+    field_indent = 0
+    for index, line in enumerate(lines):
+        content = line.rstrip("\r\n")
+        stripped = content.lstrip(" ")
+        if stripped.startswith("supported_message_types:"):
+            suffix = stripped.removeprefix("supported_message_types:").strip()
+            if suffix and not suffix.startswith("#"):
+                raise ValueError(
+                    "agent card supported_message_types must use block-list syntax"
+                )
+            field_index = index
+            field_indent = len(content) - len(stripped)
+            break
+    if field_index is None:
+        raise ValueError("agent card is missing protocol.supported_message_types")
+
+    # Walk the item lines to find where the list ends. Block-sequence items may
+    # sit at the SAME indentation as the key (valid YAML), so the item indent is
+    # taken from the first item actually found, never assumed deeper.
+    insert_index: Optional[int] = None
+    item_prefix: Optional[str] = None
+    item_indent = 0
+    for index in range(field_index + 1, len(lines)):
+        content = lines[index].rstrip("\r\n")
+        stripped = content.lstrip(" ")
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(content) - len(stripped)
+        if item_prefix is None:
+            if indent >= field_indent and stripped.startswith("- "):
+                item_prefix = content[:indent]
+                item_indent = indent
+                insert_index = index + 1
+                continue
+            break
+        if (indent == item_indent and stripped.startswith("- ")) or indent > item_indent:
+            insert_index = index + 1
+            continue
+        break
+    if item_prefix is None or insert_index is None:
+        raise ValueError("failed to locate supported_message_types list items")
+
+    newline = "\r\n" if "\r\n" in raw else "\n"
+    additions = [f"{item_prefix}- {item}{newline}" for item in missing_types]
+    head = list(lines[:insert_index])
+    if head and not head[-1].endswith(("\n", "\r")):
+        head[-1] += newline
+    updated = "".join([*head, *additions, *lines[insert_index:]])
+
+    try:
+        updated_payload = yaml.safe_load(updated)
+        updated_types = updated_payload["protocol"]["supported_message_types"]
+    except (yaml.YAMLError, KeyError, TypeError) as exc:
+        raise ValueError(f"failed to preserve agent card YAML structure: {exc}") from exc
+    if updated_types != [*current_types, *missing_types]:
+        raise ValueError("failed to preserve required supported message types")
+    return updated, True
+
+
+def ensure_agent_card_message_types(
+    card_path: Path,
+    required_types: Sequence[str],
+) -> bool:
+    """Update one existing card with missing message types only."""
+    raw = card_path.read_text(encoding="utf-8")
+    updated, changed = _merge_supported_message_types_yaml(raw, required_types)
+    if changed:
+        card_path.write_text(updated, encoding="utf-8")
+    return changed
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:

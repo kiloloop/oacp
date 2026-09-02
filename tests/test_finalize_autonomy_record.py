@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from finalize_autonomy_record import (  # noqa: E402
     CANONICAL_CHECKPOINT_AXES,
     DuplicateKeyError,
+    FINALIZER_PROVENANCE,
     _predecessor_evaluation_id,
     apply_checkpoint,
     finalize_audit_record,
@@ -124,9 +125,62 @@ def test_clean_finalized_record_validates_clean() -> None:
         "final_state": "done",
         "actual_minutes": 20,
         "actual_files_touched": 2,
+        "work_started_at_utc": "2026-08-01T01:40:00Z",
         "completed_at_utc": "2026-08-01T02:00:00Z",
     })
     assert validate_audit_record(record) == []
+
+
+def test_validator_flags_legacy_terminal_without_work_start() -> None:
+    record = _record(human_outcome=_human_outcome())
+    record["result"].update({
+        "final_state": "done",
+        "actual_minutes": 20,
+        "actual_files_touched": 2,
+        "completed_at_utc": "2026-08-01T02:00:00Z",
+    })
+
+    findings = validate_audit_record(record)
+
+    assert findings == [{
+        "code": "terminal_missing_work_started_at",
+        "severity": "advisory",
+        "detail": (
+            "<record>: completed record has no result.work_started_at_utc "
+            "(legacy receipt; flag without rewriting history)"
+        ),
+    }]
+
+
+def test_validator_rejects_canonical_receipt_without_work_start() -> None:
+    record = _record(human_outcome=_human_outcome())
+    record["result"].update({
+        "final_state": "done",
+        "actual_minutes": 20,
+        "actual_files_touched": 2,
+        "completed_at_utc": "2026-08-01T02:00:00Z",
+        "finalizer": dict(FINALIZER_PROVENANCE),
+    })
+
+    findings = validate_audit_record(record)
+
+    assert [finding["code"] for finding in findings] == [
+        "canonical_writer_missing_work_started_at"
+    ]
+
+
+def test_validator_rejects_invalid_finalizer_provenance() -> None:
+    record = _record()
+    record["result"]["finalizer"] = {
+        "name": "local yaml edit",
+        "schema_version": 1,
+    }
+
+    findings = validate_audit_record(record)
+
+    assert [finding["code"] for finding in findings] == [
+        "invalid_finalizer_provenance"
+    ]
 
 
 def test_off_enum_completion_kind_maps_legacy_vocabulary() -> None:
@@ -308,7 +362,12 @@ def test_sweep_reports_duplicate_yaml_key(tmp_path: Path) -> None:
 def test_checkpoint_within_envelope_keeps_run_state() -> None:
     record = _record(decision="auto_accepted", completion_kind="auto_accepted", final_state="done")
     updated, paused = apply_checkpoint(
-        record, {"actual_minutes": 10, "actual_files_touched": 2}
+        record,
+        {
+            "actual_minutes": 10,
+            "actual_files_touched": 2,
+            "work_started_at_utc": "2026-08-01T01:20:00Z",
+        },
     )
     assert paused is False
     assert updated["result"]["completion_kind"] == "auto_accepted"
@@ -318,7 +377,12 @@ def test_checkpoint_within_envelope_keeps_run_state() -> None:
 def test_checkpoint_breach_writes_paused_shape() -> None:
     record = _record(decision="auto_accepted", completion_kind="auto_accepted", final_state="done")
     updated, paused = apply_checkpoint(
-        record, {"actual_minutes": 90, "actual_files_touched": 2}
+        record,
+        {
+            "actual_minutes": 90,
+            "actual_files_touched": 2,
+            "work_started_at_utc": "2026-08-01T01:20:00Z",
+        },
     )
     assert paused is True
     result = updated["result"]
@@ -350,6 +414,8 @@ def test_finalize_done_records_terminal_checkpoint(tmp_path: Path) -> None:
         actuals={
             "actual_minutes": 20,
             "actual_files_touched": 3,
+            "work_started_at_utc": "2026-08-01T01:40:00Z",
+            "completed_at_utc": "2026-08-01T02:00:00Z",
             "side_effects_actual": {"creates_or_updates_pr": True, "commits_changes": True},
         },
         reply_message_id="msg-20260801020000-claude-9999",
@@ -386,7 +452,11 @@ def test_finalize_done_pauses_on_terminal_breach(tmp_path: Path) -> None:
         path,
         record,
         final_state="done",
-        actuals={"actual_minutes": 20, "actual_files_touched": 9},
+        actuals={
+            "actual_minutes": 20,
+            "actual_files_touched": 9,
+            "work_started_at_utc": "2026-08-01T01:40:00Z",
+        },
     )
     assert paused is True
     assert updated["result"]["final_state"] == "paused"
@@ -403,6 +473,7 @@ def test_finalize_done_refuses_undeclared_realized_side_effect(tmp_path: Path) -
         actuals={
             "actual_minutes": 5,
             "actual_files_touched": 1,
+            "work_started_at_utc": "2026-08-01T01:55:00Z",
             "side_effects_actual": {"merges_pr": True},
         },
     )
@@ -426,7 +497,7 @@ def test_finalize_reconciles_resolved_checkpoint(tmp_path: Path) -> None:
         "breached_fields": ["actual_minutes"],
         "declaration_errors": [],
         "breach_basis": "realized",
-        "paused_at_utc": "2026-08-01T01:30:00Z",
+        "paused_at_utc": "2026-08-01T02:00:00Z",
         "action": "paused_for_reauthorization",
         "reauthorization": {
             "presented": True,
@@ -435,6 +506,7 @@ def test_finalize_reconciles_resolved_checkpoint(tmp_path: Path) -> None:
             "disposition": "resumed",
         },
     }
+    record["result"]["work_started_at_utc"] = "2026-08-01T01:10:00Z"
     path = _write(tmp_path, record)
     # A scope-less approval covers exactly the extent recorded at the
     # pause, so the terminal actuals may not exceed it.
@@ -563,7 +635,12 @@ def test_finalize_error_state_allowed_without_outcome(tmp_path: Path) -> None:
         path,
         record,
         final_state="error",
-        actuals={"actual_minutes": 3, "actual_files_touched": 0},
+        actuals={
+            "actual_minutes": 3,
+            "actual_files_touched": 0,
+            "work_started_at_utc": "2026-08-01T01:57:00Z",
+            "completed_at_utc": "2026-08-01T02:00:00Z",
+        },
     )
     assert paused is False
     assert updated["result"]["final_state"] == "error"
@@ -581,6 +658,8 @@ def test_cli_finalizes_done(tmp_path: Path) -> None:
         "--final-state", "done",
         "--actual-minutes", "20",
         "--actual-files-touched", "3",
+        "--started-at", "2026-08-01T01:40:00Z",
+        "--completed-at", "2026-08-01T02:00:00Z",
         "--realized", "creates_or_updates_pr",
         "--realized", "commits_changes",
         "--reply-message-id", "msg-20260801020000-claude-9999",
@@ -589,9 +668,51 @@ def test_cli_finalizes_done(tmp_path: Path) -> None:
     stored = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert stored["result"]["final_state"] == "done"
     assert stored["result"]["reply_message_id"] == "msg-20260801020000-claude-9999"
+    assert stored["result"]["finalizer"] == FINALIZER_PROVENANCE
 
 
-def test_cli_started_at_derives_serialized_item_minutes(tmp_path: Path) -> None:
+def test_cli_done_without_work_start_fails_without_mutation(tmp_path: Path) -> None:
+    record = _record(human_outcome=_human_outcome())
+    path = _write(tmp_path, record)
+    original = path.read_bytes()
+
+    rc = main([
+        str(path),
+        "--final-state", "done",
+        "--actual-minutes", "1",
+        "--actual-files-touched", "0",
+        "--completed-at", "2026-08-01T02:00:00Z",
+    ])
+
+    assert rc == 2
+    assert path.read_bytes() == original
+
+
+def test_cli_checkpoint_without_work_start_fails_without_mutation(
+    tmp_path: Path,
+) -> None:
+    record = _record(
+        decision="auto_accepted",
+        completion_kind="auto_accepted",
+        final_state="pending",
+    )
+    path = _write(tmp_path, record)
+    original = path.read_bytes()
+
+    rc = main([
+        str(path),
+        "--checkpoint",
+        "--actual-minutes", "1",
+        "--actual-files-touched", "0",
+    ])
+
+    assert rc == 2
+    assert path.read_bytes() == original
+
+
+def test_cli_recorded_start_fallback_derives_serialized_item_minutes(
+    tmp_path: Path,
+) -> None:
     envelope = dict(ENVELOPE)
     envelope["estimated_minutes"] = 30
     record = _record(
@@ -600,12 +721,12 @@ def test_cli_started_at_derives_serialized_item_minutes(tmp_path: Path) -> None:
         final_state="done",
         envelope=envelope,
     )
+    record["result"]["work_started_at_utc"] = "2026-08-01T01:20:00Z"
     path = _write(tmp_path, record)
 
     rc = main([
         str(path),
         "--final-state", "done",
-        "--started-at", "2026-08-01T01:20:00Z",
         "--completed-at", "2026-08-01T01:45:00Z",
         "--actual-files-touched", "1",
     ])
@@ -618,8 +739,68 @@ def test_cli_started_at_derives_serialized_item_minutes(tmp_path: Path) -> None:
     assert result["threshold_checkpoint"]["breached"] is False
 
 
+def test_cli_replace_without_actuals_preserves_recorded_work_clock(
+    tmp_path: Path,
+) -> None:
+    record = _record(
+        decision="auto_accepted",
+        completion_kind="auto_accepted",
+        final_state="done",
+    )
+    record.pop("scope_envelope")
+    record["result"].update({
+        "actual_minutes": 18,
+        "actual_files_touched": 3,
+        "work_started_at_utc": "2026-08-01T01:42:00Z",
+        "completed_at_utc": "2026-08-01T02:00:00Z",
+        "reply_message_id": "msg-20260801020000-claude-old",
+    })
+    path = _write(tmp_path, record)
+
+    rc = main([
+        str(path),
+        "--final-state", "done",
+        "--replace",
+        "--reply-message-id", "msg-20260801020500-claude-new",
+    ])
+
+    assert rc == 0
+    stored = yaml.safe_load(path.read_text(encoding="utf-8"))
+    result = stored["result"]
+    assert result["actual_minutes"] == 18
+    assert result["actual_files_touched"] == 3
+    assert result["work_started_at_utc"] == "2026-08-01T01:42:00Z"
+    assert result["completed_at_utc"] == "2026-08-01T02:00:00Z"
+    assert result["reply_message_id"] == "msg-20260801020500-claude-new"
+
+
+def test_cli_started_at_conflict_with_record_stamp_is_refused(
+    tmp_path: Path,
+) -> None:
+    record = _record(
+        decision="auto_accepted",
+        completion_kind="auto_accepted",
+        final_state="done",
+    )
+    record["result"]["work_started_at_utc"] = "2026-08-01T01:20:00Z"
+    path = _write(tmp_path, record)
+    original = path.read_bytes()
+
+    rc = main([
+        str(path),
+        "--final-state", "done",
+        "--started-at", "2026-08-01T01:21:00Z",
+        "--completed-at", "2026-08-01T01:45:00Z",
+        "--actual-files-touched", "1",
+    ])
+
+    assert rc == 2
+    assert path.read_bytes() == original
+
+
 def test_cli_started_at_excludes_reauthorization_pause(tmp_path: Path) -> None:
     record = _resolved_checkpoint_record()
+    record["result"].pop("work_started_at_utc")
     checkpoint = _gate_checkpoint("approved")
     record["result"]["threshold_checkpoint"] = checkpoint
     assert checkpoint["reauthorization"]["cleared_paused_at_utc"] == (
@@ -642,6 +823,7 @@ def test_cli_started_at_excludes_reauthorization_pause(tmp_path: Path) -> None:
 
 def test_uncleared_pause_conformance_record_finalizes_error(tmp_path: Path) -> None:
     record = _resolved_checkpoint_record()
+    record["result"].pop("work_started_at_utc")
     checkpoint = _gate_checkpoint("declined")
     record["result"]["threshold_checkpoint"] = checkpoint
     assert checkpoint["action"] == "reauthorization_declined"
@@ -691,6 +873,7 @@ def test_cli_checkpoint_breach_exits_4(tmp_path: Path) -> None:
         "--checkpoint",
         "--actual-minutes", "90",
         "--actual-files-touched", "2",
+        "--started-at", "2026-08-01T01:20:00Z",
     ])
     assert rc == 4
     stored = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -705,6 +888,26 @@ def test_cli_validate_reports_findings(tmp_path: Path, capsys: pytest.CaptureFix
     captured = capsys.readouterr()
     assert rc == 2
     assert "off_enum" in captured.out or "off-enum" in captured.out
+
+
+def test_cli_validate_flags_legacy_missing_work_start(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    record = _record(human_outcome=_human_outcome())
+    record["result"].update({
+        "final_state": "done",
+        "actual_minutes": 1,
+        "actual_files_touched": 0,
+        "completed_at_utc": "2026-08-01T02:00:00Z",
+    })
+    path = _write(tmp_path, record)
+
+    rc = main([str(path), "--validate", "--json"])
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "terminal_missing_work_started_at" in captured.out
 
 
 def test_cli_validate_sweep_clean_dir(tmp_path: Path) -> None:
@@ -753,7 +956,7 @@ def _resolved_checkpoint_record(reauth_scope: Optional[Dict[str, Any]] = None) -
         "presented": True,
         "channel": "receiver_human",
         "decision": "approved",
-        "decided_at_utc": "2026-08-01T01:40:00Z",
+        "decided_at_utc": "2026-08-01T02:10:00Z",
         "disposition": "resumed",
     }
     if reauth_scope is not None:
@@ -767,10 +970,11 @@ def _resolved_checkpoint_record(reauth_scope: Optional[Dict[str, Any]] = None) -
         "breached_fields": ["actual_minutes"],
         "declaration_errors": [],
         "breach_basis": "realized",
-        "paused_at_utc": "2026-08-01T01:30:00Z",
+        "paused_at_utc": "2026-08-01T02:00:00Z",
         "action": "paused_for_reauthorization",
         "reauthorization": reauth,
     }
+    record["result"]["work_started_at_utc"] = "2026-08-01T01:10:00Z"
     return record
 
 
@@ -816,6 +1020,7 @@ def _clean_done_record() -> Dict[str, Any]:
         "final_state": "done",
         "actual_minutes": 20,
         "actual_files_touched": 2,
+        "work_started_at_utc": "2026-08-01T01:40:00Z",
         "completed_at_utc": "2026-08-01T02:00:00Z",
         "threshold_checkpoint": {
             "evaluated": True,
@@ -955,6 +1160,7 @@ def test_declared_intent_checkpoint_round_trips_through_read_back() -> None:
         {
             "actual_minutes": 1,
             "actual_files_touched": 0,
+            "work_started_at_utc": "2026-08-01T01:20:00Z",
             "declared_intent_fields": ["task_profile.merges_pr"],
             "paused_at_utc": "2026-08-01T01:30:00Z",
         },
@@ -991,6 +1197,7 @@ def test_checkpoint_round_trips_waiting_on_peer_through_read_back() -> None:
         {
             "actual_minutes": 60,
             "actual_files_touched": 1,
+            "work_started_at_utc": "2026-08-01T01:20:00Z",
             "breach_sub_basis": "waiting_on_peer",
             "paused_at_utc": "2026-08-01T01:30:00Z",
         },
@@ -1004,7 +1211,12 @@ def test_checkpoint_round_trips_waiting_on_peer_through_read_back() -> None:
     with pytest.raises(ValueError, match="breach_sub_basis"):
         apply_checkpoint(
             record,
-            {"actual_minutes": 60, "actual_files_touched": 1, "breach_sub_basis": "reviewing"},
+            {
+                "actual_minutes": 60,
+                "actual_files_touched": 1,
+                "work_started_at_utc": "2026-08-01T01:20:00Z",
+                "breach_sub_basis": "reviewing",
+            },
         )
 
 
@@ -1080,6 +1292,7 @@ def test_reconcile_scoped_budget_allows_growth_within_budget(tmp_path: Path) -> 
     record = _resolved_checkpoint_record(
         reauth_scope={"max_actual_minutes": 60, "max_actual_files_touched": 5}
     )
+    record["result"]["work_started_at_utc"] = "2026-08-01T01:05:00Z"
     path = _write(tmp_path, record)
     updated, paused = finalize_audit_record(
         path,
@@ -1360,3 +1573,314 @@ def test_resupersede_refused(tmp_path: Path) -> None:
             actuals={},
             superseded_by="eval-fedcba9876543210",
         )
+
+
+# ── receiver-policy threading for re-authorization arbitration ────────────
+
+
+POLICY_YAML = """\
+autonomy:
+  default_mode: auto_review
+  auto_review_thresholds:
+    max_estimated_minutes: 45
+    max_expected_files_touched: 5
+    destructive_ops: pause
+    external_side_effects: allow_pr_artifacts
+    auth_config_or_secrets: pause
+    dependency_changes: pause
+    public_visibility: pause
+    git_push_or_deploy: pause
+  allow_without_task_profile:
+    - brainstorm_request
+  private_repo_allowlist:
+    - acme/widgets
+"""
+
+
+def _sender_reauth_setup(
+    tmp_path: Path,
+    *,
+    scope_minutes: int = 44,
+    actual_minutes: int = 40,
+    policy: bool = True,
+) -> tuple[Path, Path]:
+    """An accepted 30-minute envelope, a breach, and a sender re-auth."""
+    envelope = dict(ENVELOPE)
+    envelope["estimated_minutes"] = 30
+    record = _record(
+        decision="auto_accepted",
+        completion_kind="auto_accepted",
+        final_state="pending",
+        envelope=envelope,
+    )
+    if policy:
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(POLICY_YAML, encoding="utf-8")
+        record["policy_path"] = str(config_path)
+    record_path = _write(tmp_path, record)
+    actuals_path = tmp_path / "actuals.yaml"
+    actuals_path.write_text(
+        yaml.safe_dump({
+            "work_started_at_utc": "2026-08-01T01:05:00Z",
+            "actual_minutes": actual_minutes,
+            "actual_files_touched": 1,
+            "paused_at_utc": "2026-08-01T01:45:00Z",
+            "side_effects_actual": {
+                "creates_or_updates_pr": False,
+                "comments_on_github": False,
+                "commits_changes": False,
+            },
+            "reauthorization": {
+                "sender_reply": {
+                    "decision": "approved",
+                    "decided_at_utc": "2026-08-01T01:50:00Z",
+                    "source_message_id": "msg-20260801015000-alice-re01",
+                    "scope": {"max_actual_minutes": scope_minutes},
+                },
+            },
+        }, sort_keys=False),
+        encoding="utf-8",
+    )
+    return record_path, actuals_path
+
+
+def test_cli_checkpoint_arbitrates_sender_reply_under_record_policy(
+    tmp_path: Path,
+) -> None:
+    record_path, actuals_path = _sender_reauth_setup(tmp_path)
+
+    rc = main([str(record_path), "--checkpoint", "--actuals", str(actuals_path)])
+
+    assert rc == 0
+    stored = yaml.safe_load(record_path.read_text(encoding="utf-8"))
+    checkpoint = stored["result"]["threshold_checkpoint"]
+    assert checkpoint["action"] == "resumed_after_reauthorization"
+    reauth = checkpoint["reauthorization"]
+    assert reauth["channel"] == "sender_reply"
+    assert reauth["disposition"] == "resumed"
+    assert reauth["scope"]["max_actual_minutes"] == 44
+    assert reauth["cleared_paused_at_utc"] == "2026-08-01T01:50:00Z"
+
+
+def test_cli_checkpoint_caps_sender_scope_at_receiver_thresholds(
+    tmp_path: Path,
+) -> None:
+    record_path, actuals_path = _sender_reauth_setup(
+        tmp_path, scope_minutes=60, actual_minutes=50
+    )
+
+    rc = main([str(record_path), "--checkpoint", "--actuals", str(actuals_path)])
+
+    assert rc == 4
+    stored = yaml.safe_load(record_path.read_text(encoding="utf-8"))
+    reauth = stored["result"]["threshold_checkpoint"]["reauthorization"]
+    assert reauth["disposition"] == "insufficient"
+    assert reauth["requested_scope"]["max_actual_minutes"] == 60
+    assert reauth["scope"]["max_actual_minutes"] == 45
+
+
+def test_cli_checkpoint_without_resolvable_policy_fails_closed(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    record_path, actuals_path = _sender_reauth_setup(tmp_path, policy=False)
+
+    rc = main([str(record_path), "--checkpoint", "--actuals", str(actuals_path)])
+
+    assert rc == 4
+    err = capsys.readouterr().err
+    assert "receiver policy unresolvable" in err
+    assert "fail closed" in err
+    stored = yaml.safe_load(record_path.read_text(encoding="utf-8"))
+    reauth = stored["result"]["threshold_checkpoint"]["reauthorization"]
+    assert reauth["disposition"] == "insufficient"
+    # No numeric budget survives without a resolvable policy; boundary
+    # booleans record as not-granted.
+    assert "max_actual_minutes" not in reauth["scope"]
+    assert not any(reauth["scope"].values())
+
+
+def test_cli_config_override_resolves_policy(tmp_path: Path) -> None:
+    record_path, actuals_path = _sender_reauth_setup(tmp_path, policy=False)
+    override = tmp_path / "override.yaml"
+    override.write_text(POLICY_YAML, encoding="utf-8")
+
+    rc = main([
+        str(record_path),
+        "--checkpoint",
+        "--actuals", str(actuals_path),
+        "--config", str(override),
+    ])
+
+    assert rc == 0
+    stored = yaml.safe_load(record_path.read_text(encoding="utf-8"))
+    reauth = stored["result"]["threshold_checkpoint"]["reauthorization"]
+    assert reauth["disposition"] == "resumed"
+
+
+def test_cli_explicit_config_unresolvable_errors(tmp_path: Path) -> None:
+    record_path, actuals_path = _sender_reauth_setup(tmp_path)
+    original = record_path.read_bytes()
+
+    rc = main([
+        str(record_path),
+        "--checkpoint",
+        "--actuals", str(actuals_path),
+        "--config", str(tmp_path / "missing.yaml"),
+    ])
+
+    assert rc == 2
+    assert record_path.read_bytes() == original
+
+
+def test_cli_tampered_record_policy_grants_nothing(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A policy failing signature authorization is no policy at all.
+
+    An auth-like trailer that fails exact framing is a byte-tamper
+    signal (`policy_auth.status: invalid`) — the sender channel must
+    fail closed exactly as it does with no resolvable policy, never
+    arbitrate against the tampered mapping's thresholds.
+    """
+    record_path, actuals_path = _sender_reauth_setup(tmp_path)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        POLICY_YAML + 'auth: "not-a-real-signature"\n', encoding="utf-8"
+    )
+
+    rc = main([str(record_path), "--checkpoint", "--actuals", str(actuals_path)])
+
+    assert rc == 4
+    err = capsys.readouterr().err
+    assert "receiver policy unresolvable" in err
+    assert "fail closed" in err
+    stored = yaml.safe_load(record_path.read_text(encoding="utf-8"))
+    reauth = stored["result"]["threshold_checkpoint"]["reauthorization"]
+    assert reauth["disposition"] == "insufficient"
+    assert "max_actual_minutes" not in reauth["scope"]
+    assert not any(reauth["scope"].values())
+
+
+def test_cli_explicit_tampered_config_errors_bytes_unchanged(
+    tmp_path: Path,
+) -> None:
+    record_path, actuals_path = _sender_reauth_setup(tmp_path, policy=False)
+    override = tmp_path / "override.yaml"
+    override.write_text(
+        POLICY_YAML + 'auth: "not-a-real-signature"\n', encoding="utf-8"
+    )
+    original = record_path.read_bytes()
+
+    rc = main([
+        str(record_path),
+        "--checkpoint",
+        "--actuals", str(actuals_path),
+        "--config", str(override),
+    ])
+
+    assert rc == 2
+    assert record_path.read_bytes() == original
+
+
+def test_cli_terminal_parity_arbitrates_sender_reply(tmp_path: Path) -> None:
+    record_path, actuals_path = _sender_reauth_setup(tmp_path)
+    actuals = yaml.safe_load(actuals_path.read_text(encoding="utf-8"))
+    actuals["paused_at_utc"] = "2026-08-01T01:40:00Z"
+    actuals["reauthorization"]["sender_reply"]["decided_at_utc"] = (
+        "2026-08-01T01:45:00Z"
+    )
+    actuals["completed_at_utc"] = "2026-08-01T01:50:00Z"
+    actuals_path.write_text(yaml.safe_dump(actuals, sort_keys=False), encoding="utf-8")
+
+    rc = main([str(record_path), "--final-state", "done", "--actuals", str(actuals_path)])
+
+    assert rc == 0
+    stored = yaml.safe_load(record_path.read_text(encoding="utf-8"))
+    assert stored["result"]["final_state"] == "done"
+    checkpoint = stored["result"]["threshold_checkpoint"]
+    assert checkpoint["action"] == "resumed_after_reauthorization"
+    assert checkpoint["reauthorization"]["disposition"] == "resumed"
+    assert validate_audit_record(stored) == []
+
+
+def test_admission_approve_checkpoint_clear_sequence_preserves_both_decisions(
+    tmp_path: Path,
+) -> None:
+    """The full two-decision lifecycle through the CLIs.
+
+    Admission pause -> approve -> checkpoint pause -> recorder clear ->
+    finalize done: both human decisions stay readable, the admission
+    timestamp intact.
+    """
+    from record_autonomy_outcome import main as outcome_main
+
+    envelope = dict(ENVELOPE)
+    envelope["estimated_minutes"] = 30
+    record = _record(envelope=envelope)
+    record_path = _write(tmp_path, record)
+
+    assert outcome_main([
+        str(record_path),
+        "--decision", "approved",
+        "--decided-at", "2026-08-01T01:02:00Z",
+        "--actor", "alice",
+    ]) == 0
+
+    ckpt_actuals = tmp_path / "ckpt.yaml"
+    ckpt_actuals.write_text(
+        yaml.safe_dump({
+            "work_started_at_utc": "2026-08-01T01:05:00Z",
+            "actual_minutes": 40,
+            "actual_files_touched": 1,
+            "paused_at_utc": "2026-08-01T01:45:00Z",
+            "side_effects_actual": {
+                "creates_or_updates_pr": False,
+                "comments_on_github": False,
+                "commits_changes": False,
+            },
+        }, sort_keys=False),
+        encoding="utf-8",
+    )
+    assert main([str(record_path), "--checkpoint", "--actuals", str(ckpt_actuals)]) == 4
+
+    assert outcome_main([
+        str(record_path),
+        "--decision", "approved",
+        "--decided-at", "2026-08-01T01:50:00Z",
+        "--actor", "alice",
+    ]) == 0
+
+    stored = yaml.safe_load(record_path.read_text(encoding="utf-8"))
+    assert stored["result"]["human_outcome"]["decided_at_utc"] == (
+        "2026-08-01T01:02:00Z"
+    )
+    assert stored["result"]["threshold_checkpoint"]["reauthorization"][
+        "disposition"
+    ] == "resumed"
+
+    done_actuals = tmp_path / "done.yaml"
+    done_actuals.write_text(
+        yaml.safe_dump({
+            "actual_minutes": 40,
+            "actual_files_touched": 1,
+            "completed_at_utc": "2026-08-01T01:50:00Z",
+        }, sort_keys=False),
+        encoding="utf-8",
+    )
+    assert main([
+        str(record_path), "--final-state", "done", "--actuals", str(done_actuals),
+    ]) == 0
+
+    stored = yaml.safe_load(record_path.read_text(encoding="utf-8"))
+    assert stored["result"]["final_state"] == "done"
+    outcome = stored["result"]["human_outcome"]
+    assert outcome["decided_at_utc"] == "2026-08-01T01:02:00Z"
+    assert outcome["pause_reason_codes"] == [
+        "expected_files_touched_exceeds_threshold"
+    ]
+    reauth = stored["result"]["threshold_checkpoint"]["reauthorization"]
+    assert reauth["channel"] == "receiver_human"
+    assert reauth["decided_at_utc"] == "2026-08-01T01:50:00Z"
+    assert validate_audit_record(stored) == []

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-09-02
+
+### Changed
+
+- Protocol contract stamp `spec_version` moves to `0.4.5` under a pinned bump rule ([contract version](docs/protocol/autonomy.md#contract-version)).
+- `task_profile.estimated_minutes` is the declared admission cap, not an expected duration ([message fields](docs/protocol/autonomy.md#message-fields)).
+
+### Removed
+
+- Unsupported MCP coordinator prototype (`mcp_servers/`) and the packaged session-telemetry script; session telemetry is runtime-owned ([session telemetry](docs/protocol/runtime_capabilities.md#runtime-startup-and-session-telemetry)).
+
+### Fixed
+
+- `oacp doctor --fix` creates `status.yaml` from the packaged `agent_status` template on wheel installs ([agent status](docs/guides/doctor.md#7-agent-status)).
+- Autonomy admission prefers an unfenced `task_profile` declaration over fenced examples ([autonomy](docs/protocol/autonomy.md#message-fields)).
+- Claude envelope accounting recognizes dashed and undashed runtime scratchpad roots without exempting sibling paths ([autonomy](docs/protocol/autonomy.md#envelope-compilation-phase-2)).
+- Autonomy finalization requires the receiver's work-start stamp and flags legacy terminal receipts that omit it ([autonomy](docs/protocol/autonomy.md#terminal-finalization-and-audit-integrity)).
+- `oacp autonomy-finalize` resolves the receiver policy from the record, so sender re-authorizations arbitrate under the receiver's verified caps instead of failing closed ([re-authorization channels](docs/protocol/autonomy.md#re-authorization-channels-and-arbitration)).
+- `oacp autonomy-outcome` records a checkpoint clear without overwriting the admission outcome, and refuses writes to records closed by completion evidence ([human outcomes](docs/protocol/autonomy.md#human-approval-and-decline-outcomes)).
+- Codex session initialization preserves configured capabilities across its own rewrites and records an explicit unknown model when hook metadata is unavailable ([runtime capabilities](docs/protocol/runtime_capabilities.md#dynamic-status-schema)).
+- Codex agent setup publishes every message type the Codex inbox workflow handles, leaving other runtime cards unchanged ([agent profiles](docs/protocol/agent_profiles.md#relationship-to-existing-agent-cards)).
+- Claude agent setup publishes every message type the Claude inbox workflow handles, on new and existing project cards ([agent profiles](docs/protocol/agent_profiles.md#relationship-to-existing-agent-cards)).
+- Claude agent scaffolding records an explicit unknown model instead of echoing the runtime name into `status.yaml` ([runtime capabilities](docs/protocol/runtime_capabilities.md#dynamic-status-schema)).
+
 ## [0.4.4] - 2026-08-28
 
 The central debrief store is the headline change: every agent's full end-of-session debrief now lands in the kernel-owned, append-only `org-memory/debriefs/<project>/<YYYY>/<MM>/` layout — one immutable file per session — instead of per-project trees, with `oacp org-memory init` creating the store and `oacp doctor` checking its setup ([org memory](docs/protocol/org_memory.md#debrief-store)).
@@ -807,6 +831,7 @@ The central debrief store is the headline change: every agent's full end-of-sess
 - Checkout step in github-release workflow job (#19)
 - Pre-release audit fixes: SHA-pinned actions, dangling doc refs (#15, #16)
 
+[0.4.5]: https://github.com/kiloloop/oacp/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/kiloloop/oacp/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/kiloloop/oacp/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/kiloloop/oacp/compare/v0.4.1...v0.4.2

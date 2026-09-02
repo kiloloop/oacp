@@ -1,7 +1,17 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Kiloloop
 # SPDX-License-Identifier: Apache-2.0
-"""Record a structured human outcome in an autonomy audit file."""
+"""Record a structured human outcome in an autonomy audit file.
+
+Pause-phase aware: on an admission pause (or a checkpoint pause with no
+outcome yet recorded) the decision lands in ``result.human_outcome``. On a
+checkpoint pause whose record already carries a recorded outcome, the
+decision is a checkpoint clear and routes into
+``result.threshold_checkpoint.reauthorization`` as a scope-less
+``receiver_human`` answer — the recorded outcome (typically the admission
+approval, with its timestamp, latency, and any standing grant) is
+preserved, never overwritten.
+"""
 
 from __future__ import annotations
 
@@ -19,6 +29,8 @@ from _oacp_constants import atomic_replace_yaml, locked_audit, utc_now_iso
 from autonomy_gate import (
     AUTONOMY_AUDIT_SCHEMA_VERSION,
     PINNED_COMPLETION_KINDS,
+    _arbitrate_reauthorization,
+    _default_reauthorization_block,
     normalize_continuation_scope,
 )
 
@@ -231,6 +243,140 @@ def build_human_outcome(
     }
 
 
+def _completion_evidence(audit: Dict[str, Any]) -> Optional[str]:
+    """Name the evidence closing this record, or None while it is live.
+
+    Mirrors the finalizer's closed-record test, with the terminal
+    ``final_state`` values added: a checkpoint-paused record awaiting a
+    clear is always ``pending``/``paused``, so any terminal state here
+    means the record was finalized and is historical evidence now.
+    """
+    result = audit.get("result")
+    if not isinstance(result, dict):
+        return None
+    final_state = result.get("final_state")
+    if final_state in {"done", "error", "superseded"}:
+        return f"final_state {final_state!r}"
+    if result.get("completed_at_utc"):
+        return f"completed_at_utc {result.get('completed_at_utc')!r}"
+    return None
+
+
+def routes_to_checkpoint_clearance(audit: Dict[str, Any]) -> bool:
+    """True when a new outcome is a checkpoint clear, not the pause's answer.
+
+    A checkpoint-paused record that already carries a recorded human
+    outcome has two human decisions in flight: the earlier one (usually
+    the admission approval) is history, and the new one answers the
+    checkpoint. The single ``result.human_outcome`` slot must keep the
+    earlier decision — the clear belongs in
+    ``threshold_checkpoint.reauthorization``, the block every consumer of
+    an effective clear reads.
+    """
+    result = audit.get("result")
+    outcome = result.get("human_outcome") if isinstance(result, dict) else None
+    if not (isinstance(outcome, dict) and outcome.get("recorded") is True):
+        return False
+    return is_checkpoint_paused(audit)
+
+
+def _clear_checkpoint(
+    audit: Dict[str, Any],
+    *,
+    decision: str,
+    grant_decision: str = "not_requested",
+    decided_at_utc: Optional[str] = None,
+    granted_scope: Optional[Dict[str, Any]] = None,
+    actor: str = "human",
+) -> None:
+    """Record a receiver-side checkpoint clear in the reauthorization block.
+
+    The answer is constructed as a scope-less ``receiver_human`` channel
+    input and arbitrated by the same code path the checkpoint evaluator
+    uses, so the disposition vocabulary stays single-sourced (a fresh
+    approval lands as ``resumed``, never an off-vocabulary spelling). A
+    recorder-based clear is scope-less by construction — scoped budgets
+    and boundary-action grants go through
+    ``oacp autonomy-finalize --checkpoint`` with
+    ``reauthorization.receiver_human.scope``.
+    """
+    if grant_decision != "not_requested" or granted_scope is not None:
+        raise ValueError(
+            "a checkpoint clear cannot carry continuation-grant decisions — "
+            "grants are admission-time machinery recorded with the admission "
+            "outcome"
+        )
+    if decision == "modified":
+        raise ValueError(
+            "a recorder-based checkpoint clear is scope-less and cannot be "
+            "modified — record a scoped re-authorization via oacp "
+            "autonomy-finalize --checkpoint with "
+            "reauthorization.receiver_human.scope"
+        )
+    if decision not in HUMAN_DECISIONS:
+        raise ValueError(
+            f"decision must be one of: {', '.join(sorted(HUMAN_DECISIONS))}"
+        )
+    actor_value = actor.strip()
+    if not actor_value:
+        raise ValueError("actor must be non-empty")
+    if any(char.isspace() for char in actor_value):
+        raise ValueError("actor must be a single stable handle (no whitespace)")
+
+    checkpoint = _checkpoint_block(audit) or {}
+    pause_recorded_at = str(checkpoint.get("paused_at_utc") or "")
+    if not pause_recorded_at:
+        raise ValueError(
+            "checkpoint-paused audit lacks threshold_checkpoint."
+            "paused_at_utc; refusing to record a clear against an unstamped "
+            "pause — re-evaluate the checkpoint with a paused_at_utc stamp"
+        )
+    pause_time = _parse_utc(pause_recorded_at, "threshold_checkpoint.paused_at_utc")
+    decision_time_text = decided_at_utc or utc_now_iso()
+    decision_time = _parse_utc(decision_time_text, "decided_at_utc")
+    if decision_time < pause_time:
+        raise ValueError("decided_at_utc cannot precede the recorded pause time")
+    for key in ("actual_minutes", "actual_files_touched"):
+        value = checkpoint.get(key)
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError(
+                f"checkpoint block lacks an evaluated integer {key}; "
+                "re-evaluate the checkpoint before recording a clear"
+            )
+
+    block = _default_reauthorization_block()
+    existing_block = checkpoint.get("reauthorization")
+    if isinstance(existing_block, dict):
+        block.update(copy.deepcopy(existing_block))
+    if not isinstance(block.get("advisory"), list):
+        block["advisory"] = []
+    block["presented"] = True
+    envelope = audit.get("scope_envelope")
+    _arbitrate_reauthorization(
+        {
+            "receiver_human": {
+                "decision": decision,
+                "decided_at_utc": decision_time_text,
+                "actor": actor_value,
+                "source_message_id": None,
+                "scope": None,
+            }
+        },
+        block,
+        list(checkpoint.get("breached_fields") or []),
+        checkpoint["actual_minutes"],
+        checkpoint["actual_files_touched"],
+        pause_recorded_at,
+        None,  # policy: the receiver-side human channel is unbounded
+        envelope if isinstance(envelope, dict) else None,
+    )
+    checkpoint["reauthorization"] = block
+    if block["disposition"] == "resumed":
+        checkpoint["action"] = "resumed_after_reauthorization"
+    elif block["disposition"] == "declined":
+        checkpoint["action"] = "reauthorization_declined"
+
+
 def record_human_outcome(
     audit: Dict[str, Any],
     *,
@@ -249,14 +395,44 @@ def record_human_outcome(
     result = updated.get("result")
     if not isinstance(result, dict):
         raise ValueError("audit.result must be a mapping")
-    existing = result.get("human_outcome")
-    if (
-        not replace
-        and isinstance(existing, dict)
-        and existing.get("recorded") is True
-    ):
-        raise ValueError("audit already has a recorded human outcome; use --replace")
-    result["human_outcome"] = build_human_outcome(updated, **kwargs)
+    # Closed records are historical evidence for EVERY write this recorder
+    # can make — the checkpoint-clear route and the admission-outcome
+    # route alike. The guard sits ahead of both branches so no routing
+    # shape reaches a mutation of completed evidence.
+    evidence = _completion_evidence(updated)
+    if evidence:
+        raise ValueError(
+            f"audit record is closed ({evidence}); human outcomes and "
+            "checkpoint clears may mutate only a live paused record — a "
+            "historical correction is a deliberate finalizer "
+            "supersession, never a post-completion rewrite"
+        )
+    if routes_to_checkpoint_clearance(updated):
+        # Two human decisions, one human_outcome slot: the recorded one
+        # (the admission approval, or an earlier checkpoint's answer) is
+        # history and must survive. The new decision answers the current
+        # checkpoint pause and records where its consumers read it.
+        if replace:
+            raise ValueError(
+                "--replace would overwrite the recorded human outcome with "
+                "a checkpoint clear — it can also revoke a standing "
+                "continuation grant resolved from that block. Rerun without "
+                "--replace: the clear records into "
+                "threshold_checkpoint.reauthorization and the recorded "
+                "outcome is preserved"
+            )
+        _clear_checkpoint(updated, **kwargs)
+    else:
+        existing = result.get("human_outcome")
+        if (
+            not replace
+            and isinstance(existing, dict)
+            and existing.get("recorded") is True
+        ):
+            raise ValueError(
+                "audit already has a recorded human outcome; use --replace"
+            )
+        result["human_outcome"] = build_human_outcome(updated, **kwargs)
     updated["schema_version"] = AUTONOMY_AUDIT_SCHEMA_VERSION
     updated.setdefault("conversation_id", None)
     updated.setdefault("parent_message_id", None)
@@ -317,6 +493,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # replaces — the inode a waiter locked may no longer be the file.
         with locked_audit(args.audit_file):
             audit = _load_mapping(args.audit_file)
+            clearance = routes_to_checkpoint_clearance(audit)
             updated = record_human_outcome(
                 audit,
                 replace=args.replace,
@@ -330,15 +507,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 atomic_replace_yaml(args.audit_file, updated)
 
         outcome = updated["result"]["human_outcome"]
+        reauthorization = (
+            updated["result"]["threshold_checkpoint"]["reauthorization"]
+            if clearance
+            else None
+        )
         if args.json:
-            print(json.dumps({
+            summary = {
                 "audit_file": str(args.audit_file),
                 "dry_run": args.dry_run,
                 "schema_version": updated["schema_version"],
                 "human_outcome": outcome,
-            }, indent=2))
+            }
+            if clearance:
+                summary["threshold_checkpoint_reauthorization"] = reauthorization
+            print(json.dumps(summary, indent=2))
         elif args.dry_run:
             print(yaml.safe_dump(updated, sort_keys=False, allow_unicode=True).rstrip())
+        elif clearance:
+            print(
+                f"OK: {args.audit_file} — checkpoint "
+                f"{reauthorization['disposition']} (receiver_human "
+                f"{reauthorization['decision']}; recorded human outcome "
+                "preserved)"
+            )
         else:
             print(
                 f"OK: {args.audit_file} — {outcome['decision']} "

@@ -588,3 +588,314 @@ def test_cli_locks_the_read_modify_write_sequence(
 
     assert code == 0
     assert lock_state["held"] is False
+
+
+# ── checkpoint clears on records with a recorded outcome ──────────────────
+
+
+def _cleared_admission_checkpoint_audit() -> Dict[str, Any]:
+    """A paused admission, human-approved, whose later §E checkpoint breached.
+
+    Two human decisions are in flight: the admission approval already
+    recorded in ``result.human_outcome``, and the checkpoint clear about to
+    be recorded. The recorder must route the clear into
+    ``threshold_checkpoint.reauthorization`` and preserve the admission
+    outcome.
+    """
+    return {
+        "schema_version": 2,
+        "created_at_utc": "2026-08-01T01:09:00Z",
+        "receiver": "claude",
+        "message_id": "msg-20260801010900-alice-ck90",
+        "decision": "paused",
+        "reason_codes": ["estimated_minutes_exceeds_threshold"],
+        "task_profile": {},
+        "result": {
+            "final_state": "paused",
+            "completion_kind": "checkpoint_paused",
+            "human_outcome": {
+                "recorded": True,
+                "actor": "alice",
+                "decision": "approved",
+                "decided_at_utc": "2026-08-01T01:11:00Z",
+                "decision_latency_seconds": 120,
+                "pause_reason_codes": ["estimated_minutes_exceeds_threshold"],
+                "grant": {
+                    "decision": "approved",
+                    "request_present": True,
+                    "request_error": None,
+                    "requested_scope": dict(NORMALIZED_SCOPE),
+                    "granted_scope": dict(NORMALIZED_SCOPE),
+                },
+            },
+            "threshold_checkpoint": {
+                "evaluated": True,
+                "actual_minutes": 69,
+                "actual_files_touched": 3,
+                "side_effects_actual": {},
+                "breached": True,
+                "breached_fields": ["actual_minutes"],
+                "declaration_errors": [],
+                "breach_basis": "realized",
+                "paused_at_utc": "2026-08-01T02:21:00Z",
+                "action": "paused_for_reauthorization",
+                "reauthorization": {
+                    "presented": False,
+                    "channel": None,
+                    "decision": None,
+                    "decided_at_utc": None,
+                    "actor": None,
+                    "source_message_id": None,
+                    "requested_scope": None,
+                    "scope": None,
+                    "disposition": "unanswered",
+                    "cleared_paused_at_utc": None,
+                    "advisory": [],
+                },
+            },
+        },
+    }
+
+
+def test_checkpoint_clear_routes_to_reauthorization() -> None:
+    updated = record_human_outcome(
+        _cleared_admission_checkpoint_audit(),
+        decision="approved",
+        decided_at_utc="2026-08-01T02:24:00Z",
+        actor="alice",
+    )
+
+    reauth = updated["result"]["threshold_checkpoint"]["reauthorization"]
+    assert reauth["presented"] is True
+    assert reauth["channel"] == "receiver_human"
+    assert reauth["decision"] == "approved"
+    assert reauth["decided_at_utc"] == "2026-08-01T02:24:00Z"
+    assert reauth["actor"] == "alice"
+    assert reauth["requested_scope"] is None
+    assert reauth["scope"] is None
+    assert reauth["disposition"] == "resumed"
+    assert reauth["cleared_paused_at_utc"] == "2026-08-01T02:24:00Z"
+    checkpoint = updated["result"]["threshold_checkpoint"]
+    assert checkpoint["action"] == "resumed_after_reauthorization"
+
+
+def test_checkpoint_clear_preserves_admission_outcome_and_grant() -> None:
+    audit = _cleared_admission_checkpoint_audit()
+    before = dict(audit["result"]["human_outcome"])
+
+    updated = record_human_outcome(
+        audit,
+        decision="approved",
+        decided_at_utc="2026-08-01T02:24:00Z",
+        actor="alice",
+    )
+
+    outcome = updated["result"]["human_outcome"]
+    assert outcome == before
+    assert outcome["decided_at_utc"] == "2026-08-01T01:11:00Z"
+    assert outcome["grant"]["granted_scope"] == NORMALIZED_SCOPE
+
+
+def test_checkpoint_clear_declined_records_declined_disposition() -> None:
+    updated = record_human_outcome(
+        _cleared_admission_checkpoint_audit(),
+        decision="declined",
+        decided_at_utc="2026-08-01T02:24:00Z",
+        actor="alice",
+    )
+
+    reauth = updated["result"]["threshold_checkpoint"]["reauthorization"]
+    assert reauth["disposition"] == "declined"
+    assert reauth["cleared_paused_at_utc"] is None
+    checkpoint = updated["result"]["threshold_checkpoint"]
+    assert checkpoint["action"] == "reauthorization_declined"
+    assert updated["result"]["human_outcome"]["decision"] == "approved"
+
+
+def test_checkpoint_clear_refuses_replace() -> None:
+    with pytest.raises(ValueError, match="checkpoint clear"):
+        record_human_outcome(
+            _cleared_admission_checkpoint_audit(),
+            replace=True,
+            decision="approved",
+            decided_at_utc="2026-08-01T02:24:00Z",
+            actor="alice",
+        )
+
+
+def test_checkpoint_clear_refuses_modified() -> None:
+    with pytest.raises(ValueError, match="scope-less"):
+        record_human_outcome(
+            _cleared_admission_checkpoint_audit(),
+            decision="modified",
+            decided_at_utc="2026-08-01T02:24:00Z",
+            actor="alice",
+        )
+
+
+def test_checkpoint_clear_refuses_grant_machinery() -> None:
+    with pytest.raises(ValueError, match="admission-time machinery"):
+        record_human_outcome(
+            _cleared_admission_checkpoint_audit(),
+            decision="approved",
+            grant_decision="approved",
+            decided_at_utc="2026-08-01T02:24:00Z",
+            actor="alice",
+        )
+
+
+def test_checkpoint_clear_before_pause_refused() -> None:
+    with pytest.raises(ValueError, match="precede"):
+        record_human_outcome(
+            _cleared_admission_checkpoint_audit(),
+            decision="approved",
+            decided_at_utc="2026-08-01T02:20:00Z",
+            actor="alice",
+        )
+
+
+def test_checkpoint_clear_requires_evaluated_actuals() -> None:
+    audit = _cleared_admission_checkpoint_audit()
+    audit["result"]["threshold_checkpoint"]["actual_minutes"] = None
+    with pytest.raises(ValueError, match="evaluated integer actual_minutes"):
+        record_human_outcome(
+            audit,
+            decision="approved",
+            decided_at_utc="2026-08-01T02:24:00Z",
+            actor="alice",
+        )
+
+
+def test_checkpoint_without_prior_outcome_still_records_human_outcome() -> None:
+    # The single-decision shape (auto-accepted admission, first human
+    # decision answers the checkpoint): nothing exists to preserve, so the
+    # decision lands in human_outcome as before.
+    updated = record_human_outcome(
+        _checkpoint_audit(),
+        decision="approved",
+        decided_at_utc="2026-07-17T01:44:24Z",
+        actor="alice",
+    )
+    outcome = updated["result"]["human_outcome"]
+    assert outcome["recorded"] is True
+    assert outcome["pause_reason_codes"] == ["threshold_checkpoint_breached"]
+    reauth = updated["result"]["threshold_checkpoint"].get("reauthorization")
+    assert reauth is None
+
+
+def test_cli_checkpoint_clear_reports_disposition(tmp_path: Path) -> None:
+    audit_path = tmp_path / "audit.yaml"
+    audit_path.write_text(
+        yaml.safe_dump(_cleared_admission_checkpoint_audit(), sort_keys=False),
+        encoding="utf-8",
+    )
+
+    code = main([
+        str(audit_path),
+        "--decision",
+        "approved",
+        "--decided-at",
+        "2026-08-01T02:24:00Z",
+        "--actor",
+        "alice",
+    ])
+
+    assert code == 0
+    stored = yaml.safe_load(audit_path.read_text(encoding="utf-8"))
+    assert stored["result"]["human_outcome"]["decided_at_utc"] == (
+        "2026-08-01T01:11:00Z"
+    )
+    reauth = stored["result"]["threshold_checkpoint"]["reauthorization"]
+    assert reauth["disposition"] == "resumed"
+
+
+@pytest.mark.parametrize("with_prior_outcome", [True, False])
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        {"final_state": "done"},
+        {"final_state": "error"},
+        {"final_state": "superseded"},
+        {"completed_at_utc": "2026-08-01T02:25:00Z"},
+    ],
+    ids=["done", "error", "superseded", "completed-at-only"],
+)
+def test_closed_record_refuses_every_outcome_write(
+    with_prior_outcome: bool, evidence: Dict[str, Any]
+) -> None:
+    """Completion evidence closes the record against BOTH routing shapes.
+
+    The prior-outcome shape routes to the checkpoint clear and the
+    no-prior-outcome shape routes to the admission branch — a closed
+    record must refuse the write on either route, for every evidence
+    kind (terminal final_state, or a completion stamp alone)."""
+    audit = _cleared_admission_checkpoint_audit()
+    if not with_prior_outcome:
+        del audit["result"]["human_outcome"]
+    audit["result"].update(evidence)
+
+    with pytest.raises(ValueError, match="closed"):
+        record_human_outcome(
+            audit,
+            decision="approved",
+            decided_at_utc="2026-08-01T02:26:00Z",
+            actor="bob",
+        )
+
+
+def test_cli_clear_on_terminal_conformance_fixture_leaves_bytes_unchanged(
+    tmp_path: Path,
+) -> None:
+    """The shipped damage-signature fixture is historical evidence: a
+    post-completion clear must exit nonzero without rewriting a byte."""
+    fixture = (
+        Path(__file__).resolve().parent
+        / "conformance"
+        / "autonomy"
+        / "records"
+        / "admission_outcome_replaced_by_clear.yaml"
+    )
+    target = tmp_path / "terminal.yaml"
+    target.write_bytes(fixture.read_bytes())
+    original = target.read_bytes()
+
+    code = main([
+        str(target),
+        "--decision",
+        "approved",
+        "--decided-at",
+        "2026-08-01T02:26:00Z",
+        "--actor",
+        "bob",
+    ])
+
+    assert code == 2
+    assert target.read_bytes() == original
+
+
+def test_cli_terminal_record_without_prior_outcome_leaves_bytes_unchanged(
+    tmp_path: Path,
+) -> None:
+    """The no-prior-outcome adjacent of the fixture probe: a finalized
+    checkpoint record with its human_outcome removed must refuse a
+    post-completion outcome write without rewriting a byte."""
+    audit = _cleared_admission_checkpoint_audit()
+    del audit["result"]["human_outcome"]
+    audit["result"]["final_state"] = "done"
+    audit["result"]["completed_at_utc"] = "2026-08-01T02:25:00Z"
+    target = tmp_path / "terminal_no_outcome.yaml"
+    target.write_text(yaml.safe_dump(audit, sort_keys=False), encoding="utf-8")
+    original = target.read_bytes()
+
+    code = main([
+        str(target),
+        "--decision",
+        "approved",
+        "--decided-at",
+        "2026-08-01T02:26:00Z",
+        "--actor",
+        "bob",
+    ])
+
+    assert code == 2
+    assert target.read_bytes() == original

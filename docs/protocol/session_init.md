@@ -158,9 +158,9 @@ Steps 1-2 are handled automatically by Claude Code (CLAUDE.md loading). Step 3 r
 `oacp setup claude` registers the marker-gated memory pull at `SessionStart`.
 It intentionally does not publish memory at `SessionEnd`; wrap-up owns the
 single explicit `oacp memory push` path. Claude status reporting remains an
-explicit runtime responsibility. `scripts/session_lifecycle_hooks.py` records
-separate coordinator telemetry and must not be treated as a `status.yaml`
-writer.
+explicit runtime responsibility, and so is any session telemetry beyond
+`status.yaml`: the kernel ships no reference implementation for it, and
+runtime-kept telemetry is never a `status.yaml` writer.
 
 ### Codex
 
@@ -210,6 +210,6 @@ Steps 1-2 are handled by system prompts and `.agent/rules/`. Steps 3-6 can be im
 - **Inbox Protocol**: `docs/protocol/inbox_outbox.md` — message format for Step 4
 - **Runtime Capabilities**: `docs/protocol/runtime_capabilities.md` — status schema and capability keys for Step 6
 - **Cross-Runtime Sync**: `docs/protocol/cross_runtime_sync.md` — durable memory files loaded at Step 3
-- **Session telemetry**: `scripts/session_lifecycle_hooks.py` — compatibility
-  state consumed by the coordinator; not a runtime startup or `status.yaml`
-  implementation
+- **Session telemetry**: runtime-owned; the kernel ships no reference
+  implementation — see `docs/protocol/runtime_capabilities.md` (Runtime startup
+  and session telemetry)

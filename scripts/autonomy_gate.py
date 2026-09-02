@@ -770,10 +770,40 @@ def receiver_policy(config: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
 def extract_task_profile(body: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """Return (task_profile, error_code) from a markdown/YAML body."""
     lines = body.splitlines()
+    unfenced_candidates: List[int] = []
+    fenced_candidates: List[int] = []
+    fence_char: Optional[str] = None
+    fence_length = 0
     for index, line in enumerate(lines):
+        stripped = line.lstrip(" \t")
+        if fence_char is not None:
+            if re.fullmatch(
+                rf"{re.escape(fence_char)}{{{fence_length},}}[ \t]*",
+                stripped,
+            ):
+                fence_char = None
+                fence_length = 0
+                continue
+            candidates = fenced_candidates
+        else:
+            fence_match = re.match(r"(?P<marker>`{3,}|~{3,})", stripped)
+            if fence_match:
+                marker = fence_match.group("marker")
+                fence_char = marker[0]
+                fence_length = len(marker)
+                continue
+            candidates = unfenced_candidates
+
+        if re.match(r"^(\s*)task_profile:\s*(.*)$", line):
+            candidates.append(index)
+
+    # Fences lower a candidate's priority instead of deleting it. This keeps
+    # fenced-only declarations (including after an unclosed opener) operative
+    # while preventing a fenced example from shadowing an unfenced declaration.
+    for index in unfenced_candidates + fenced_candidates:
+        line = lines[index]
         match = re.match(r"^(\s*)task_profile:\s*(.*)$", line)
-        if not match:
-            continue
+        assert match is not None
 
         base_indent = len(match.group(1))
         block = [line[base_indent:]]

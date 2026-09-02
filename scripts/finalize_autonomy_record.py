@@ -31,7 +31,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import yaml
 
+import policy_signing
 from _oacp_constants import atomic_replace_yaml, locked_audit, utc_now_iso
+from _oacp_env import resolve_oacp_home
 from autonomy_gate import (
     AUTONOMY_AUDIT_SCHEMA_VERSION,
     BREACH_BASES,
@@ -45,6 +47,7 @@ from autonomy_gate import (
     evaluate_threshold_checkpoint,
     evaluation_identity,
     load_yaml_strict,
+    receiver_policy,
 )
 from record_autonomy_outcome import GRANT_DECISIONS, HUMAN_DECISIONS
 
@@ -110,11 +113,24 @@ FINDING_SEVERITIES = {
     "off_enum_breach_basis": "error",
     "breach_basis_incoherent": "error",
     "invalid_human_outcome": "error",
+    "admission_outcome_replaced_by_checkpoint_clear": "advisory",
     "duplicate_logical_id": "error",
     "noncanonical_checkpoint_axis": "advisory",
     "terminal_missing_actuals": "advisory",
+    "terminal_missing_work_started_at": "advisory",
+    "canonical_writer_missing_work_started_at": "error",
+    "invalid_finalizer_provenance": "error",
     "actual_minutes_inconsistent": "error",
     "work_started_before_admission": "error",
+}
+
+# Writer-era marker for checkpoint and non-supersession terminal receipts.
+# Historical records have no marker and remain byte-preserved; the validator
+# can still flag their missing work clock advisory-only, while any receipt
+# claiming this canonical writer must satisfy the current required contract.
+FINALIZER_PROVENANCE = {
+    "name": "oacp autonomy-finalize",
+    "schema_version": 1,
 }
 
 
@@ -147,6 +163,52 @@ def _result_block(record: Dict[str, Any]) -> Dict[str, Any]:
 def _checkpoint_block(record: Dict[str, Any]) -> Dict[str, Any]:
     checkpoint = _result_block(record).get("threshold_checkpoint")
     return checkpoint if isinstance(checkpoint, dict) else {}
+
+
+def _stamp_finalizer_provenance(result: Dict[str, Any]) -> None:
+    existing = result.get("finalizer")
+    if existing is not None and existing != FINALIZER_PROVENANCE:
+        raise ValueError(
+            "result.finalizer conflicts with the canonical finalizer provenance"
+        )
+    result["finalizer"] = dict(FINALIZER_PROVENANCE)
+
+
+def _require_work_start(
+    record: Dict[str, Any],
+    actuals: Dict[str, Any],
+    *,
+    operation: str,
+) -> Dict[str, Any]:
+    """Return actuals bound to the record's immutable task-start stamp."""
+    normalized = dict(actuals)
+    record_started = _result_block(record).get("work_started_at_utc")
+    provided_started = normalized.get("work_started_at_utc")
+    if (
+        record_started is not None
+        and provided_started is not None
+        and provided_started != record_started
+    ):
+        raise ValueError(
+            "work_started_at_utc conflicts with the record's existing stamp"
+        )
+    started_at = provided_started or record_started
+    if started_at is None:
+        raise ValueError(
+            f"{operation} requires work_started_at_utc; pass --started-at "
+            "or checkpoint the record's task start first"
+        )
+    started = _parse_utc(started_at)
+    if started is None:
+        raise ValueError("work_started_at_utc must use YYYY-MM-DDTHH:MM:SSZ")
+    admission = _parse_utc(record.get("created_at_utc"))
+    if admission is not None and started < admission:
+        raise ValueError(
+            "work_started_at_utc precedes the admission decision "
+            f"({record.get('created_at_utc')})"
+        )
+    normalized["work_started_at_utc"] = started_at
+    return normalized
 
 
 def _active_minutes(
@@ -322,6 +384,14 @@ def validate_audit_record(
             ))
 
     completed_at = result.get("completed_at_utc")
+    finalizer = result.get("finalizer")
+    canonical_writer = finalizer == FINALIZER_PROVENANCE
+    if finalizer is not None and not canonical_writer:
+        findings.append(_finding(
+            "invalid_finalizer_provenance",
+            f"{source}: result.finalizer {finalizer!r} is not the pinned "
+            "canonical writer marker",
+        ))
     if state in TERMINAL_FINAL_STATES:
         if checkpoint.get("action") == "paused_for_reauthorization":
             findings.append(_finding(
@@ -360,6 +430,31 @@ def validate_audit_record(
         ))
 
     started_at = result.get("work_started_at_utc")
+    if started_at is None and completed_at is not None and state in {"done", "error"}:
+        code = (
+            "canonical_writer_missing_work_started_at"
+            if canonical_writer
+            else "terminal_missing_work_started_at"
+        )
+        findings.append(_finding(
+            code,
+            f"{source}: completed record has no result.work_started_at_utc"
+            + (
+                " despite claiming the canonical finalizer"
+                if canonical_writer
+                else " (legacy receipt; flag without rewriting history)"
+            ),
+        ))
+    elif (
+        started_at is None
+        and canonical_writer
+        and checkpoint.get("evaluated") is True
+    ):
+        findings.append(_finding(
+            "canonical_writer_missing_work_started_at",
+            f"{source}: checkpoint written by the canonical finalizer has no "
+            "result.work_started_at_utc",
+        ))
     if started_at is not None:
         started = _parse_utc(started_at)
         admission = _parse_utc(record.get("created_at_utc"))
@@ -526,6 +621,22 @@ def validate_audit_record(
                 f"{source}: recorded human_outcome invalid — "
                 + "; ".join(problems),
             ))
+        # Damage signature of a checkpoint clear recorded over the admission
+        # outcome: the only surviving human decision on an admission-paused
+        # record answers a checkpoint pause. Advisory, not error — records
+        # written before the outcome recorder routed checkpoint clears into
+        # threshold_checkpoint.reauthorization had no non-destructive way to
+        # record the clear, so the shape is sanctioned history there.
+        if decision == "paused" and "threshold_checkpoint_breached" in (
+            outcome.get("pause_reason_codes") or []
+        ):
+            findings.append(_finding(
+                "admission_outcome_replaced_by_checkpoint_clear",
+                f"{source}: the recorded human outcome answers a checkpoint "
+                "pause while the admission pause has no surviving outcome — "
+                "the admission decision was overwritten by a checkpoint "
+                "clear",
+            ))
 
     return findings
 
@@ -643,6 +754,29 @@ def _build_actuals(
             )
         actuals["work_started_at_utc"] = args.started_at
 
+    record_result = _result_block(record)
+    record_started = record_result.get("work_started_at_utc")
+    supplied_started = actuals.get("work_started_at_utc")
+    if (
+        record_started is not None
+        and supplied_started is not None
+        and supplied_started != record_started
+    ):
+        raise ValueError(
+            "--started-at conflicts with result.work_started_at_utc already "
+            "stamped in the record"
+        )
+    if supplied_started is None and record_started is not None:
+        actuals["work_started_at_utc"] = record_started
+
+    requires_start = args.checkpoint or args.final_state in {"done", "error"}
+    if requires_start:
+        actuals = _require_work_start(
+            record,
+            actuals,
+            operation=("checkpoint" if args.checkpoint else "terminal finalization"),
+        )
+
     started_at = actuals.get("work_started_at_utc")
     if started_at is not None:
         started = _parse_utc(started_at)
@@ -655,7 +789,11 @@ def _build_actuals(
                 f"({record.get('created_at_utc')})"
             )
         if "actual_minutes" not in actuals:
-            completed_at = actuals.get("completed_at_utc") or measured_at_utc
+            completed_at = (
+                actuals.get("completed_at_utc")
+                or record_result.get("completed_at_utc")
+                or measured_at_utc
+            )
             actuals["actual_minutes"] = _active_minutes(
                 record, started_at, completed_at
             )
@@ -812,8 +950,15 @@ def apply_checkpoint(
     *,
     now_utc: Optional[str] = None,
     allow_closed: bool = False,
+    policy: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], bool]:
     """Evaluate and record a §E checkpoint in place; return (record, paused).
+
+    ``policy`` is the receiver's parsed admission policy, threaded into the
+    checkpoint evaluation so sender_reply re-authorizations are arbitrated
+    under the receiver's caps instead of extending nothing. Without it the
+    sender channel stays fail-closed (the receiver_human channel is
+    unaffected either way).
 
     On an unresolved breach the record becomes the in-place
     checkpoint-paused shape the outcome recorder expects:
@@ -843,8 +988,9 @@ def apply_checkpoint(
         raise ValueError(
             "record carries no scope_envelope; nothing to checkpoint against"
         )
+    actuals = _require_work_start(record, actuals, operation="checkpoint")
     checkpoint = evaluate_threshold_checkpoint(
-        envelope, _grant_result(updated), actuals
+        envelope, _grant_result(updated), actuals, policy=policy
     )
     result = updated.setdefault("result", {})
     breached = checkpoint.get("breached") is True
@@ -863,6 +1009,7 @@ def apply_checkpoint(
     )
     if "work_started_at_utc" in actuals:
         result["work_started_at_utc"] = actuals["work_started_at_utc"]
+    _stamp_finalizer_provenance(result)
     return updated, breached and not resumed
 
 
@@ -985,6 +1132,7 @@ def finalize_audit_record(
     superseded_by: Optional[str] = None,
     replace: bool = False,
     now_utc: Optional[str] = None,
+    policy: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], bool]:
     """Return the finalized record; raises on any integrity violation.
 
@@ -1066,6 +1214,9 @@ def finalize_audit_record(
                 f"{', '.join(siblings)} — finalize the stale ones as "
                 "superseded first"
             )
+        actuals = _require_work_start(
+            record, actuals, operation="terminal finalization"
+        )
         prior_breach = _checkpoint_block(record).get("breached") is True
         if prior_breach:
             if not _checkpoint_resolved(record):
@@ -1079,7 +1230,8 @@ def finalize_audit_record(
             # a checkpoint evaluation at finalization, so coverage no longer
             # depends on which receiver wrote the record.
             updated, checkpoint_paused = apply_checkpoint(
-                updated, actuals, now_utc=now_utc, allow_closed=replace
+                updated, actuals, now_utc=now_utc, allow_closed=replace,
+                policy=policy,
             )
             if checkpoint_paused:
                 return updated, True
@@ -1097,6 +1249,10 @@ def finalize_audit_record(
                 raise ValueError(
                     f"finalizing done requires a non-negative integer {key}"
                 )
+    elif final_state == "error":
+        actuals = _require_work_start(
+            record, actuals, operation="terminal finalization"
+        )
 
     result_block = updated.setdefault("result", {})
     if "work_started_at_utc" in actuals:
@@ -1118,6 +1274,8 @@ def finalize_audit_record(
         for key in CANONICAL_NUMERIC_AXES:
             if key in actuals:
                 result_block[key] = actuals[key]
+    if final_state != "superseded":
+        _stamp_finalizer_provenance(result_block)
     if reply_message_id is not None:
         result_block["reply_message_id"] = reply_message_id
     else:
@@ -1141,6 +1299,53 @@ def finalize_audit_record(
     return updated, False
 
 
+def _resolve_policy(
+    record: Dict[str, Any],
+    config_override: Optional[Path],
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Resolve the receiver policy for re-authorization arbitration.
+
+    Returns ``(policy, error)``. The record's ``policy_path`` is the
+    default source; ``--config`` overrides it. The read goes through the
+    authorized policy path (`policy_signing.load_authorized_policy`: one
+    bounded snapshot, signature/receiver/context binding and enrollment
+    downgrade resistance verified, then parsed from those same bytes) —
+    policy bytes that fail authorization grant nothing. An unresolvable
+    or unauthorized record-carried path degrades to no policy (the sender
+    channel then extends nothing — fail closed) with the reason returned
+    for surfacing; an explicit override that cannot be resolved or
+    authorized raises instead, because the caller asked for exactly that
+    config.
+    """
+    path = config_override or record.get("policy_path")
+    if not path:
+        return None, "record carries no policy_path"
+    receiver = record.get("receiver")
+    if not isinstance(receiver, str) or not receiver.strip():
+        reason = "record names no receiver to authorize the policy against"
+        if config_override is not None:
+            raise ValueError(f"--config {path}: {reason}")
+        return None, reason
+    try:
+        loaded, _policy_auth, _raw = policy_signing.load_authorized_policy(
+            Path(path),
+            resolve_oacp_home(),
+            receiver=receiver.strip(),
+            kind=policy_signing.POLICY_KIND_RECEIVER_CONFIG,
+        )
+        _mode, policy = receiver_policy(loaded)
+    except Exception as exc:
+        if config_override is not None:
+            raise ValueError(f"--config {path}: {exc}") from exc
+        return None, f"policy_path {path}: {exc}"
+    return policy, None
+
+
+def _presents_sender_reauthorization(actuals: Dict[str, Any]) -> bool:
+    reauth = actuals.get("reauthorization")
+    return isinstance(reauth, dict) and "sender_reply" in reauth
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("audit_file", type=Path)
@@ -1159,6 +1364,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="report integrity findings for the record (or its directory) and write nothing",
     )
     parser.add_argument("--actuals", type=Path, help="§E actuals mapping (YAML)")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help=(
+            "receiver config for re-authorization arbitration "
+            "(default: the record's policy_path)"
+        ),
+    )
     parser.add_argument("--actual-minutes", type=int)
     parser.add_argument("--actual-files-touched", type=int)
     parser.add_argument(
@@ -1225,9 +1438,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             actuals = _build_actuals(
                 args, record, measured_at_utc=measured_at_utc
             )
+            policy, policy_error = _resolve_policy(record, args.config)
+            if policy is None and _presents_sender_reauthorization(actuals):
+                print(
+                    f"WARNING: receiver policy unresolvable ({policy_error}) "
+                    "— the sender_reply re-authorization channel extends "
+                    "nothing (fail closed); pass --config to resolve it",
+                    file=sys.stderr,
+                )
             if args.checkpoint:
                 updated, paused = apply_checkpoint(
-                    record, actuals, now_utc=measured_at_utc
+                    record, actuals, now_utc=measured_at_utc, policy=policy
                 )
             else:
                 updated, paused = finalize_audit_record(
@@ -1240,6 +1461,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     superseded_by=args.superseded_by,
                     replace=args.replace,
                     now_utc=measured_at_utc,
+                    policy=policy,
                 )
             if not args.dry_run:
                 atomic_replace_yaml(args.audit_file, updated)
