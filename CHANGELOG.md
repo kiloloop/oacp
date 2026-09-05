@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-09-05
+
+### Added
+
+- Autonomy audits distinguish expected pauses from unplanned pauses ([pause classification](docs/protocol/autonomy.md#pause-classification)).
+- Human outcome records can retain the changes made when approving a modified task ([human outcomes](docs/protocol/autonomy.md#human-approval-and-decline-outcomes)).
+
+### Fixed
+
+- Startup safety and dispatch guidance follow the current exact-file archive lifecycle ([inbox lifecycle](docs/protocol/inbox_outbox.md#lifecycle)).
+- Startup guidance preserves project memory reads and retrieves org memory on demand ([memory context](docs/guides/memory-context.md)).
+
 ## [0.4.5] - 2026-09-02
 
 ### Changed
@@ -831,6 +843,7 @@ The central debrief store is the headline change: every agent's full end-of-sess
 - Checkout step in github-release workflow job (#19)
 - Pre-release audit fixes: SHA-pinned actions, dangling doc refs (#15, #16)
 
+[0.4.6]: https://github.com/kiloloop/oacp/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/kiloloop/oacp/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/kiloloop/oacp/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/kiloloop/oacp/compare/v0.4.2...v0.4.3

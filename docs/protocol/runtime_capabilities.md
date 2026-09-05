@@ -177,6 +177,10 @@ registers a `SessionStart` handler that runs memory pull and `oacp session-init`
 sequentially after the user reviews and trusts it with `/hooks`. The manual
 fallback is `oacp session-init --pull-memory --project <project>`.
 
+Memory pull synchronizes disk files. Init names the required protocol and
+project-memory reads; org-memory retrieval is on demand. See
+[memory context](../guides/memory-context.md).
+
 Session telemetry beyond `status.yaml` is a runtime responsibility: the kernel
 neither defines a schema for it nor ships a reference implementation. A runtime
 that keeps its own session or packet telemetry stores it separately from

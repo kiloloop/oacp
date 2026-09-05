@@ -248,6 +248,24 @@ PINNED_REASON_CODES = frozenset({
     "threshold_checkpoint_breached",
     "workspace_check_required",
 })
+# Success and advisory evidence belongs in reason_codes but never names a
+# fired pause, even if a caller records that evidence alongside a blocker.
+PAUSE_REASON_CODES = PINNED_REASON_CODES - frozenset({
+    "checkpoint_reauthorized",
+    "continuation_grant_accepted",
+    "hard_stops_clear",
+    "lexical_advisory",
+    "message_hash_recorded",
+    "message_not_expired",
+    "message_valid",
+    "review_continuation_accepted",
+    "review_continuation_head_mismatch",
+    "risk_threshold_passed",
+    "task_profile_not_required",
+    "task_profile_present",
+    "task_type_allowed",
+    "workspace_check_required",
+})
 
 GUARDRAILS_FENCE_RE = re.compile(
     r"(?ms)^[ \t]*```oacp-guardrails[ \t]*\n"
@@ -824,6 +842,53 @@ def extract_task_profile(body: str) -> Tuple[Optional[Dict[str, Any]], Optional[
             return None, "task_profile_unparsable"
         return data["task_profile"], None
     return None, None
+
+
+def _expected_pause_declaration(
+    body: str,
+) -> Tuple[bool, List[str], List[Dict[str, str]]]:
+    """Read audit-only declarations without altering the safety-check input."""
+    profile, error = extract_task_profile(body)
+    if error or profile is None or "expected_pauses" not in profile:
+        return False, [], []
+    declared = profile["expected_pauses"]
+    codes: List[str] = []
+    warnings: List[Dict[str, str]] = []
+
+    def warn(detail: str) -> None:
+        warnings.append({"code": "expected_pauses_declaration_warning", "detail": detail})
+
+    if not isinstance(declared, list):
+        warn("task_profile.expected_pauses must be a list; ignored")
+    else:
+        for index, code in enumerate(declared):
+            if not isinstance(code, str):
+                warn(f"task_profile.expected_pauses[{index}] must be a string; ignored")
+                continue
+            codes.append(code)
+            if code not in PAUSE_REASON_CODES:
+                warn(f"task_profile.expected_pauses[{index}] is not a recognized pause reason code; ignored")
+
+    return True, codes, warnings
+
+
+def _classify_pause(
+    reason_codes: Sequence[str], expected_declared: bool, expected_codes: Sequence[str],
+) -> Dict[str, Any]:
+    """Classify fired pause reasons; success/advisory evidence is excluded."""
+    fired = list(dict.fromkeys(code for code in reason_codes if code in PAUSE_REASON_CODES))
+    expected = set(expected_codes) & PAUSE_REASON_CODES
+    unplanned = [code for code in fired if code not in expected]
+    return {
+        "expected_pause_codes": list(expected_codes),
+        "unplanned_pause_codes": unplanned,
+        "pause_classification": (
+            "undeclared" if not expected_declared
+            else "designed" if not unplanned
+            else "unplanned" if len(unplanned) == len(fired)
+            else "mixed"
+        ),
+    }
 
 
 def _bool_value(profile: Dict[str, Any], key: str) -> bool:
@@ -3483,7 +3548,9 @@ def evaluate_autonomy(
     policy_hash = canonical_policy_sha256(config)
     body = str(message.get("body") or "")
     msg_type = str(message.get("type") or "")
-    logged_notes: List[Dict[str, str]] = []
+    expected_declared, expected_codes, logged_notes = (
+        _expected_pause_declaration(body)
+    )
     profile_snapshot: Optional[Dict[str, Any]] = None
     envelope_source: Optional[str] = None
     # Resolved below; pre-bound so early pauses (malformed config) can
@@ -3535,6 +3602,11 @@ def evaluate_autonomy(
         )
         decision.setdefault("co_occurring_reason_codes", [])
         decision["admission_axes"] = admission_axes
+        if decision.get("decision") == "paused":
+            # Only the reasons that drove this pause are fired. Ledger,
+            # co-occurring, and lexical evidence never add classification
+            # inputs or alter admission/approval authority.
+            decision.update(_classify_pause(reason_codes, expected_declared, expected_codes))
         decision["matched_patterns"] = _collect_lexical_provenance(
             body,
             profile_snapshot,

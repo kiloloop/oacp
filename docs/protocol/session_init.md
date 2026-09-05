@@ -19,7 +19,7 @@ The init sequence has 6 steps in a fixed order. Each step is classified as **req
 ┌─────────────────────────────────────────────┐
 │ 1. Load global rules            [required]  │
 │ 2. Load project rules           [required]  │
-│ 3. Load durable memory          [required]  │
+│ 3. Load project memory          [required]  │
 │ 4. Check inbox                  [optional]  │
 │ 5. Load skills / tools          [optional]  │
 │ 6. Report status                [required]  │
@@ -54,13 +54,15 @@ The init sequence has 6 steps in a fixed order. Each step is classified as **req
 
 **Conflict resolution:** When global and project rules conflict, project rules win. Project rules are closer to the work and reflect repo-specific decisions. Exception: safety defaults from `agent_safety_defaults.md` cannot be relaxed by project rules — they can only be made stricter.
 
-### Step 3: Load Durable Memory
+<a id="step-3-load-durable-memory"></a>
+
+### Step 3: Load Project Memory
 
 **Required.** Read the project's shared memory files to restore cross-session and cross-runtime context.
 
 **Location:** `$OACP_HOME/projects/<project>/memory/`
 
-The top-level files in `memory/` are the active working set. `memory/archive/` is historical storage and is not loaded by default at session start.
+The four files below are the active working set. `memory/archive/` is historical storage and is not loaded by default at session start.
 
 **Loading order:**
 
@@ -68,6 +70,11 @@ The top-level files in `memory/` are the active working set. `memory/archive/` i
 2. `decision_log.md` — timestamped decisions with rationale. Read second to understand what has been decided and why.
 3. `open_threads.md` — unresolved issues, blocked epics, cross-agent coordination. Read third because it builds on the context from facts and decisions.
 4. `known_debt.md` — verified unresolved debt, recurring pain points, and cleanup items that future sessions should keep in view.
+
+This required read set is project-scoped. `$OACP_HOME/org-memory/` is a
+separate store, retrieved on demand by default. Its summary, topical files,
+events, and debriefs are not part of Step 3. Read applicable org rules and
+decisions when the task needs them; see [memory context](../guides/memory-context.md).
 
 **Conflict resolution:** If memory files contradict project rules (e.g., `project_facts.md` says "use pytest" but `CLAUDE.md` says "use make test"), project rules win. Memory files may be stale; project rules are maintained alongside the code.
 
@@ -142,7 +149,7 @@ If a **required** step fails:
 |------|-------------|--------|
 | Global rules | File missing or unreadable | Warn user, continue with defaults (safety defaults still apply) |
 | Project rules | File missing or unreadable | Warn user, continue — project may not have agent config |
-| Durable memory | Directory or files missing | Log absence, continue — project may not be initialized |
+| Project memory | Directory or files missing | Log absence, continue — project may not be initialized |
 | Report status | Cannot write status.yaml | Warn user — dispatch routing will be degraded but work can proceed |
 
 No init failure should prevent the agent from starting. All failures are **degraded mode**, not hard blocks. The agent reports what failed and continues.
@@ -156,6 +163,7 @@ This section provides guidance for per-runtime implementations.
 Steps 1-2 are handled automatically by Claude Code (CLAUDE.md loading). Step 3 requires explicit file reads or auto-memory. Step 4 uses `/check-inbox`. Step 5 is automatic (skill discovery). Step 6 requires a startup hook or explicit script call.
 
 `oacp setup claude` registers the marker-gated memory pull at `SessionStart`.
+Pull synchronizes files on disk; it does not load org memory into context.
 It intentionally does not publish memory at `SessionEnd`; wrap-up owns the
 single explicit `oacp memory push` path. Claude status reporting remains an
 explicit runtime responsibility, and so is any session telemetry beyond
@@ -167,12 +175,13 @@ runtime-kept telemetry is never a `status.yaml` writer.
 Steps 1-2 are handled by AGENTS.md loading. Running `oacp setup codex
 --project <project>` installs one repo-local `SessionStart` handler in
 `.codex/hooks.json`. After the user reviews and trusts it with `/hooks`, the
-handler sequentially pulls shared memory and runs `oacp session-init`. No
-Codex `SessionEnd` hook is installed.
+handler sequentially pulls shared memory to disk and runs `oacp session-init`.
+No Codex `SessionEnd` hook is installed.
 
-The init command verifies that protocol and durable-memory files are readable,
-updates `status.yaml`, and emits bounded developer context naming the required
+The init command verifies that protocol and the four project memory files are
+readable, updates `status.yaml`, and emits bounded developer context naming the required
 ordered reads. It does not claim that the full file contents were injected.
+Org-memory content is not read by this verification or included in its manifest.
 Use this manual fallback when the project hook is unavailable or untrusted:
 
 ```bash
@@ -198,7 +207,8 @@ Steps 1-2 are handled by system prompts and `.agent/rules/`. Steps 3-6 can be im
 
 | Anti-Pattern | Why It Fails | Do Instead |
 |--------------|-------------|------------|
-| Skipping memory reads to "save time" | Agent contradicts prior decisions, duplicates work | Always read memory files — they're small and fast |
+| Skipping active project memory to "save time" | Agent contradicts prior project decisions, duplicates work | Read the four project memory files in Step 3 |
+| Loading the entire org-memory store at init | Context grows with org-wide history and unrelated projects | Retrieve relevant org sections on demand |
 | Auto-processing inbox during init | Surprises the user with unseen actions | Summarize inbox count, let user trigger processing |
 | Writing status.yaml only at session close | Dispatch router thinks agent is offline during work | Write at init AND close (and task boundaries) |
 | Loading all skills eagerly | Slows init, wastes resources for unused tools | Load on-demand; only validate critical tools at init |

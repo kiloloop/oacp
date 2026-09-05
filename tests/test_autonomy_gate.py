@@ -133,6 +133,12 @@ def test_autonomy_gate_matches_conformance_fixtures(tmp_path: Path) -> None:
                 expected_path.name
             )
 
+        for field in (
+            "pause_classification", "expected_pause_codes", "unplanned_pause_codes",
+        ):
+            if field in expected:
+                assert decision[field] == expected[field], expected_path.name
+
         if "task_profile" in expected:
             _assert_subset(expected["task_profile"], decision["task_profile"])
 

@@ -349,5 +349,5 @@ constraints:
     - "rejected — agent rejected the task"
   inbox_file_lifecycle:
     - "Dispatch state is tracked via message replies (parent_message_id threading), NOT by retaining the original inbox file"
-    - "Agents delete the original task_request from inbox after processing (per inbox_outbox.md Lifecycle step 5)"
-    - "Long-lived states (blocked, in_review) persist in dispatcher tracking (dispatches.md), not as inbox files"
+    - "Agents follow inbox_outbox.md Lifecycle for terminal processing and exact-file, no-overwrite archival; changed bytes or failed archival leave input pending"
+    - "Long-lived states (blocked, in_review) persist in dispatcher tracking (dispatches.md); pending-file retention still follows inbox_outbox.md Lifecycle"

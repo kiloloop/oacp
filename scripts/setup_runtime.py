@@ -38,9 +38,12 @@ coordination. Your inbox is at `$OACP_HOME/projects/<project>/agents/codex/inbox
 ## Workflow
 
 1. **Load startup context** — after trusting the generated project hook with
-   `/hooks`, it pulls OACP memory and verifies the required startup files in one
-   ordered `SessionStart` command. Read the files named in its developer context
-   before normal work and include its `SESSION_INIT_ACK` in the first response.
+   `/hooks`, it syncs OACP memory to disk and verifies the required protocol and
+   project memory files in one ordered `SessionStart` command. Read the files
+   named in its developer context before normal work and include its
+   `SESSION_INIT_ACK` in the first response.
+   Org memory is retrieved on demand; read applicable org rules and decisions
+   before work they govern. Memory pull does not load org content into context.
 2. **Check inbox when requested** — surface pending state before processing work.
 3. **Send messages** via `oacp send <project> --from codex --to <agent> --type <type> --subject "..." --body "..."`.
 4. **Update status** in `agents/codex/status.yaml` when starting/finishing tasks.

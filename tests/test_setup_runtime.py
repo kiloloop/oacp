@@ -35,6 +35,13 @@ class TestSetupRuntime(unittest.TestCase):
             pull_hook = repo_dir / ".claude" / "hooks" / "oacp-memory-pull.sh"
             settings_file = repo_dir / ".claude" / "settings.json"
             self.assertTrue(agent_file.is_file())
+            agent_content = agent_file.read_text(encoding="utf-8")
+            project_files = (
+                "project_facts.md", "decision_log.md", "open_threads.md", "known_debt.md"
+            )
+            positions = [agent_content.index(name) for name in project_files]
+            self.assertEqual(positions, sorted(positions))
+            self.assertIn("org memory on demand", agent_content)
             self.assertTrue((repo_dir / ".claude" / "skills").is_dir())
             self.assertTrue(pull_hook.is_file())
             self.assertFalse(
@@ -93,6 +100,8 @@ class TestSetupRuntime(unittest.TestCase):
             self.assertIn("OACP", content)
             self.assertIn("oacp send", content)
             self.assertIn("oacp session-init --pull-memory", content)
+            self.assertIn("project memory files", content)
+            self.assertIn("Org memory is retrieved on demand", content)
             hooks = json.loads(hooks_file.read_text(encoding="utf-8"))
             entry = hooks["hooks"]["SessionStart"][0]
             self.assertEqual(entry["matcher"], "^startup$")

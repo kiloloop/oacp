@@ -1,0 +1,13 @@
+message: messages/pause_classification_designed.yaml
+config: configs/auto_review_standard.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+  - estimated_minutes_exceeds_threshold
+  - expected_files_touched_exceeds_threshold
+  pause_classification: designed
+  expected_pause_codes:
+  - estimated_minutes_exceeds_threshold
+  - expected_files_touched_exceeds_threshold
+  unplanned_pause_codes: []

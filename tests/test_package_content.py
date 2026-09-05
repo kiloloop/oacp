@@ -10,6 +10,7 @@ pinned dev toolchain is what builds the asserted wheel.
 
 from __future__ import annotations
 
+import posixpath
 import re
 import subprocess
 import sys
@@ -79,6 +80,25 @@ class TestKernelDocsShipped:
 
     def test_wire_template_in_wheel(self, wheel_names):
         assert WIRE_TEMPLATE in wheel_names
+
+    def test_protocol_guide_links_resolve_in_source_and_wheel(self, wheel_names):
+        entries, errors = parse_force_include(REPO_ROOT / "pyproject.toml")
+        assert not errors, errors
+        links_checked = 0
+        for source, destination in entries:
+            if not source.startswith("docs/protocol/"):
+                continue
+            source_path = REPO_ROOT / source
+            links = re.findall(r"\]\((\.\./guides/[^)\s]+)\)", source_path.read_text())
+            for link in links:
+                link = link.split("#", 1)[0]
+                assert (source_path.parent / link).is_file()
+                installed_link = posixpath.normpath(
+                    posixpath.join(posixpath.dirname(destination), link)
+                )
+                assert installed_link in wheel_names, f"missing guide: {installed_link}"
+                links_checked += 1
+        assert links_checked, "no packaged protocol guide links checked"
 
 
 class TestForceIncludeParity:

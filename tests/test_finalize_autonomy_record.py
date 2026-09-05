@@ -26,6 +26,7 @@ from finalize_autonomy_record import (  # noqa: E402
     validate_audit_record,
 )
 from autonomy_gate import evaluate_threshold_checkpoint  # noqa: E402
+from oacp_doctor import check_autonomy  # noqa: E402
 
 
 ENVELOPE = {
@@ -129,6 +130,28 @@ def test_clean_finalized_record_validates_clean() -> None:
         "completed_at_utc": "2026-08-01T02:00:00Z",
     })
     assert validate_audit_record(record) == []
+
+
+def test_optional_pause_evidence_preserves_v2_validation_and_doctor(tmp_path: Path) -> None:
+    project = tmp_path / "projects" / "sample"
+    audit_dir = project / "agents" / "claude" / "audit" / "autonomy_decisions"
+    audit_dir.mkdir(parents=True)
+    record = _record(human_outcome=_human_outcome())
+    record["result"]["human_outcome"]["decision"] = "modified"
+    audit_path = _write(audit_dir, record)
+    assert validate_audit_record(record) == []
+    before = check_autonomy(project)
+    record.update({
+        "pause_classification": "designed",
+        "expected_pause_codes": ["expected_files_touched_exceeds_threshold"],
+        "unplanned_pause_codes": [],
+    })
+    record["result"]["human_outcome"]["modification"] = {
+        "task_profile": {"expected_files_touched": 10}, "note": "Permit extra files",
+    }
+    audit_path.write_text(yaml.safe_dump(record))
+    assert validate_audit_record(record) == []
+    assert check_autonomy(project) == before
 
 
 def test_validator_flags_legacy_terminal_without_work_start() -> None:

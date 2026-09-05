@@ -79,6 +79,23 @@ def make_message(body: str = PROFILE_BODY, message_id: str = "msg-1") -> Dict[st
     }
 
 
+def test_expected_pauses_do_not_change_envelope_constraints() -> None:
+    original = make_message()
+    annotated = make_message(
+        PROFILE_BODY + "  expected_pauses: [merges_pr_pause, future_pause_code]\n"
+    )
+    args = {
+        "receiver": "claude", "project": "test-proj",
+        "now_iso": "2026-07-12T02:00:00Z",
+    }
+    before = build_envelope(original, RECEIVER_CONFIG, **args)
+    after = build_envelope(annotated, RECEIVER_CONFIG, **args)
+    assert before["message_sha256"] != after["message_sha256"]
+    assert {k: v for k, v in before.items() if k != "message_sha256"} == {
+        k: v for k, v in after.items() if k != "message_sha256"
+    }
+
+
 def test_build_envelope_happy_path() -> None:
     envelope = build_envelope(
         make_message(),

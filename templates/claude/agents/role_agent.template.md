@@ -24,7 +24,10 @@ Your role baseline is defined in the project's role configuration.
 
 ## Workflow
 
-1. **Load context**: Read project_facts.md, decision_log.md, open_threads.md
+1. **Load project context**: Read `project_facts.md`, `decision_log.md`,
+   `open_threads.md`, and `known_debt.md` in that order from
+   `$OACP_HOME/projects/<project>/memory/`. Retrieve org memory on demand;
+   read applicable org rules and decisions before work they govern.
 2. **Check handover baton**: Load previous session state from handover_baton.yaml
 3. **Execute task**: Follow the assigned task, adhering to project policy
 4. **Log decisions**: Record non-trivial decisions in decision_log.md

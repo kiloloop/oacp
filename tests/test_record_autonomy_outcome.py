@@ -5,6 +5,9 @@
 from __future__ import annotations
 
 import sys
+import copy
+import json
+import subprocess
 from pathlib import Path
 from typing import Any, Dict
 
@@ -20,6 +23,7 @@ from record_autonomy_outcome import (  # noqa: E402
     main,
     record_human_outcome,
 )
+from finalize_autonomy_record import validate_audit_record  # noqa: E402
 
 
 SCOPE = {
@@ -67,6 +71,116 @@ def test_records_task_approval_latency_without_grant() -> None:
     assert outcome["grant"]["request_present"] is False
     assert outcome["grant"]["request_error"] is None
     assert outcome["grant"]["granted_scope"] is None
+
+
+@pytest.mark.parametrize("modification", [
+    {},
+    {"task_profile": {"estimated_minutes": 60}, "note": "Allow the larger task"},
+    {"custom": {"choices": [True, None, 3], "label": "a: b\nsecond line"}},
+])
+def test_modification_cli_round_trip_preserves_admission_and_auth(
+    tmp_path: Path, modification: Dict[str, Any],
+) -> None:
+    audit = _audit()
+    audit["schema_version"] = 2
+    audit["scope_envelope"] = {"estimated_minutes": 30}
+    audit["result"].update({
+        "completion_kind": "admission_paused",
+        "message_auth": {"status": "verified", "payload_sha256": "abc"},
+    })
+    assert validate_audit_record(audit) == []
+    audit_path = tmp_path / "audit.yaml"
+    audit_path.write_text(yaml.safe_dump(audit))
+    modification_path = tmp_path / "modification.yaml"
+    modification_path.write_text(yaml.safe_dump(modification))
+    result = subprocess.run([
+        sys.executable, "-m", "oacp.cli", "autonomy-outcome", str(audit_path),
+        "--decision", "modified", "--modification-file", str(modification_path),
+        "--actor", "alice", "--decided-at", "2026-07-11T01:02:05Z", "--json",
+    ], cwd=Path(__file__).resolve().parent.parent, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "modification unrecorded" not in result.stderr
+    updated = yaml.safe_load(audit_path.read_text())
+    assert updated["schema_version"] == 2
+    assert updated["scope_envelope"] == audit["scope_envelope"]
+    assert updated["result"]["message_auth"] == audit["result"]["message_auth"]
+    assert updated["result"]["human_outcome"]["modification"] == modification
+    assert json.loads(result.stdout)["human_outcome"]["modification"] == modification
+    assert validate_audit_record(updated) == []
+
+
+def test_modification_without_file_remains_compatible_and_warns(
+    tmp_path: Path, capsys: pytest.CaptureFixture,
+) -> None:
+    audit_path = tmp_path / "audit.yaml"
+    audit_path.write_text(yaml.safe_dump(_audit()))
+    assert main([
+        str(audit_path), "--decision", "modified", "--actor", "alice",
+        "--decided-at", "2026-07-11T01:02:05Z",
+    ]) == 0
+    assert capsys.readouterr().err.strip() == (
+        "WARNING: modification unrecorded; use --modification-file"
+    )
+    outcome = yaml.safe_load(audit_path.read_text())["result"]["human_outcome"]
+    assert outcome["decision"] == "modified"
+    assert "modification" not in outcome
+
+
+@pytest.mark.parametrize("contents", [None, "null\n", "[]\n", "text\n", "x: [\n"])
+def test_invalid_modification_file_preserves_audit(
+    tmp_path: Path, contents: Any,
+) -> None:
+    audit_path = tmp_path / "audit.yaml"
+    original = yaml.safe_dump(_audit())
+    audit_path.write_text(original)
+    modification_path = tmp_path / "modification.yaml"
+    if contents is not None:
+        modification_path.write_text(contents)
+    assert main([
+        str(audit_path), "--decision", "modified", "--actor", "alice",
+        "--modification-file", str(modification_path),
+    ]) == 2
+    assert audit_path.read_text() == original
+
+
+@pytest.mark.parametrize("decision", ["approved", "declined"])
+def test_modification_requires_modified_decision(decision: str) -> None:
+    audit = _audit()
+    original = copy.deepcopy(audit)
+    with pytest.raises(ValueError, match="only for a modified decision"):
+        record_human_outcome(audit, decision=decision, modification={})
+    assert audit == original
+
+
+def test_modification_dry_run_leaves_audit_unchanged(
+    tmp_path: Path, capsys: pytest.CaptureFixture,
+) -> None:
+    audit_path = tmp_path / "audit.yaml"
+    original = yaml.safe_dump(_audit())
+    audit_path.write_text(original)
+    modification_path = tmp_path / "modification.yaml"
+    modification_path.write_text("note: approved change\n")
+    assert main([
+        str(audit_path), "--decision", "modified", "--actor", "alice",
+        "--modification-file", str(modification_path), "--dry-run", "--json",
+    ]) == 0
+    assert audit_path.read_text() == original
+    assert json.loads(capsys.readouterr().out)["human_outcome"]["modification"] == {
+        "note": "approved change",
+    }
+
+
+def test_unrepresentable_modification_json_fails_before_write(tmp_path: Path) -> None:
+    audit_path = tmp_path / "audit.yaml"
+    original = yaml.safe_dump(_audit())
+    audit_path.write_text(original)
+    modification_path = tmp_path / "modification.yaml"
+    modification_path.write_text("2026-09-01: a date key\n")
+    assert main([
+        str(audit_path), "--decision", "modified", "--actor", "alice",
+        "--modification-file", str(modification_path), "--json",
+    ]) == 2
+    assert audit_path.read_text() == original
 
 
 def test_approved_grant_uses_requested_scope() -> None:
@@ -694,6 +808,41 @@ def test_checkpoint_clear_preserves_admission_outcome_and_grant() -> None:
     assert outcome == before
     assert outcome["decided_at_utc"] == "2026-08-01T01:11:00Z"
     assert outcome["grant"]["granted_scope"] == NORMALIZED_SCOPE
+
+
+def test_checkpoint_clear_cannot_replace_admission_modification() -> None:
+    audit = _cleared_admission_checkpoint_audit()
+    audit["result"]["human_outcome"]["modification"] = {"note": "Original delta"}
+    original = copy.deepcopy(audit)
+    with pytest.raises(ValueError, match="records an admission outcome"):
+        record_human_outcome(
+            audit, decision="modified", modification={"note": "New delta"},
+            actor="alice", decided_at_utc="2026-08-01T02:24:00Z",
+        )
+    assert audit == original
+    cleared = record_human_outcome(
+        audit, decision="approved", actor="alice",
+        decided_at_utc="2026-08-01T02:24:00Z",
+    )
+    assert cleared["result"]["human_outcome"] == original["result"]["human_outcome"]
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_modified_checkpoint_clear_fails_before_modification_warning(
+    tmp_path: Path, capsys: pytest.CaptureFixture, dry_run: bool,
+) -> None:
+    audit_path = tmp_path / "audit.yaml"
+    original = yaml.safe_dump(_cleared_admission_checkpoint_audit())
+    audit_path.write_text(original)
+    args = [str(audit_path), "--decision", "modified", "--actor", "alice"]
+    if dry_run:
+        args.append("--dry-run")
+    assert main(args) == 2
+    captured = capsys.readouterr()
+    assert "scope-less and cannot be modified" in captured.err
+    assert "modification unrecorded" not in captured.err
+    assert captured.out == ""
+    assert audit_path.read_text() == original
 
 
 def test_checkpoint_clear_declined_records_declined_disposition() -> None:
