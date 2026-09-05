@@ -87,7 +87,7 @@ $OACP_HOME/projects/my-app/                  ● writing
   workspace.json                      metadata        [json]
 
 $OACP_HOME/org-memory/                org-wide
-  recent.md            auto-loaded    [⌘]
+  recent.md            on demand      [⌘]
   rules.md             12 rules       [⌘]
   decisions.md         org decisions  [⌘]
 ```
@@ -345,11 +345,15 @@ Optionally, `oacp org-memory init` creates org-level shared memory:
 
 ```
 $OACP_HOME/org-memory/
-├── recent.md                # Always-loaded rolling summary
+├── recent.md                # Rolling summary, retrieved on demand
 ├── decisions.md             # Org-wide decisions
 ├── rules.md                 # Standing conventions
 └── events/                  # Timestamped event entries
 ```
+
+Init loads the four active project memory files. Org memory is retrieved on
+demand; syncing it to disk does not load it into context. See
+[project context and org-memory retrieval](docs/guides/memory-context.md).
 
 ## Development
 

@@ -402,8 +402,10 @@ def build_session_start_hook_output(
         *[f"- {name}" for name in PROTOCOL_FILES],
         f"Project memory root: {memory_root}",
         *[f"- {name}" for name in MEMORY_FILES],
-        "Then read org-memory/recent.md when present, plus relevant decisions.md "
-        "and rules.md, as required by the active AGENTS.md.",
+        "Org memory is separate from these required project reads: retrieve it "
+        "on demand by default under the active AGENTS.md policy. Read applicable "
+        "org rules and decisions before work they govern.",
+        "Memory pull synchronizes disk files; it does not load org content into context.",
         "Include the exact SESSION_INIT_ACK line above in the first response after startup.",
     ]
     if report["warnings"]:

@@ -8,7 +8,7 @@ Shared, cross-project memory for multi-agent organizations. Agents across projec
 
 ```
 $OACP_HOME/org-memory/
-  recent.md           # always-loaded rolling summary (~60K chars / ~15K tokens)
+  recent.md           # rolling summary (~60K chars / ~15K tokens)
   decisions.md        # topical: org-wide decisions (illustrative default)
   rules.md            # topical: standing conventions (illustrative default)
   events/             # chronological: timestamped entries
@@ -21,11 +21,17 @@ $OACP_HOME/org-memory/
 
 `decisions.md` and `rules.md` are illustrative defaults, not protocol requirements. Adopters choose which topical files to create (e.g., `agents.md`, `architecture.md`).
 
-Keep `recent.md` to approximately 60,000 characters (roughly 15,000 tokens),
-because its context cost is paid at every session start. Approximately 150
-lines remain a secondary readability hint only; when the measures disagree,
-the character budget governs. Collapse older detail into topical files or
-history so the file remains a rolling summary rather than a complete log.
+Org memory is retrieved on demand by default, separately from the four
+project memory files read during init. Runtime or project guidance may opt
+into a bounded startup summary; the directory layout does not require eager
+loading. See the adopter guide for [memory context and retrieval](../guides/memory-context.md).
+
+Keep `recent.md` to approximately 60,000 characters (roughly 15,000 tokens)
+unless adopter guidance sets a smaller budget. Approximately 150 lines remain
+a secondary readability hint only; when the measures disagree, the character
+budget governs. Collapse older detail into topical files or history so the
+file remains a bounded rolling summary when retrieved. This is a curation
+budget, not a requirement or allowance to load that much context at startup.
 
 ## Event File Schema
 
@@ -221,7 +227,7 @@ verified record — never partial bytes.
 Raw debriefs never enter `recent.md` or `events/` — only curated folds do.
 The coordinator reads debriefs and promotes durable outcomes into events and
 topical files; the raw session narrative stays in `debriefs/`. This keeps the
-always-loaded surfaces bounded and the event channel filtered. Debrief files
+curated surfaces bounded and the event channel filtered. Debrief files
 are likewise never auto-loaded at session start.
 
 ### Sync
@@ -276,7 +282,7 @@ Cortex demonstrates the dual-pipeline pattern — same source data, two audience
 1. Format spec (directory structure, frontmatter schema, naming convention)
 2. CLI: `oacp org-memory init` (scaffold directory, including `debriefs/`) and `oacp write-event` (create event files)
 3. Agents write their full session debrief to `org-memory/debriefs/` (via adopter tooling — see Debrief Store) and curated outcome events during debrief
-4. Agents read topical files + `recent.md` for org context
+4. Agents retrieve relevant sections of topical files and `recent.md` for org context on demand
 5. Coordinator maintains topical files during sync
 
 ## v0.3+

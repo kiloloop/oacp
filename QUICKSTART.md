@@ -108,6 +108,11 @@ sequentially. If hooks are unavailable, run the manual fallback:
 oacp session-init --pull-memory --project my-first-project
 ```
 
+Memory pull synchronizes files on disk. The init manifest names the protocol
+files and four project memory files to read into context; org memory is
+retrieved on demand. See [memory context](docs/guides/memory-context.md) for
+retrieval and existing-installation guidance.
+
 Runtime setup does not install an automatic memory push. Publish durable memory
 explicitly during wrap-up with `oacp memory push`.
 

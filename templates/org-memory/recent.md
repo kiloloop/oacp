@@ -1,6 +1,7 @@
 # Org Memory — Rolling Summary
 
-<!-- Always-loaded context for agents. Keep under ~150 lines. -->
+<!-- Retrieved on demand; not required startup context. -->
+<!-- Keep near 60,000 characters or the adopter's smaller budget; ~150 lines is a readability hint. -->
 <!-- Updated by coordinator during sync/curation. -->
 
 ## Current State

@@ -106,6 +106,10 @@ schema-invalid profile pauses with `task_profile_unparsable`; it is not a fatal
 message-schema error. Message types listed in `allow_without_task_profile`, such
 as `brainstorm_request`, may auto-accept without the block.
 
+| Optional profile field | Meaning |
+| --- | --- |
+| `expected_pauses` | List of pause reason codes the sender expects to fire, for example `[estimated_minutes_exceeds_threshold, merges_pr_pause]`. Advisory only: unknown codes or malformed values produce declaration warnings, not new admission reasons. Existing safety checks still apply to the whole message. See [pause classification](#pause-classification). |
+
 `expected_files_touched` counts distinct deliverable files only: files created
 or modified as part of the requested outcome or a review-required correction.
 Exclude receiver-local inbox, outbox, audit, memory, cache, and scratch writes
@@ -433,6 +437,11 @@ Audit `schema_version: 2` adds thread identity and the structured
 `result.human_outcome` block. Recorders may upgrade a v1 audit to v2 when the
 first human outcome is written; standing grants trust only v2 records.
 
+| Optional audit evidence | Meaning |
+| --- | --- |
+| `pause_classification`, `expected_pause_codes`, `unplanned_pause_codes` | The paused decision's comparison against the sender's expected reasons; see [pause classification](#pause-classification). Older v2 records may omit all three. |
+| `result.human_outcome.modification` | Free-form YAML mapping recording what the human changed, such as `task_profile: {estimated_minutes: 60}` and `note: "Allow the larger task"`. Written by `--modification-file`; evidence only, with no effect on the scope envelope, standing grants, or checkpoint enforcement. |
+
 ### Contract version
 
 `spec_version` names the protocol contract an artifact was produced under.
@@ -509,6 +518,40 @@ the thresholds passed, never that they went unevaluated. The list is sorted,
 deduplicated against `reason_codes`, and empty on auto-accepted decisions.
 Threshold-calibration analytics should read `reason_codes` and
 `co_occurring_reason_codes` together.
+
+### Pause classification
+
+Every new paused evaluation records `pause_classification`,
+`expected_pause_codes`, and `unplanned_pause_codes` as additive audit evidence.
+The fired set contains only pause reasons in that decision's `reason_codes`.
+Evidence codes such as `message_valid` and `schema_valid`, co-occurring reasons,
+and lexical notes never enter this set.
+
+| Declaration and fired reasons | Classification |
+| --- | --- |
+| `expected_pauses` absent | `undeclared` |
+| Every fired pause reason is expected | `designed` |
+| No fired pause reason is expected | `unplanned` |
+| Some, but not all, fired pause reasons are expected | `mixed` |
+
+`expected_pause_codes` preserves declared string entries, including unknown
+codes; unknown codes are ignored for comparison and recorded as declaration
+warnings in `logged_notes`.
+An absent or malformed declaration contributes no expected reasons.
+`unplanned_pause_codes` lists the fired reasons minus the recognized expected
+reasons.
+All message text, including the advisory value, remains subject to existing
+lexical safety checks.
+An unknown declaration adds no admission reason of its own, but a destructive
+token inside it still fires the same hard stop as that token elsewhere.
+The declaration cannot authorize work or suppress a fired pause.
+
+These fields and `human_outcome.modification` are additive and ignorable within
+audit schema v2: existing records validate unchanged, and readers may ignore the
+fields without changing an admission, finalization, doctor, or enforcement
+decision.
+There is no contract change under the [version rule](#contract-version).
+Historical records are not backfilled.
 
 ### Lexical provenance
 
@@ -637,6 +680,18 @@ The recorder copies the pause reason codes, computes decision latency from the
 pause moment, and locks the full read-modify-write sequence before an atomic
 replacement. It refuses to overwrite a recorded outcome unless `--replace` is
 explicit. `decision` is `approved`, `modified`, or `declined`.
+
+| Flag | Meaning |
+| --- | --- |
+| `--modification-file <yaml>` | With `--decision modified`, read a free-form YAML mapping into `result.human_outcome.modification`. Without the file, the modified decision still records and prints a one-line `modification unrecorded` warning. |
+
+An empty mapping is valid.
+A missing, unreadable, invalid-YAML, or non-mapping file leaves the audit
+unchanged, as does using the flag with a decision other than `modified`.
+The payload records the human's delta without applying it to the original
+scope envelope or creating a standing grant.
+It cannot replace the earlier outcome when the command routes to a checkpoint
+clear; scoped checkpoint changes still use the re-authorization path below.
 
 The recorder is state-aware about where the pause moment lives:
 

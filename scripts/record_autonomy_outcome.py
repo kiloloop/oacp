@@ -146,9 +146,15 @@ def build_human_outcome(
     decided_at_utc: Optional[str] = None,
     granted_scope: Optional[Dict[str, Any]] = None,
     actor: str = "human",
+    modification: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     if decision not in HUMAN_DECISIONS:
         raise ValueError(f"decision must be one of: {', '.join(sorted(HUMAN_DECISIONS))}")
+    if modification is not None:
+        if decision != "modified":
+            raise ValueError("modification is valid only for a modified decision")
+        if not isinstance(modification, dict):
+            raise ValueError("modification must be a YAML mapping")
     if grant_decision not in GRANT_DECISIONS:
         choices = ", ".join(sorted(GRANT_DECISIONS))
         raise ValueError(f"grant_decision must be one of: {choices}")
@@ -226,7 +232,7 @@ def build_human_outcome(
     ):
         raise ValueError("audit.reason_codes must be a list of strings")
 
-    return {
+    outcome = {
         "recorded": True,
         "actor": actor_value,
         "decision": decision,
@@ -241,6 +247,9 @@ def build_human_outcome(
             "granted_scope": normalized_granted_scope,
         },
     }
+    if modification is not None:
+        outcome["modification"] = copy.deepcopy(modification)
+    return outcome
 
 
 def _completion_evidence(audit: Dict[str, Any]) -> Optional[str]:
@@ -421,6 +430,11 @@ def record_human_outcome(
                 "threshold_checkpoint.reauthorization and the recorded "
                 "outcome is preserved"
             )
+        if kwargs.pop("modification", None) is not None:
+            raise ValueError(
+                "--modification-file records an admission outcome; "
+                "checkpoint scope changes use autonomy-finalize --actuals"
+            )
         _clear_checkpoint(updated, **kwargs)
     else:
         existing = result.get("human_outcome")
@@ -459,6 +473,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         choices=sorted(GRANT_DECISIONS),
     )
     parser.add_argument("--grant-scope-file", type=Path)
+    parser.add_argument(
+        "--modification-file", type=Path,
+        help="YAML mapping recording the human's admission delta (--decision modified)",
+    )
     parser.add_argument("--decided-at")
     parser.add_argument(
         "--actor",
@@ -502,26 +520,35 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 decided_at_utc=args.decided_at,
                 granted_scope=_grant_scope_from_file(args.grant_scope_file),
                 actor=args.actor,
+                modification=(
+                    _load_mapping(args.modification_file)
+                    if args.modification_file is not None else None
+                ),
             )
+            outcome = updated["result"]["human_outcome"]
+            reauthorization = (
+                updated["result"]["threshold_checkpoint"]["reauthorization"]
+                if clearance else None
+            )
+            if args.json:
+                summary = {
+                    "audit_file": str(args.audit_file),
+                    "dry_run": args.dry_run,
+                    "schema_version": updated["schema_version"],
+                    "human_outcome": outcome,
+                }
+                if clearance:
+                    summary["threshold_checkpoint_reauthorization"] = reauthorization
+                # Render before committing: an unrepresentable YAML value
+                # must not report a failed command after changing the audit.
+                summary_json = json.dumps(summary, indent=2, default=str)
             if not args.dry_run:
                 atomic_replace_yaml(args.audit_file, updated)
 
-        outcome = updated["result"]["human_outcome"]
-        reauthorization = (
-            updated["result"]["threshold_checkpoint"]["reauthorization"]
-            if clearance
-            else None
-        )
+        if args.decision == "modified" and args.modification_file is None:
+            print("WARNING: modification unrecorded; use --modification-file", file=sys.stderr)
         if args.json:
-            summary = {
-                "audit_file": str(args.audit_file),
-                "dry_run": args.dry_run,
-                "schema_version": updated["schema_version"],
-                "human_outcome": outcome,
-            }
-            if clearance:
-                summary["threshold_checkpoint_reauthorization"] = reauthorization
-            print(json.dumps(summary, indent=2))
+            print(summary_json)
         elif args.dry_run:
             print(yaml.safe_dump(updated, sort_keys=False, allow_unicode=True).rstrip())
         elif clearance:

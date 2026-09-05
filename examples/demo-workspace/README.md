@@ -77,8 +77,8 @@ the loop:
    now carries the rule with "promoted from 3 events" provenance pointing back
    at all three.
 5. **The rolling summary reflects it** — [`org-memory/recent.md`](org-memory/recent.md)
-   (the always-loaded file) lists the rule under Standing Rules, so every
-   agent sees it without scanning events.
+   lists the rule under Standing Rules, so an agent can retrieve it when
+   relevant without scanning events.
 
 `decisions.md` shows the same flow for a one-shot architectural call
 (PostgreSQL over DynamoDB) rather than a repeating pattern.
@@ -97,7 +97,7 @@ demo-workspace/                       ← shaped like $OACP_HOME
         archive/
           2026-05-21-csv-export-timeouts.md   closed thread, 3 dated entries
   org-memory/                         org-wide knowledge
-    recent.md                         always-loaded rolling summary
+    recent.md                         rolling summary, retrieved on demand
     rules.md                          standing conventions (curated)
     decisions.md                      architectural calls (curated)
     events/                           raw signal — 6 events, 3 types

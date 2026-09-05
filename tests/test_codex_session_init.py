@@ -452,6 +452,8 @@ class TestCodexSessionInit(unittest.TestCase):
             self.assertIn("Verified inputs: 7 files", context)
             self.assertIn("agent_safety_defaults.md", context)
             self.assertIn("known_debt.md", context)
+            self.assertIn("on demand by default", context)
+            self.assertIn("Read applicable org rules and decisions", context)
             self.assertNotIn("# safety", context)
             self.assertNotIn("# facts", context)
             self.assertIn("SESSION_INIT_ACK: project=demo", context)
@@ -618,6 +620,61 @@ class TestCodexSessionInit(unittest.TestCase):
         context = payload["hookSpecificOutput"]["additionalContext"]
         self.assertIn("PermissionError", context)
         self.assertIn("session-init --pull-memory", context)
+
+    def test_large_org_memory_does_not_change_init_reads_or_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hub_dir = root / "oacp"
+            repo_dir = root / "repo"
+            project_dir = _seed_memory(hub_dir, "demo")
+            protocol_dir = _seed_protocol(repo_dir)
+            kwargs = {
+                "project": "demo",
+                "hub_dir": hub_dir,
+                "cwd": repo_dir,
+                "model": "gpt-test",
+                "status": "available",
+                "current_task": "",
+                "dry_run": True,
+                "protocol_dir": protocol_dir,
+            }
+            baseline = run_session_init(**kwargs)
+            baseline_output = build_session_start_hook_output(baseline)
+
+            org_dir = hub_dir / "org-memory"
+            large_content = "ORG_CONTEXT_SENTINEL\n" * 50_000
+            for name in (
+                "recent.md",
+                "rules.md",
+                "decisions.md",
+                "events/20260905-000000-example.md",
+                "debriefs/demo/2026/09/20260905-codex-example.md",
+            ):
+                _write(org_dir / name, large_content)
+
+            actual_reads = []
+            org_memory_reads = []
+            original_read = Path.read_text
+
+            def record_read(path, *args, **read_kwargs):
+                actual_reads.append(path)
+                if org_dir in path.parents:
+                    org_memory_reads.append(path)
+                return original_read(path, *args, **read_kwargs)
+
+            with mock.patch.object(Path, "read_text", autospec=True, side_effect=record_read):
+                report = run_session_init(**kwargs)
+                output = build_session_start_hook_output(report)
+
+            self.assertEqual(org_memory_reads, [])
+            self.assertEqual(
+                actual_reads,
+                [protocol_dir / name for name in session_init.PROTOCOL_FILES]
+                + [project_dir / "memory" / name for name in session_init.MEMORY_FILES],
+            )
+            self.assertEqual(report, baseline)
+            self.assertEqual(output, baseline_output)
+            self.assertNotIn("ORG_CONTEXT_SENTINEL", json.dumps(output))
 
     def test_archive_dir_is_not_loaded_during_session_init(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

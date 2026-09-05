@@ -25,13 +25,15 @@ The protocol defines three complementary sync mechanisms, ordered from most dura
 | `open_threads.md` | Unresolved issues, blocked epics, cross-agent coordination | Any agent via the project's durable-memory promotion flow |
 | `known_debt.md` | Verified unresolved debt that should persist across sessions | Any agent via the project's durable-memory promotion flow |
 
-The top-level files in `memory/` are the active working set. Historical memory can be moved into `memory/archive/`, which is not loaded during session init unless an agent explicitly opts in.
+These four files are the active working set. Other project files and
+`memory/archive/` hold context retrieved when the task needs it; their presence
+does not add them to the required init reads. Org memory is also retrieved on demand.
 
-These files are the **source of truth** for stable project knowledge. All runtimes read the active working set at session start. Only verified, stable outcomes should be written here.
+These files are the **source of truth** for stable project knowledge. All runtimes read the four files in the order above at init. Only verified, stable outcomes should be written here.
 
 **Promotion flow**: Merge decisions contain a "Durable Memory Updates" section. Each implementation should provide a promotion mechanism that extracts approved entries from merge artifacts and appends them to the appropriate memory file, deduplicating against existing content.
 
-**Archive flow**: Users or coordinator agents may move non-standard memory files into `memory/archive/` for historical retention, then restore them back into `memory/` when they become active again.
+**Archive flow**: Users or coordinator agents may move non-standard memory files into `memory/archive/` for historical retention, then restore them back into `memory/` when needed again. Restoring a file does not add it to the required init read set.
 
 ### 2. Handoff Messages with Context Keys
 
@@ -72,7 +74,7 @@ Agents synchronize knowledge at well-defined points in the workflow:
 
 ### Claude
 
-- **Reads**: `CLAUDE.md` (project-level instructions, auto-loaded), `memory/` files (read at session start or on demand)
+- **Reads**: `CLAUDE.md` (project-level instructions, auto-loaded), the four active project memory files at init, and other project/org context on demand
 - **Writes**: Memory files via merge decisions + durable-memory promotion, handoff messages, review packets
 - **Context mechanism**: `CLAUDE.md` is injected into every conversation. Memory files are read explicitly.
 - **Tip**: Keep `CLAUDE.md` under 200 lines. Move detailed notes to memory files and reference them.
@@ -101,7 +103,7 @@ Avoid these common mistakes when syncing knowledge across runtimes:
 | Syncing ephemeral state (temp files, debug logs, partial results) | Clutters memory, confuses future agents | Only promote stable, verified outcomes |
 | Assuming shared context | Agent B cannot read Agent A's conversation history | Always include context in handoff messages |
 | Writing to memory too eagerly | Unverified or in-progress work pollutes the knowledge base | Wait until merge decision to promote |
-| Skipping memory reads at session start | Agent makes decisions contradicting prior work | Always read memory files before starting work |
+| Skipping project memory reads at session start | Agent makes decisions contradicting prior work | Read the four active project memory files; retrieve org memory on demand |
 
 ## Integration with durable-memory promotion
 

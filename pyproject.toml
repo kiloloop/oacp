@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "oacp-cli"
-version = "0.4.5"
+version = "0.4.6"
 description = "Open Agent Coordination Protocol CLI for file-based multi-agent workflows"
 readme = "README.md"
 license = "Apache-2.0"
@@ -108,6 +108,8 @@ packages = ["oacp"]
 "docs/protocol/message_signing.md" = "oacp/_protocol/message_signing.md"
 "docs/protocol/autonomy.md" = "oacp/_protocol/autonomy.md"
 "docs/protocol/org_memory.md" = "oacp/_protocol/org_memory.md"
+# Preserve ../guides/ links from the shipped protocol documents.
+"docs/guides/memory-context.md" = "oacp/guides/memory-context.md"
 "templates/inbox_message.template.yaml" = "oacp/_templates/inbox_message.template.yaml"
 "templates/runtime_capabilities.yaml" = "oacp/_templates/runtime_capabilities.yaml"
 "templates/org-memory/recent.md" = "oacp/_templates/org-memory/recent.md"
