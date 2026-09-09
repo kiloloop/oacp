@@ -162,10 +162,11 @@ This section provides guidance for per-runtime implementations.
 
 Steps 1-2 are handled automatically by Claude Code (CLAUDE.md loading). Step 3 requires explicit file reads or auto-memory. Step 4 uses `/check-inbox`. Step 5 is automatic (skill discovery). Step 6 requires a startup hook or explicit script call.
 
-`oacp setup claude` registers the marker-gated memory pull at `SessionStart`.
-Pull synchronizes files on disk; it does not load org memory into context.
-It intentionally does not publish memory at `SessionEnd`; wrap-up owns the
-single explicit `oacp memory push` path. Claude status reporting remains an
+The memory tool registers the marker-gated memory pull at `SessionStart`
+(`agent-memory setup claude`); `oacp setup claude` retires the pull hook earlier
+kernels wrote. Pull synchronizes files on disk; it does not load org memory into
+context. Nothing publishes memory at `SessionEnd`; wrap-up owns the single
+explicit `agent-memory push` path. Claude status reporting remains an
 explicit runtime responsibility, and so is any session telemetry beyond
 `status.yaml`: the kernel ships no reference implementation for it, and
 runtime-kept telemetry is never a `status.yaml` writer.
@@ -174,9 +175,13 @@ runtime-kept telemetry is never a `status.yaml` writer.
 
 Steps 1-2 are handled by AGENTS.md loading. Running `oacp setup codex
 --project <project>` installs one repo-local `SessionStart` handler in
-`.codex/hooks.json`. After the user reviews and trusts it with `/hooks`, the
-handler sequentially pulls shared memory to disk and runs `oacp session-init`.
-No Codex `SessionEnd` hook is installed.
+`.codex/hooks.json`. Setup regenerates the handler it owns; it never adds one to
+a hooks file that has none, so a file kept deliberately without a managed entry
+is left byte-identical and reported as `no managed entry; skipped`. After the
+user reviews and trusts it with `/hooks`, the
+handler runs `oacp session-init`; it does not pull memory. Syncing shared
+memory to disk is the memory tool's own startup hook, installed separately by
+`agent-memory setup codex`. No Codex `SessionEnd` hook is installed.
 
 The init command verifies that protocol and the four project memory files are
 readable, updates `status.yaml`, and emits bounded developer context naming the required
@@ -185,8 +190,11 @@ Org-memory content is not read by this verification or included in its manifest.
 Use this manual fallback when the project hook is unavailable or untrusted:
 
 ```bash
-oacp session-init --pull-memory --project <project>
+oacp session-init --project <project>
 ```
+
+`--pull-memory` runs `agent-memory pull --home <hub_dir>` first when the tool is
+on PATH and reports the pull as `disabled` with the install hint when it is not.
 
 The script emits a deterministic acknowledgement payload suitable for first-response confirmation:
 
@@ -219,7 +227,7 @@ Steps 1-2 are handled by system prompts and `.agent/rules/`. Steps 3-6 can be im
 - **Safety Defaults**: `docs/protocol/agent_safety_defaults.md` — baseline safety rules loaded at Step 1
 - **Inbox Protocol**: `docs/protocol/inbox_outbox.md` — message format for Step 4
 - **Runtime Capabilities**: `docs/protocol/runtime_capabilities.md` — status schema and capability keys for Step 6
-- **Cross-Runtime Sync**: `docs/protocol/cross_runtime_sync.md` — durable memory files loaded at Step 3
+- **Memory Layout**: `docs/protocol/org_memory.md` — the per-project memory files loaded at Step 3
 - **Session telemetry**: runtime-owned; the kernel ships no reference
   implementation — see `docs/protocol/runtime_capabilities.md` (Runtime startup
   and session telemetry)

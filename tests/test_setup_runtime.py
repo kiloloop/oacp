@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
@@ -20,6 +21,7 @@ from add_agent import (  # noqa: E402
     CLAUDE_SUPPORTED_MESSAGE_TYPES,
     CODEX_SUPPORTED_MESSAGE_TYPES,
 )
+import setup_runtime as setup_runtime_module  # noqa: E402
 from setup_runtime import setup_runtime  # noqa: E402
 
 
@@ -32,7 +34,6 @@ class TestSetupRuntime(unittest.TestCase):
             )
 
             agent_file = repo_dir / ".claude" / "agents" / "myproj.md"
-            pull_hook = repo_dir / ".claude" / "hooks" / "oacp-memory-pull.sh"
             settings_file = repo_dir / ".claude" / "settings.json"
             self.assertTrue(agent_file.is_file())
             agent_content = agent_file.read_text(encoding="utf-8")
@@ -43,16 +44,11 @@ class TestSetupRuntime(unittest.TestCase):
             self.assertEqual(positions, sorted(positions))
             self.assertIn("org memory on demand", agent_content)
             self.assertTrue((repo_dir / ".claude" / "skills").is_dir())
-            self.assertTrue(pull_hook.is_file())
-            self.assertFalse(
-                (repo_dir / ".claude" / "hooks" / "oacp-memory-push.sh").exists()
-            )
+            # Memory hooks belong to the memory tool: none are written here.
+            self.assertFalse((repo_dir / ".claude" / "hooks").exists())
             self.assertTrue(settings_file.is_file())
-            pull_content = pull_hook.read_text(encoding="utf-8")
-            self.assertIn("Claude hook event: SessionStart", pull_content)
-            self.assertIn("oacp memory pull", pull_content)
             settings = json.loads(settings_file.read_text(encoding="utf-8"))
-            self.assertIn("SessionStart", settings["hooks"])
+            self.assertNotIn("SessionStart", settings["hooks"])
             self.assertNotIn("SessionEnd", settings["hooks"])
             self.assertIn("PreToolUse", settings["hooks"])
             envelope_entry = settings["hooks"]["PreToolUse"][0]
@@ -62,8 +58,9 @@ class TestSetupRuntime(unittest.TestCase):
             )
             self.assertIn(".claude/agents/myproj.md", result["created_files"])
             self.assertIn(".claude/skills/", result["created_files"])
-            self.assertIn(".claude/hooks/oacp-memory-pull.sh", result["created_files"])
+            self.assertNotIn(".claude/hooks/oacp-memory-pull.sh", result["created_files"])
             self.assertIn(".claude/settings.json", result["created_files"])
+            self.assertEqual(result["retired_files"], [])
 
     def test_claude_envelope_hook_registration_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -99,7 +96,9 @@ class TestSetupRuntime(unittest.TestCase):
             content = agents_md.read_text(encoding="utf-8")
             self.assertIn("OACP", content)
             self.assertIn("oacp send", content)
-            self.assertIn("oacp session-init --pull-memory", content)
+            self.assertIn("oacp session-init --project", content)
+            self.assertNotIn("--pull-memory", content)
+            self.assertIn("agent-memory setup codex", content)
             self.assertIn("project memory files", content)
             self.assertIn("Org memory is retrieved on demand", content)
             hooks = json.loads(hooks_file.read_text(encoding="utf-8"))
@@ -108,8 +107,8 @@ class TestSetupRuntime(unittest.TestCase):
             self.assertEqual(len(entry["hooks"]), 1)
             handler = entry["hooks"][0]
             self.assertEqual(handler["type"], "command")
-            self.assertIn("oacp session-init --hook --pull-memory", handler["command"])
-            self.assertIn("--project demo", handler["command"])
+            self.assertIn("oacp session-init --hook --project demo", handler["command"])
+            self.assertNotIn("--pull-memory", handler["command"])
             self.assertIn(f"--hub-dir {oacp_root}", handler["command"])
             self.assertEqual(handler["additionalContextLimit"], 2500)
             self.assertEqual(handler["timeout"], 60)
@@ -466,9 +465,91 @@ protocol:
 
             self.assertEqual(data["env"]["EXISTING"], "1")
             self.assertIn("Stop", data["hooks"])
-            self.assertIn("SessionStart", data["hooks"])
+            self.assertNotIn("SessionStart", data["hooks"])
             self.assertNotIn("SessionEnd", data["hooks"])
+            self.assertIn("PreToolUse", data["hooks"])
             self.assertIn(".claude/settings.json", result["created_files"])
+
+    def test_claude_retires_generated_memory_hooks_by_command_and_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            settings = repo_dir / ".claude" / "settings.json"
+            settings.parent.mkdir(parents=True)
+            settings.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "SessionStart": [
+                                {
+                                    "matcher": "startup",
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": ".claude/hooks/oacp-memory-pull.sh",
+                                            "timeout": 30,
+                                        },
+                                        {
+                                            "type": "command",
+                                            "command": ".claude/hooks/custom-startup.sh",
+                                        },
+                                    ],
+                                }
+                            ],
+                            "SessionEnd": [
+                                {
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": ".claude/hooks/oacp-memory-push.sh",
+                                        }
+                                    ]
+                                }
+                            ],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            hooks_dir = repo_dir / ".claude" / "hooks"
+            hooks_dir.mkdir()
+            generated_pull = hooks_dir / "oacp-memory-pull.sh"
+            generated_pull.write_text(setup_runtime_module.CLAUDE_LEGACY_MEMORY_PULL_HOOK, encoding="utf-8")
+            edited_push = hooks_dir / "oacp-memory-push.sh"
+            edited_push.write_text("#!/usr/bin/env bash\necho mine\n", encoding="utf-8")
+
+            result = setup_runtime("claude", repo_dir=repo_dir, project_name="demo")
+
+            data = json.loads(settings.read_text(encoding="utf-8"))
+            start_commands = [
+                hook["command"]
+                for entry in data["hooks"]["SessionStart"]
+                for hook in entry.get("hooks", [])
+            ]
+            self.assertEqual(start_commands, [".claude/hooks/custom-startup.sh"])
+            self.assertNotIn("SessionEnd", data["hooks"])
+            # The generated script goes; the edited one stays and is reported.
+            self.assertFalse(generated_pull.exists())
+            self.assertEqual(edited_push.read_text(encoding="utf-8"), "#!/usr/bin/env bash\necho mine\n")
+            self.assertEqual(result["retired_files"], [".claude/hooks/oacp-memory-pull.sh"])
+            self.assertIn(".claude/hooks/oacp-memory-push.sh", result["skipped_files"])
+
+    def test_claude_setup_is_idempotent_after_the_migration_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            setup_runtime("claude", repo_dir=repo_dir, project_name="demo")
+            result = setup_runtime("claude", repo_dir=repo_dir, project_name="demo")
+            self.assertEqual(result["retired_files"], [])
+            self.assertIn(".claude/settings.json", result["skipped_files"])
+
+    def test_main_points_at_the_memory_tool_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            (repo_dir / ".git").mkdir()
+            stdout = io.StringIO()
+            with mock.patch.object(sys, "stdout", stdout):
+                code = setup_runtime_module.main(["claude", "--repo-dir", str(repo_dir), "--project", "demo"])
+            self.assertEqual(code, 0)
+            self.assertIn("agent-memory setup claude", stdout.getvalue())
 
     def test_claude_removes_only_generated_session_end_push(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -537,11 +618,14 @@ protocol:
                 project_name="demo",
                 oacp_root=repo_dir / "oacp",
             )
+            # The file exists and carries no managed entry, so setup leaves it
+            # alone: regeneration is its job, creation is not.
             data = json.loads(hooks_file.read_text(encoding="utf-8"))
             self.assertEqual(data["description"], "custom")
             self.assertIn("Stop", data["hooks"])
-            self.assertIn("SessionStart", data["hooks"])
-            self.assertIn(".codex/hooks.json", result["created_files"])
+            self.assertNotIn("SessionStart", data["hooks"])
+            self.assertIn(".codex/hooks.json", result["unmanaged_files"])
+            self.assertNotIn(".codex/hooks.json", result["created_files"])
 
     def test_codex_hook_registration_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -601,6 +685,49 @@ protocol:
             self.assertNotIn(str(first_root), commands[0])
             self.assertIn(".codex/hooks.json", result["created_files"])
 
+    def test_codex_hook_regeneration_replaces_managed_entry_for_literal_dollar_home(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            oacp_root = repo_dir / "oacp$HOME"
+            legacy = setup_runtime_module._codex_session_start_command(
+                project_name="first", oacp_root=oacp_root
+            ).replace("--hook", "--hook --pull-memory", 1)
+            hooks_file = repo_dir / ".codex" / "hooks.json"
+            hooks_file.parent.mkdir(parents=True)
+            hooks_file.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "SessionStart": [
+                                {
+                                    "matcher": "^startup$",
+                                    "hooks": [{"type": "command", "command": legacy}],
+                                }
+                            ]
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            setup_runtime(
+                "codex", repo_dir=repo_dir, project_name="second", oacp_root=oacp_root
+            )
+
+            data = json.loads(hooks_file.read_text(encoding="utf-8"))
+            commands = [
+                hook["command"]
+                for entry in data["hooks"]["SessionStart"]
+                for hook in entry.get("hooks", [])
+            ]
+            expected = setup_runtime_module._codex_session_start_command(
+                project_name="second", oacp_root=oacp_root
+            )
+            self.assertEqual(commands, [expected])
+            self.assertIn(f"--hub-dir '{oacp_root}'", expected)
+
     def test_codex_hook_replacement_preserves_custom_session_start_hook(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_dir = Path(tmpdir)
@@ -656,6 +783,97 @@ protocol:
             self.assertEqual(len(managed), 1)
             self.assertIn("--project new", managed[0])
 
+    def test_codex_hooks_empty_hooks_object_is_left_untouched(self) -> None:
+        """An existing file with no managed entry encodes "startup stays off"."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            hooks_file = repo_dir / ".codex" / "hooks.json"
+            hooks_file.parent.mkdir(parents=True)
+            original = json.dumps(
+                {
+                    "description": (
+                        "OACP automatic startup is disabled; initialize and "
+                        "retrieve memory on demand."
+                    ),
+                    "hooks": {},
+                },
+                indent=2,
+            )
+            hooks_file.write_text(original, encoding="utf-8")
+
+            result = setup_runtime(
+                "codex",
+                repo_dir=repo_dir,
+                project_name="demo",
+                oacp_root=repo_dir / "oacp",
+            )
+
+            self.assertEqual(hooks_file.read_text(encoding="utf-8"), original)
+            self.assertIn(".codex/hooks.json", result["unmanaged_files"])
+            self.assertNotIn(".codex/hooks.json", result["created_files"])
+            self.assertNotIn(".codex/hooks.json", result["skipped_files"])
+
+    def test_codex_hooks_custom_only_session_start_is_left_untouched(self) -> None:
+        """A SessionStart list holding only a custom hook gains no managed entry."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            hooks_file = repo_dir / ".codex" / "hooks.json"
+            hooks_file.parent.mkdir(parents=True)
+            original = json.dumps(
+                {
+                    "hooks": {
+                        "SessionStart": [
+                            {
+                                "matcher": "^startup$",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": ".codex/hooks/custom-startup.sh",
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                },
+                indent=2,
+            )
+            hooks_file.write_text(original, encoding="utf-8")
+
+            result = setup_runtime(
+                "codex",
+                repo_dir=repo_dir,
+                project_name="demo",
+                oacp_root=repo_dir / "oacp",
+            )
+
+            self.assertEqual(hooks_file.read_text(encoding="utf-8"), original)
+            self.assertIn(".codex/hooks.json", result["unmanaged_files"])
+
+    def test_codex_hooks_absent_file_is_created_with_the_managed_entry(self) -> None:
+        """Creation stays the behaviour when there is no hooks file at all."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            hooks_file = repo_dir / ".codex" / "hooks.json"
+            self.assertFalse(hooks_file.exists())
+
+            result = setup_runtime(
+                "codex",
+                repo_dir=repo_dir,
+                project_name="demo",
+                oacp_root=repo_dir / "oacp",
+            )
+
+            self.assertIn(".codex/hooks.json", result["created_files"])
+            self.assertEqual(result["unmanaged_files"], [])
+            data = json.loads(hooks_file.read_text(encoding="utf-8"))
+            commands = [
+                hook["command"]
+                for entry in data["hooks"]["SessionStart"]
+                for hook in entry.get("hooks", [])
+            ]
+            self.assertEqual(len(commands), 1)
+            self.assertTrue(commands[0].startswith("oacp session-init --hook"))
+
     def test_codex_hooks_warns_when_existing_file_is_not_object(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_dir = Path(tmpdir)
@@ -689,6 +907,287 @@ protocol:
             self.assertIn("expected a JSON object", stderr.getvalue())
             self.assertEqual(settings.read_text(encoding="utf-8"), "[]")
 
+    # --- migration pass: preservation guarantees -------------------------
+
+    @staticmethod
+    def _legacy_claude_settings(**extra_hooks):
+        hooks = {
+            "SessionStart": [
+                {
+                    "matcher": "startup",
+                    "hooks": [
+                        {"type": "command", "command": ".claude/hooks/oacp-memory-pull.sh"}
+                    ],
+                }
+            ],
+            "SessionEnd": [
+                {"hooks": [{"type": "command", "command": ".claude/hooks/oacp-memory-push.sh"}]}
+            ],
+        }
+        hooks.update(extra_hooks)
+        return {"hooks": hooks}
+
+    def test_claude_keeps_hook_files_whose_bytes_differ(self) -> None:
+        exact_pull = setup_runtime_module.CLAUDE_LEGACY_MEMORY_PULL_HOOK.encode("utf-8")
+        exact_push = setup_runtime_module.CLAUDE_LEGACY_MEMORY_PUSH_HOOK.encode("utf-8")
+        cases = {
+            "crlf": (exact_pull.replace(b"\n", b"\r\n"), exact_push),
+            "non-utf8": (exact_pull, exact_push + b"# \xff\n"),
+        }
+        for label, (pull_bytes, push_bytes) in cases.items():
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmpdir:
+                repo_dir = Path(tmpdir)
+                settings = repo_dir / ".claude" / "settings.json"
+                settings.parent.mkdir(parents=True)
+                settings.write_text(json.dumps(self._legacy_claude_settings()), encoding="utf-8")
+                hooks_dir = repo_dir / ".claude" / "hooks"
+                hooks_dir.mkdir()
+                pull = hooks_dir / "oacp-memory-pull.sh"
+                push = hooks_dir / "oacp-memory-push.sh"
+                pull.write_bytes(pull_bytes)
+                push.write_bytes(push_bytes)
+                kept, retired = (pull, push) if label == "crlf" else (push, pull)
+                kept_bytes = kept.read_bytes()
+
+                result = setup_runtime("claude", repo_dir=repo_dir, project_name="demo")
+
+                # Exact bytes: retired. Any other byte sequence: kept as-is and
+                # reported, whether or not it decodes as UTF-8.
+                self.assertFalse(retired.exists())
+                self.assertEqual(kept.read_bytes(), kept_bytes)
+                kept_rel = f".claude/hooks/{kept.name}"
+                self.assertEqual(result["retired_files"], [f".claude/hooks/{retired.name}"])
+                self.assertIn(kept_rel, result["skipped_files"])
+                data = json.loads(settings.read_text(encoding="utf-8"))
+                self.assertNotIn("SessionStart", data["hooks"])
+                self.assertNotIn("SessionEnd", data["hooks"])
+
+    def test_claude_refused_settings_keeps_script_and_registration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            settings = repo_dir / ".claude" / "settings.json"
+            settings.parent.mkdir(parents=True)
+            original = json.dumps(self._legacy_claude_settings(PreToolUse={"not": "a list"}))
+            settings.write_text(original, encoding="utf-8")
+            script = repo_dir / ".claude" / "hooks" / "oacp-memory-pull.sh"
+            script.parent.mkdir()
+            script.write_text(setup_runtime_module.CLAUDE_LEGACY_MEMORY_PULL_HOOK, encoding="utf-8")
+
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                result = setup_runtime("claude", repo_dir=repo_dir, project_name="demo")
+
+            self.assertIn(".claude/settings.json", result["warning_files"])
+            self.assertIn("expected hooks.PreToolUse to be a list", stderr.getvalue())
+            self.assertEqual(settings.read_text(encoding="utf-8"), original)
+            self.assertTrue(script.is_file())
+            self.assertEqual(result["retired_files"], [])
+
+    def test_claude_unwritable_settings_keeps_script_and_registration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            settings = repo_dir / ".claude" / "settings.json"
+            settings.parent.mkdir(parents=True)
+            original = json.dumps(self._legacy_claude_settings())
+            settings.write_text(original, encoding="utf-8")
+            script = repo_dir / ".claude" / "hooks" / "oacp-memory-pull.sh"
+            script.parent.mkdir()
+            script.write_text(setup_runtime_module.CLAUDE_LEGACY_MEMORY_PULL_HOOK, encoding="utf-8")
+            real_write_text = Path.write_text
+
+            def refuse_settings(self_path, *args, **kwargs):
+                if self_path.name == "settings.json":
+                    raise OSError(30, "Read-only file system")
+                return real_write_text(self_path, *args, **kwargs)
+
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr), mock.patch.object(
+                Path, "write_text", autospec=True, side_effect=refuse_settings
+            ):
+                result = setup_runtime("claude", repo_dir=repo_dir, project_name="demo")
+
+            self.assertIn(".claude/settings.json", result["warning_files"])
+            self.assertIn("could not write", stderr.getvalue())
+            self.assertEqual(settings.read_text(encoding="utf-8"), original)
+            self.assertTrue(script.is_file())
+            self.assertEqual(result["retired_files"], [])
+
+    def test_claude_keeps_script_still_named_by_an_unmanaged_registration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            settings = repo_dir / ".claude" / "settings.json"
+            settings.parent.mkdir(parents=True)
+            # SessionStart in a shape the migration does not manage (an object,
+            # not a list) that still names the generated script.
+            settings.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "SessionStart": {
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/oacp-memory-pull.sh",
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            script = repo_dir / ".claude" / "hooks" / "oacp-memory-pull.sh"
+            script.parent.mkdir()
+            script.write_text(setup_runtime_module.CLAUDE_LEGACY_MEMORY_PULL_HOOK, encoding="utf-8")
+
+            result = setup_runtime("claude", repo_dir=repo_dir, project_name="demo")
+
+            self.assertIn(".claude/settings.json", result["created_files"])
+            self.assertTrue(script.is_file())
+            self.assertEqual(result["retired_files"], [])
+            self.assertIn(".claude/hooks/oacp-memory-pull.sh", result["skipped_files"])
+
+    def test_claude_keeps_script_reached_through_a_symlinked_hooks_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir) / "repo"
+            elsewhere = Path(tmpdir) / "elsewhere"
+            (repo_dir / ".claude").mkdir(parents=True)
+            elsewhere.mkdir()
+            (repo_dir / ".claude" / "hooks").symlink_to(elsewhere, target_is_directory=True)
+            script = elsewhere / "oacp-memory-pull.sh"
+            script.write_text(setup_runtime_module.CLAUDE_LEGACY_MEMORY_PULL_HOOK, encoding="utf-8")
+
+            result = setup_runtime("claude", repo_dir=repo_dir, project_name="demo")
+
+            self.assertTrue(script.is_file())
+            self.assertEqual(result["retired_files"], [])
+            self.assertIn(".claude/hooks/oacp-memory-pull.sh", result["skipped_files"])
+
+    def test_codex_session_start_command_grammar(self) -> None:
+        is_managed = setup_runtime_module._is_codex_session_start_command
+        generated_old = (
+            "oacp session-init --hook --pull-memory --project demo --hub-dir /srv/oacp"
+        )
+        generated_new = setup_runtime_module._codex_session_start_command(
+            project_name="demo", oacp_root=Path("/srv/oacp")
+        )
+        generated_dollar = setup_runtime_module._codex_session_start_command(
+            project_name="demo", oacp_root=Path("/srv/oacp$1")
+        )
+        generated_backtick = setup_runtime_module._codex_session_start_command(
+            project_name="de`mo", oacp_root=Path("/srv/oacp")
+        )
+        managed = (
+            "oacp session-init --hook",
+            "oacp session-init --hook --pull-memory",
+            "oacp session-init --hook --project demo",
+            "oacp session-init --hook --hub-dir '/srv/oacp home'",
+            "oacp session-init --hook --hub-dir '/srv/oacp home;x'",
+            generated_old,
+            generated_new,
+            generated_dollar,
+            generated_backtick,
+            "oacp session-init --hook --pull-memory --project demo --hub-dir '/srv/oacp$1'",
+            "oacp session-init --hook --hub-dir '$HOME/oacp'",
+        )
+        for command in managed:
+            with self.subTest(command=command, expected="managed"):
+                self.assertTrue(is_managed(command))
+        custom = (
+            "oacp session-init --hook --project demo --dry-run && echo custom",
+            "oacp session-init --hook --project demo --dry-run",
+            "oacp session-init --hook --project demo ; echo custom",
+            "oacp session-init --hook --project demo | tee log",
+            "oacp session-init --hook --project demo;true",
+            "oacp session-init --hook --project demo&&true",
+            "oacp session-init --hook --project demo||true",
+            "oacp session-init --hook --project demo|tee log",
+            "oacp session-init --hook --project demo>/tmp/custom-log",
+            "oacp session-init --hook --project demo 2>/dev/null",
+            "oacp session-init --hook --project $(whoami)",
+            "oacp session-init --hook --project `whoami`",
+            "oacp session-init --hook --project $PROJECT",
+            "oacp session-init --hook --hub-dir $HOME/oacp",
+            'oacp session-init --hook --hub-dir "$HOME/oacp"',
+            "oacp session-init --hook --hub-dir '$HOME'/oacp",
+            'oacp session-init --hook --hub-dir "/srv/oacp`whoami`"',
+            "oacp session-init --hook --project demo #note",
+            "oacp session-init --hook --project demo --project other",
+            "oacp session-init --hook --project",
+            "oacp session-init --hook --project --hub-dir /srv/oacp",
+            "oacp session-init --project demo",
+            "oacp session-init --hook 'unterminated",
+            None,
+        )
+        for command in custom:
+            with self.subTest(command=command, expected="custom"):
+                self.assertFalse(is_managed(command))
+
+    def test_codex_hook_replacement_preserves_custom_command_with_managed_prefix(self) -> None:
+        for custom in (
+            "oacp session-init --hook --project demo --dry-run && echo custom",
+            "oacp session-init --hook --project demo;true",
+            "oacp session-init --hook --project demo&&true",
+            "oacp session-init --hook --project demo>/tmp/custom-log",
+            'oacp session-init --hook --project demo --hub-dir "$HOME/oacp"',
+        ):
+            with self.subTest(custom=custom):
+                self._assert_custom_codex_command_preserved(custom)
+
+    def _assert_custom_codex_command_preserved(self, custom: str) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            hooks_file = repo_dir / ".codex" / "hooks.json"
+            hooks_file.parent.mkdir(parents=True)
+            hooks_file.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "SessionStart": [
+                                {
+                                    "matcher": "^startup$",
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": custom,
+                                            "timeout": 5,
+                                            "statusMessage": "mine",
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            original = hooks_file.read_text(encoding="utf-8")
+
+            result = setup_runtime(
+                "codex", repo_dir=repo_dir, project_name="demo", oacp_root=repo_dir / "oacp"
+            )
+
+            self.assertEqual(hooks_file.read_text(encoding="utf-8"), original)
+            self.assertIn(".codex/hooks.json", result["unmanaged_files"])
+            data = json.loads(hooks_file.read_text(encoding="utf-8"))
+            hooks = [
+                hook
+                for entry in data["hooks"]["SessionStart"]
+                for hook in entry.get("hooks", [])
+            ]
+            custom_hooks = [hook for hook in hooks if hook["command"] == custom]
+            self.assertEqual(len(custom_hooks), 1)
+            self.assertEqual(custom_hooks[0]["timeout"], 5)
+            self.assertEqual(custom_hooks[0]["statusMessage"], "mine")
+            # The custom command only *looks* managed, so this file carries no
+            # managed entry: setup adds none and the bytes are unchanged.
+            managed = [
+                hook["command"]
+                for hook in hooks
+                if setup_runtime_module._is_codex_session_start_command(hook["command"])
+            ]
+            self.assertEqual(managed, [])
 
 if __name__ == "__main__":
     unittest.main()

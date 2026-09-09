@@ -18,7 +18,7 @@ protocol files and those four project files, then emits a manifest. The agent
 still performs the ordered reads; verification does not inject their contents.
 Missing project files are reported under the existing degraded-init behavior.
 
-`oacp memory pull` synchronizes the memory repository on disk, including org
+`agent-memory pull` synchronizes the memory repository on disk, including org
 memory and its history. A successful pull does not add those files to model
 context. Keep any configured pull before project-memory reads so those reads
 use the refreshed files. Sync selection and context selection are independent;
@@ -35,7 +35,7 @@ a hook that the project has disabled.
    others. Read applicable standing rules and decisions before the actions
    they govern, such as release, review authority, or architecture work.
 2. If cross-machine sync is configured, the task needs current shared facts,
-   and local freshness is unknown, run `oacp memory pull`. A failed pull leaves
+   and local freshness is unknown, run `agent-memory pull`. A failed pull leaves
    freshness unknown; report that limitation before relying on affected facts.
 3. Search the relevant explicit files with task identifiers and topic terms.
    For example, after confirming that `rules.md` exists:

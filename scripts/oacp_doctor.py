@@ -24,7 +24,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -35,7 +34,6 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from _oacp_constants import (
-    AGENT_RE,
     ALL_RUNTIMES,
     CANONICAL_CAPABILITIES,
     REPO_SLUG_RE,
@@ -44,28 +42,14 @@ from _oacp_constants import (
     utc_now_iso,
 )
 from agent_profile import discover_project_memberships
-from memory_sync import (
-    CANONICAL_MEMORY_GITIGNORE,
-    MARKER_FILE,
-    Runner as MemorySyncRunner,
-    STALE_MEMORY_DAYS,
-    MemorySyncError,
-    compute_git_state,
-    escaping_overlay_patterns,
-    has_commits,
-    is_allowed_memory_path,
-    is_configured,
-    is_git_repo,
-    last_commit_age_days,
-    normalize_gitignore,
-    overlay_gitignores,
-    run_command as run_git_command,
-    tracked_files,
-    untracked_files,
-)
 
 DoctorRunner = Callable[[Sequence[str]], Tuple[int, str]]
 WhichFn = Callable[[str], Optional[str]]
+
+# The memory tool. Resolved on PATH and probed by subprocess only; the kernel
+# never imports it, and its own doctor covers the memory home.
+MEMORY_TOOL = "agent-memory"
+MEMORY_TOOL_DISTRIBUTION = "agent-memory-cli"
 
 VALID_RUNTIMES = set(ALL_RUNTIMES)
 VALID_STATUSES = {"available", "busy", "offline"}
@@ -221,6 +205,23 @@ def check_environment(
                 severity=Severity.ok,
                 message=f"{tool} — {version}",
             ))
+
+    # The memory tool (one row; `agent-memory doctor` checks the home itself)
+    path = which_fn(MEMORY_TOOL)
+    if path is None:
+        cat.results.append(DoctorResult(
+            name=MEMORY_TOOL,
+            severity=Severity.skip,
+            message=f"{MEMORY_TOOL} — not installed",
+            fix_hint=f"Install: pip install {MEMORY_TOOL_DISTRIBUTION}",
+        ))
+    else:
+        version = _get_version(MEMORY_TOOL, runner) or "installed"
+        cat.results.append(DoctorResult(
+            name=MEMORY_TOOL,
+            severity=Severity.ok,
+            message=f"{MEMORY_TOOL} — {version} (run {MEMORY_TOOL} doctor)",
+        ))
 
     # pyyaml
     yaml_mod = _try_yaml_import()
@@ -1283,9 +1284,6 @@ def check_trust(
     return cat
 
 
-# ── Category 7: Memory Sync ──────────────────────────────────────────────
-
-
 def _summarize_paths(paths: List[str], *, limit: int = 3) -> str:
     if not paths:
         return ""
@@ -1295,619 +1293,10 @@ def _summarize_paths(paths: List[str], *, limit: int = 3) -> str:
     return shown
 
 
-def check_memory_sync(
-    oacp_dir: Path,
-    *,
-    runner: DoctorRunner = run_command,
-    now_fn: Optional[Callable[[], dt.datetime]] = None,
-) -> DoctorCategory:
-    """Check OACP_HOME memory sync configuration and git state."""
-    cat = DoctorCategory(name="Memory Sync")
-    marker = oacp_dir / MARKER_FILE
-
-    if runner is run_command:
-        def default_git_runner(
-            command: Sequence[str],
-            *,
-            timeout: Optional[int] = None,
-        ) -> Tuple[int, str]:
-            return run_git_command(command, cwd=oacp_dir, timeout=timeout)
-
-        git_runner: MemorySyncRunner = default_git_runner
-    else:
-        def custom_git_runner(
-            command: Sequence[str],
-            *,
-            timeout: Optional[int] = None,
-        ) -> Tuple[int, str]:
-            del timeout
-            return runner(command)
-
-        git_runner = custom_git_runner
-
-    if not is_configured(oacp_dir):
-        cat.results.append(
-            DoctorResult(
-                name="memory-marker",
-                severity=Severity.skip,
-                message=f"{MARKER_FILE} — not configured; memory sync hooks are disabled",
-                fix_hint="Run: oacp memory init [--remote URL]",
-            )
-        )
-        return cat
-
-    cat.results.append(
-        DoctorResult(
-            name="memory-marker",
-            severity=Severity.ok,
-            message=f"{MARKER_FILE} — present",
-        )
-    )
-
-    if not is_git_repo(oacp_dir, git_runner):
-        cat.results.append(
-            DoctorResult(
-                name="memory-git",
-                severity=Severity.warn,
-                message=f"{marker} is present, but OACP_HOME is not a git repo",
-                fix_hint="Run `oacp memory init` or remove the marker to disable hooks",
-            )
-        )
-        return cat
-
-    root_gitignore = oacp_dir / ".gitignore"
-    if not root_gitignore.is_file():
-        cat.results.append(
-            DoctorResult(
-                name="root-gitignore",
-                severity=Severity.warn,
-                message=".gitignore — missing canonical memory allowlist",
-                fix_hint="Run: oacp memory init",
-            )
-        )
-    else:
-        content = normalize_gitignore(root_gitignore.read_text(encoding="utf-8"))
-        if content == CANONICAL_MEMORY_GITIGNORE:
-            cat.results.append(
-                DoctorResult(
-                    name="root-gitignore",
-                    severity=Severity.ok,
-                    message=".gitignore — canonical memory allowlist",
-                )
-            )
-        else:
-            cat.results.append(
-                DoctorResult(
-                    name="root-gitignore",
-                    severity=Severity.warn,
-                    message=".gitignore — drifted from canonical memory allowlist",
-                    fix_hint="Run `oacp memory init` to rewrite the root allowlist",
-                )
-            )
-
-    tracked: Optional[List[str]] = None
-    try:
-        tracked = tracked_files(oacp_dir, git_runner)
-        outside = [path for path in tracked if not is_allowed_memory_path(path)]
-    except MemorySyncError as exc:
-        cat.results.append(
-            DoctorResult(
-                name="tracked-allowlist",
-                severity=Severity.warn,
-                message=f"tracked allowlist check failed: {exc}",
-            )
-        )
-    else:
-        if outside:
-            cat.results.append(
-                DoctorResult(
-                    name="tracked-allowlist",
-                    severity=Severity.warn,
-                    message=(
-                        f"{len(outside)} tracked file(s) outside memory allowlist: "
-                        f"{_summarize_paths(outside)}"
-                    ),
-                    fix_hint="Remove runtime state from the memory repo index",
-                )
-            )
-        else:
-            cat.results.append(
-                DoctorResult(
-                    name="tracked-allowlist",
-                    severity=Severity.ok,
-                    message=f"tracked files — {len(tracked)} inside memory allowlist",
-                )
-            )
-
-    try:
-        untracked = [
-            path
-            for path in untracked_files(oacp_dir, git_runner)
-            if is_allowed_memory_path(path)
-        ]
-    except MemorySyncError as exc:
-        cat.results.append(
-            DoctorResult(
-                name="untracked-memory",
-                severity=Severity.warn,
-                message=f"untracked memory check failed: {exc}",
-            )
-        )
-    else:
-        if untracked:
-            cat.results.append(
-                DoctorResult(
-                    name="untracked-memory",
-                    severity=Severity.warn,
-                    message=(
-                        f"{len(untracked)} untracked memory-shaped file(s): "
-                        f"{_summarize_paths(untracked)}"
-                    ),
-                    fix_hint="Run: oacp memory push",
-                )
-            )
-        else:
-            cat.results.append(
-                DoctorResult(
-                    name="untracked-memory",
-                    severity=Severity.ok,
-                    message="untracked memory files — none",
-                )
-            )
-
-    try:
-        state = compute_git_state(oacp_dir, runner=git_runner, fetch=True)
-    except MemorySyncError as exc:
-        cat.results.append(
-            DoctorResult(
-                name="working-tree",
-                severity=Severity.warn,
-                message=f"memory git state check failed: {exc}",
-            )
-        )
-        state = None
-
-    if state is not None:
-        if state.dirty:
-            cat.results.append(
-                DoctorResult(
-                    name="working-tree",
-                    severity=Severity.warn,
-                    message="working tree — DIRTY memory changes present",
-                    fix_hint="Run `oacp memory push` or resolve changes manually",
-                )
-            )
-        else:
-            cat.results.append(
-                DoctorResult(
-                    name="working-tree",
-                    severity=Severity.ok,
-                    message="working tree — clean",
-                )
-            )
-
-        if not state.has_remote:
-            cat.results.append(
-                DoctorResult(
-                    name="sync-state",
-                    severity=Severity.ok,
-                    message="sync state — local-only; no remote configured",
-                )
-            )
-            cat.results.append(
-                DoctorResult(
-                    name="remote",
-                    severity=Severity.skip,
-                    message="remote — skipped; local-only memory repo",
-                )
-            )
-        elif state.fetch_failed:
-            cat.results.append(
-                DoctorResult(
-                    name="sync-state",
-                    severity=Severity.warn,
-                    message=f"sync state — remote fetch failed: {state.fetch_output}",
-                    fix_hint="Check network access and remote permissions",
-                )
-            )
-            cat.results.append(
-                DoctorResult(
-                    name="remote",
-                    severity=Severity.warn,
-                    message="remote — not reachable",
-                    fix_hint="Check network access and remote permissions",
-                )
-            )
-        elif not state.has_upstream:
-            cat.results.append(
-                DoctorResult(
-                    name="sync-state",
-                    severity=Severity.warn,
-                    message="sync state — remote exists but no upstream branch is configured",
-                    fix_hint="Run: git -C $OACP_HOME push -u <remote> <branch>",
-                )
-            )
-            cat.results.append(
-                DoctorResult(
-                    name="remote",
-                    severity=Severity.ok,
-                    message="remote — reachable",
-                )
-            )
-        elif state.diverged:
-            cat.results.append(
-                DoctorResult(
-                    name="sync-state",
-                    severity=Severity.warn,
-                    message=(
-                        "sync state — DIVERGED from upstream "
-                        f"({state.ahead} ahead, {state.behind} behind)"
-                    ),
-                    fix_hint="Resolve manually; OACP never auto-merges memory",
-                )
-            )
-            cat.results.append(
-                DoctorResult(
-                    name="remote",
-                    severity=Severity.ok,
-                    message="remote — reachable",
-                )
-            )
-        elif state.behind:
-            cat.results.append(
-                DoctorResult(
-                    name="sync-state",
-                    severity=Severity.warn,
-                    message=f"sync state — BEHIND upstream by {state.behind} commit(s)",
-                    fix_hint="Run: oacp memory pull",
-                )
-            )
-            cat.results.append(
-                DoctorResult(
-                    name="remote",
-                    severity=Severity.ok,
-                    message="remote — reachable",
-                )
-            )
-        elif state.ahead:
-            cat.results.append(
-                DoctorResult(
-                    name="sync-state",
-                    severity=Severity.warn,
-                    message=f"sync state — ahead by {state.ahead} unpushed commit(s)",
-                    fix_hint="Run: oacp memory push",
-                )
-            )
-            cat.results.append(
-                DoctorResult(
-                    name="remote",
-                    severity=Severity.ok,
-                    message="remote — reachable",
-                )
-            )
-        else:
-            cat.results.append(
-                DoctorResult(
-                    name="sync-state",
-                    severity=Severity.ok,
-                    message="sync state — synced with upstream",
-                )
-            )
-            cat.results.append(
-                DoctorResult(
-                    name="remote",
-                    severity=Severity.ok,
-                    message="remote — reachable",
-                )
-            )
-
-    if not has_commits(oacp_dir, git_runner):
-        cat.results.append(
-            DoctorResult(
-                name="last-commit",
-                severity=Severity.warn,
-                message="last commit — none",
-                fix_hint="Run: oacp memory push",
-            )
-        )
-    else:
-        now = now_fn() if now_fn is not None else dt.datetime.now(dt.timezone.utc)
-        age_days = last_commit_age_days(oacp_dir, now=now, runner=git_runner)
-        if age_days is None:
-            cat.results.append(
-                DoctorResult(
-                    name="last-commit",
-                    severity=Severity.warn,
-                    message="last commit — timestamp unavailable",
-                )
-            )
-        elif age_days > STALE_MEMORY_DAYS:
-            cat.results.append(
-                DoctorResult(
-                    name="last-commit",
-                    severity=Severity.warn,
-                    message=f"last commit — stale ({age_days} day(s) old)",
-                    fix_hint="Run: oacp memory push",
-                )
-            )
-        else:
-            cat.results.append(
-                DoctorResult(
-                    name="last-commit",
-                    severity=Severity.ok,
-                    message=f"last commit — fresh ({age_days} day(s) old)",
-                )
-            )
-
-    if tracked is not None:
-        agents_tracked = [
-            path
-            for path in tracked
-            if path.startswith("agents/")
-            or (path.startswith("projects/") and "/agents/" in path)
-        ]
-        if agents_tracked:
-            cat.results.append(
-                DoctorResult(
-                    name="agents-tracked",
-                    severity=Severity.warn,
-                    message=(
-                        f"{len(agents_tracked)} agents/ file(s) tracked: "
-                        f"{_summarize_paths(agents_tracked)}"
-                    ),
-                    fix_hint="Remove per-instance agent state from the memory repo",
-                )
-            )
-        else:
-            cat.results.append(
-                DoctorResult(
-                    name="agents-tracked",
-                    severity=Severity.ok,
-                    message="agents/ tracked files — none",
-                )
-            )
-
-    bad_overlays: List[str] = []
-    overlays = list(overlay_gitignores(oacp_dir))
-    for overlay in overlays:
-        for pattern in escaping_overlay_patterns(overlay):
-            bad_overlays.append(f"{overlay.relative_to(oacp_dir)}: {pattern}")
-    if bad_overlays:
-        cat.results.append(
-            DoctorResult(
-                name="memory-overlays",
-                severity=Severity.warn,
-                message=(
-                    "memory .gitignore overlays can escape memory/**: "
-                    f"{_summarize_paths(bad_overlays)}"
-                ),
-                fix_hint="Remove overlay unignore patterns containing '..'",
-            )
-        )
-    else:
-        cat.results.append(
-            DoctorResult(
-                name="memory-overlays",
-                severity=Severity.ok,
-                message=f"memory .gitignore overlays — {len(overlays)} safe",
-            )
-        )
-
-    return cat
-
-
-# ── Orchestrator ──────────────────────────────────────────────────────────
-
-
-# ── Category 8: Org-Memory Debrief Store ─────────────────────────────────
-
-
-# The agent segment is the protocol's canonical agent grammar (AGENT_RE);
-# the session segment is hyphen-free, so the split-on-last-hyphen parse is
-# deterministic for every valid agent name.
-_AGENT_FRAGMENT = AGENT_RE.pattern.lstrip("^").rstrip("$")
-DEBRIEF_FILENAME_RE = re.compile(
-    rf"^(?P<date>\d{{8}})-(?P<agent>{_AGENT_FRAGMENT})-(?P<session>[a-z0-9]{{1,32}})\.md$"
-)
-
-
-def _valid_debrief_project_segment(name: str) -> bool:
-    # Mirrors the workspace project-name rule: any name that does not start
-    # with '.' and contains no path separators has a valid debrief path.
-    return not name.startswith(".") and "/" not in name and "\\" not in name
-
-
-# ── Debrief store validation scope ───────────────────────────────────────
-# Setup-level by design: the doctor confirms the store exists, the path
-# layout is canonical, and nothing irregular sits in the namespace. It
-# never opens debrief files — content and format verification belong to
-# the writer contract (read-back at publication) and to git history, and
-# the store is written by trusted local agents, so the doctor is a
-# diagnostic for accidental drift, not a security boundary. One working
-# rule: a failed traversal or classification produces an explicit non-ok
-# row, never a clean result.
-
-
-def check_org_memory(oacp_dir: Path) -> DoctorCategory:
-    """Check the org-memory debrief store setup: layout, staging, symlinks."""
-    cat = DoctorCategory(name="Org Memory")
-    org_memory = oacp_dir / "org-memory"
-    if not org_memory.is_dir():
-        cat.results.append(DoctorResult(
-            name="org-memory-dir",
-            severity=Severity.skip,
-            message="org-memory/ — not initialized",
-            fix_hint="Run: oacp org-memory init",
-        ))
-        return cat
-
-    debriefs = org_memory / "debriefs"
-    if not debriefs.is_dir():
-        cat.results.append(DoctorResult(
-            name="debriefs-dir",
-            severity=Severity.warn,
-            message="org-memory/debriefs/ — missing (pre-debrief-store layout)",
-            fix_hint="Run: oacp org-memory init",
-        ))
-        return cat
-    cat.results.append(DoctorResult(
-        name="debriefs-dir",
-        severity=Severity.ok,
-        message="org-memory/debriefs/ — present",
-    ))
-
-    layout_bad: List[str] = []
-    staging: List[str] = []
-    irregular: List[str] = []
-    walk_errors: List[str] = []
-    total = 0
-
-    def _walk_error(exc: OSError) -> None:
-        # A directory the walk cannot enter hides an unknown number of
-        # records; the failure must surface as its own row.
-        location = getattr(exc, "filename", None) or str(debriefs)
-        try:
-            rel_loc = Path(location).relative_to(debriefs).as_posix() or "."
-        except ValueError:
-            rel_loc = str(location)
-        walk_errors.append(f"{rel_loc}: {exc.__class__.__name__}")
-
-    entries: List[Path] = []
-    # followlinks=False so a symlinked directory cannot pull foreign trees
-    # into the store; the link itself is still flagged below.
-    for dirpath, dirnames, filenames in os.walk(
-        debriefs, onerror=_walk_error, followlinks=False
-    ):
-        dpath = Path(dirpath)
-        kept: List[str] = []
-        for dname in sorted(dirnames):
-            entry = dpath / dname
-            try:
-                is_link = entry.is_symlink()
-            except OSError as exc:
-                walk_errors.append(
-                    f"{entry.relative_to(debriefs).as_posix()}: "
-                    f"{exc.__class__.__name__}"
-                )
-                continue
-            if is_link:
-                irregular.append(
-                    entry.relative_to(debriefs).as_posix() + "/ (symlinked directory)"
-                )
-            else:
-                kept.append(dname)
-        dirnames[:] = kept
-        entries.extend(dpath / f for f in filenames)
-
-    for file_path in sorted(entries):
-        rel = file_path.relative_to(debriefs).as_posix()
-        if rel == ".gitkeep":
-            continue
-        # Writer staging artifacts (.stage.<name>.<nonce>) are outside the
-        # canonical namespace; lingering ones mean interrupted publication.
-        if file_path.name.startswith(".stage."):
-            staging.append(rel)
-            continue
-        # The namespace holds regular files reached without following
-        # links; classification failures surface, never raise.
-        try:
-            if file_path.is_symlink():
-                irregular.append(f"{rel} (symlink)")
-                continue
-            regular = file_path.is_file()
-        except OSError as exc:
-            walk_errors.append(f"{rel}: {exc.__class__.__name__}")
-            continue
-        if not regular:
-            irregular.append(f"{rel} (not a regular file)")
-            continue
-        total += 1
-        parts = rel.split("/")
-        match = DEBRIEF_FILENAME_RE.match(parts[-1]) if len(parts) == 4 else None
-        date_valid = False
-        if match is not None:
-            try:
-                dt.datetime.strptime(match.group("date"), "%Y%m%d")
-                date_valid = True
-            except ValueError:
-                pass
-        if (
-            match is None
-            or not date_valid
-            or not _valid_debrief_project_segment(parts[0])
-            or parts[1] != match.group("date")[0:4]
-            or parts[2] != match.group("date")[4:6]
-        ):
-            layout_bad.append(rel)
-
-    if staging:
-        cat.results.append(DoctorResult(
-            name="debriefs-staging",
-            severity=Severity.warn,
-            message=(
-                f"{len(staging)} lingering writer staging artifact(s) "
-                f"(interrupted publication): {_summarize_paths(staging)}"
-            ),
-            fix_hint="The owning writer removes or adopts its stale staging files on retry",
-        ))
-
-    if irregular:
-        cat.results.append(DoctorResult(
-            name="debriefs-irregular",
-            severity=Severity.error,
-            message=(
-                f"{len(irregular)} non-regular entr(ies) under debriefs/ "
-                f"(the store holds regular files, never symlinks): "
-                f"{_summarize_paths(irregular)}"
-            ),
-        ))
-
-    if walk_errors:
-        cat.results.append(DoctorResult(
-            name="debriefs-unreadable",
-            severity=Severity.error,
-            message=(
-                f"{len(walk_errors)} entr(ies) under debriefs/ could not be "
-                f"inspected (setup check incomplete): "
-                f"{_summarize_paths(walk_errors)}"
-            ),
-        ))
-
-    if total == 0:
-        if not walk_errors:
-            cat.results.append(DoctorResult(
-                name="debriefs-layout",
-                severity=Severity.ok,
-                message="debriefs/ — empty store, nothing to validate",
-            ))
-        return cat
-
-    if layout_bad:
-        cat.results.append(DoctorResult(
-            name="debriefs-layout",
-            severity=Severity.error,
-            message=(
-                f"{len(layout_bad)} of {total} debrief file(s) outside the "
-                f"canonical <project>/<YYYY>/<MM>/<YYYYMMDD>-<agent>-<session>.md "
-                f"layout: {_summarize_paths(layout_bad)}"
-            ),
-            fix_hint="Move or rename to the canonical path; never rewrite contents",
-        ))
-    else:
-        cat.results.append(DoctorResult(
-            name="debriefs-layout",
-            severity=Severity.ok,
-            message=f"{total} debrief file(s) — canonical layout",
-        ))
-
-    return cat
-
-
 def run_doctor(
     *,
     project: Optional[str] = None,
     oacp_dir: Path,
-    include_memory: bool = False,
     runner: DoctorRunner = run_command,
     yaml_loader: Optional[Any] = None,
     which_fn: WhichFn = shutil.which,
@@ -1918,10 +1307,6 @@ def run_doctor(
 
     # Always run environment checks
     categories.append(check_environment(runner=runner, which_fn=which_fn))
-
-    # Org-memory is opt-in: debrief-store checks run only when it exists
-    if (oacp_dir / "org-memory").is_dir():
-        categories.append(check_org_memory(oacp_dir))
 
     if (oacp_dir / "projects").is_dir():
         categories.append(check_agent_registry(oacp_dir, yaml_loader=yaml_loader))
@@ -1945,9 +1330,6 @@ def run_doctor(
             categories.append(check_autonomy(project_dir, yaml_loader=yaml_loader))
             categories.append(check_agent_status(project_dir, yaml_loader=yaml_loader, now_fn=now_fn))
             categories.append(check_trust(project_dir, yaml_loader=yaml_loader))
-
-    if include_memory:
-        categories.append(check_memory_sync(oacp_dir, runner=runner, now_fn=now_fn))
 
     return categories
 
@@ -2182,11 +1564,6 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="Auto-fix safe issues (missing inbox dirs, missing/stale status.yaml)",
     )
     parser.add_argument(
-        "--memory",
-        action="store_true",
-        help="Run advisory checks for OACP_HOME memory git sync",
-    )
-    parser.add_argument(
         "-o",
         "--output",
         default=None,
@@ -2203,7 +1580,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     categories = run_doctor(
         project=args.project,
         oacp_dir=oacp_dir,
-        include_memory=args.memory,
     )
 
     fixed: List[str] = []

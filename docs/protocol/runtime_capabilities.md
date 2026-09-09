@@ -173,9 +173,11 @@ The `oacp doctor` command validates environment and workspace health. Every chec
 ### Runtime startup and session telemetry
 
 Runtime-specific startup owns `status.yaml`. For Codex, `oacp setup codex`
-registers a `SessionStart` handler that runs memory pull and `oacp session-init`
-sequentially after the user reviews and trusts it with `/hooks`. The manual
-fallback is `oacp session-init --pull-memory --project <project>`.
+registers a `SessionStart` handler that runs `oacp session-init` after the user
+reviews and trusts it with `/hooks`; memory pull is the memory tool's own hook
+(`agent-memory setup codex`). Registration regenerates the managed handler only —
+an existing hooks file carrying no managed entry is never given one. The manual
+fallback is `oacp session-init --project <project>`.
 
 Memory pull synchronizes disk files. Init names the required protocol and
 project-memory reads; org-memory retrieval is on demand. See

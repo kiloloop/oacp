@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-09
+
+### Added
+
+- Memory-layout conformance fixture pinning the layout grammar and sync allowlist ([fixture](tests/conformance/memory_layout/README.md)).
+- `oacp doctor` reports the installed `agent-memory` version and defers memory-home checks to it ([doctor guide](docs/guides/doctor.md)).
+- Preflight and wheel guards fail when a kernel module or the wheel ships the memory engine ([lean kernel](docs/protocol/org_memory.md#conformance)).
+
+### Changed
+
+- The org-memory doc becomes the three-tier memory layout spec the kernel scaffolds against ([memory layout](docs/protocol/org_memory.md#layout)).
+- `oacp memory` and `oacp org-memory` delegate to the `agent-memory` CLI until their removal in 0.5.2 ([README](README.md#commands)).
+- `oacp setup` no longer installs memory hooks and retires the ones it generated; `agent-memory setup` replaces them ([quickstart](QUICKSTART.md)).
+- `oacp session-init --pull-memory` delegates to `agent-memory`, reporting `disabled` when absent ([codex](docs/protocol/session_init.md#codex)).
+
+### Removed
+
+- `docs/protocol/cross_runtime_sync.md`; its durable-memory half moved to the layout spec ([layout](docs/protocol/org_memory.md#per-project-tier)).
+- The bundled memory engine and org-memory doctor category, shipped as `agent-memory-cli` ([agent-memory](https://github.com/kiloloop/agent-memory)).
+- `oacp doctor --memory`; the memory home is checked by `agent-memory doctor` ([doctor guide](docs/guides/doctor.md)).
+
+### Fixed
+
+- `oacp setup codex` regenerates its managed `SessionStart` hook but never creates one ([codex startup](docs/protocol/session_init.md#codex)).
+
 ## [0.4.6] - 2026-09-05
 
 ### Added
@@ -843,6 +868,7 @@ The central debrief store is the headline change: every agent's full end-of-sess
 - Checkout step in github-release workflow job (#19)
 - Pre-release audit fixes: SHA-pinned actions, dangling doc refs (#15, #16)
 
+[0.5.0]: https://github.com/kiloloop/oacp/compare/v0.4.6...v0.5.0
 [0.4.6]: https://github.com/kiloloop/oacp/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/kiloloop/oacp/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/kiloloop/oacp/compare/v0.4.3...v0.4.4

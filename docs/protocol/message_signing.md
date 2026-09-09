@@ -333,8 +333,8 @@ can never authenticate a message.
 - **Keys are per-machine and never leave `$OACP_HOME/keys/`.** They are
   never synced and never committed. The memory-sync allowlist structurally
   excludes `keys/` on the push side, and the canonical workspace
-  `.gitignore` carries an explicit `keys/` deny line that `oacp memory
-  init` and the doctor `root-gitignore` drift check propagate fleet-wide.
+  `.gitignore` carries an explicit `keys/` deny line that the memory tool
+  (`agent-memory enable`, and its doctor's drift check) propagates fleet-wide.
 - **The 0600 file keystore is the v0.4.0 floor, not the design.** Private
   key files are created `0600` under `0700` directories and loaded only
   after a mode check. The backend is pluggable by design: messages

@@ -89,8 +89,13 @@ This creates or updates:
 
 - `.claude/agents/my-first-project.md`
 - `.claude/skills/`
-- `.claude/hooks/oacp-memory-pull.sh`
 - `.claude/settings.json`
+
+Memory sync and its startup hook are the memory tool's: install
+[agent-memory](https://github.com/kiloloop/agent-memory) (`pip install
+agent-memory-cli`) and run `agent-memory setup claude`. A regeneration of
+`oacp setup` retires the memory hooks earlier kernels wrote, by exact command
+and digest, and leaves anything you edited in place.
 
 For other supported runtimes, use the same shape:
 
@@ -101,20 +106,21 @@ oacp setup gemini --project my-first-project
 ```
 
 Codex setup creates or merges `.codex/hooks.json` with one startup-only hook.
-Review and trust it with `/hooks`; it runs memory pull and startup verification
-sequentially. If hooks are unavailable, run the manual fallback:
+Review and trust it with `/hooks`; it runs the startup verification. If hooks
+are unavailable, run the manual fallback:
 
 ```bash
-oacp session-init --pull-memory --project my-first-project
+oacp session-init --project my-first-project
 ```
 
-Memory pull synchronizes files on disk. The init manifest names the protocol
-files and four project memory files to read into context; org memory is
-retrieved on demand. See [memory context](docs/guides/memory-context.md) for
-retrieval and existing-installation guidance.
+The init manifest names the protocol files and four project memory files to
+read into context; org memory is retrieved on demand. Syncing the home is
+`agent-memory pull` (its `setup codex` hook runs it at startup). See
+[memory context](docs/guides/memory-context.md) for retrieval and
+existing-installation guidance.
 
 Runtime setup does not install an automatic memory push. Publish durable memory
-explicitly during wrap-up with `oacp memory push`.
+explicitly during wrap-up with `agent-memory push`.
 
 Cursor support is scaffold-only until Cursor-owned rules land. Cursor sessions
 must set `OACP_RUNTIME=cursor` or pass `--from` explicitly when sending messages.
@@ -226,7 +232,7 @@ checks the project workspace, inboxes, schemas, and agent status files.
 ## What's Next?
 
 - **Review loop** — Set up structured code review between agents. See [docs/protocol/review_loop.md](docs/protocol/review_loop.md).
-- **Durable memory** — Learn how agents share knowledge across sessions. See [docs/protocol/cross_runtime_sync.md](docs/protocol/cross_runtime_sync.md).
+- **Durable memory** — Learn how agents share knowledge across sessions and machines. See [docs/protocol/org_memory.md](docs/protocol/org_memory.md).
 - **Safety defaults** — Understand the baseline safety rules. See [docs/protocol/agent_safety_defaults.md](docs/protocol/agent_safety_defaults.md).
 - **Full protocol** — Read the complete specification in [SPEC.md](SPEC.md).
 - **Adoption guide** — Minimum, recommended, and full adoption paths. See [docs/guides/adoption.md](docs/guides/adoption.md).

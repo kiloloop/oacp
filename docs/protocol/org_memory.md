@@ -1,13 +1,124 @@
-# Org-Level Memory Protocol
+# Memory Layout Protocol
 
 ## Purpose
 
-Shared, cross-project memory for multi-agent organizations. Agents across projects read org-wide decisions, conventions, and events from a single location. Complements per-project memory (`$OACP_HOME/projects/<project>/memory/`) — does not replace it.
+Durable memory shared by every agent and runtime in an OACP home, laid out in
+three tiers:
 
-## Directory Structure
+| Tier | Where | Holds |
+|---|---|---|
+| Per-project | `projects/<project>/memory/` | The four-file active working set one project's agents read at session start, plus `archive/` |
+| Org | `org-memory/` | Cross-project decisions, conventions, events, and the debrief store |
+| Cross-machine | The home as a git repository | The two storage tiers above, carried between machines by an allowlisted sync |
+
+The kernel owns this layout: the paths, the files, who writes what, the marker
+and ignore files, and the sync allowlist. `oacp init` scaffolds the per-project
+tier against it. Memory *tooling* — the org-tier scaffold, capture, recall,
+archive, the sync verbs, a memory doctor — is userland and lives in
+[`agent-memory`](https://github.com/kiloloop/agent-memory) (`agent-memory-cli`
+on PyPI), which implements this layout and links back here; this document
+names no command surface. Runtime loading mechanics stay where they are: the
+session-start read set is [Session Init](session_init.md#step-3-load-durable-memory)
+Step 3, and org-memory retrieval policy is the
+[memory context guide](../guides/memory-context.md).
+
+Lean-kernel admission: what every receiver must understand to share memory
+with another is the layout — an entry written to
+`projects/<project>/memory/decision_log.md` on one machine must be found at
+that path by every other agent and machine. Everything else about memory (what
+a good entry looks like, when to promote, how to search) is convention and
+lives in guides and skills.
+
+## Layout
+
+The complete layout, relative to the OACP home (`$OACP_HOME`). `*` stands for
+one project name; a trailing `/` marks a directory. This block is the finite
+grammar of the layout: an implementation creates nothing else and a document
+names nothing else.
+
+```oacp-memory-layout
+.gitignore
+.oacp-memory-repo
+org-memory/
+org-memory/recent.md
+org-memory/decisions.md
+org-memory/rules.md
+org-memory/events/
+org-memory/debriefs/
+projects/
+projects/*/memory/
+projects/*/memory/project_facts.md
+projects/*/memory/decision_log.md
+projects/*/memory/open_threads.md
+projects/*/memory/known_debt.md
+projects/*/memory/archive/
+projects/*/memory/.cache/
+```
+
+`<project>` follows the workspace project-name rule: any name that does not
+start with `.` and contains no `/` or `\`. Everything else in the home is not
+memory — `keys/` (the signing keystore, denied below), a project's `agents/`
+and `packets/` trees, `state/`, and any other sibling stay on the machine that
+wrote them. `.gitkeep` placeholders that scaffolding drops into empty
+directories so they survive git are scaffolding, not layout.
+
+Scaffolding creates missing entries only. A file slot that is already
+occupied — by a regular file, a directory, or a link, dangling included — is
+never rewritten and never followed. An existing directory is entered as found,
+a directory symlink included. A home that has drifted from this layout is
+reported by tooling, not silently repaired.
+
+## Per-Project Tier
+
+**Location:** `projects/<project>/memory/`, created by `oacp init <project>`
+with the rest of the project workspace.
+
+### The four files
+
+The active working set. Every runtime reads these four files, in this order, at
+session start ([Session Init](session_init.md#step-3-load-durable-memory)
+Step 3), and only verified, stable outcomes are written to them.
+
+| File | Holds | Written by |
+|---|---|---|
+| `project_facts.md` | Agent roles, repo structure, architecture, conventions | Any agent, via the project's durable-memory promotion flow |
+| `decision_log.md` | Dated decisions with rationale. Append-only: a decision is superseded by a newer entry, never edited | Any agent, via the promotion flow |
+| `open_threads.md` | Unresolved issues, blocked work, cross-agent coordination | Any agent, via the promotion flow |
+| `known_debt.md` | Verified unresolved debt that should persist across sessions | Any agent, via the promotion flow |
+
+Scaffolding writes each file once, from a template, and never overwrites one
+that exists.
+
+**Promotion flow.** Memory is written at stable points, not during work. Merge
+decisions and equivalent terminal artifacts carry a "Durable Memory Updates"
+section, and the project's promotion mechanism appends approved entries to the
+matching file, deduplicating against existing content. Raw logs, long command
+output, transcripts, and in-progress state never enter these files (see
+[Durable Memory Promotion](multi_agent_shared_workspace.md#durable-memory-promotion)).
+
+### `archive/`
+
+`projects/<project>/memory/archive/` holds files retired from the active set —
+supplementary notes a project accumulated, or an older working file replaced by
+a newer one — for historical retention. Archived files are retrieved when a
+task needs them; restoring one to `memory/` does not add it to the required
+session-start reads, which stay the four files above.
+
+### `.cache/`
+
+`projects/<project>/memory/.cache/` is reserved for local, regenerable state
+(indexes, scratch) that tooling keeps beside the tier. It never syncs (see the
+allowlist below) and is never a session-start read.
+
+## Org Tier
+
+**Location:** `org-memory/`, beside `projects/`, created by `agent-memory org
+init`. Shared, cross-project memory: agents across projects read org-wide
+decisions, conventions, and events from a single location. It complements
+per-project memory and never replaces it.
 
 ```
-$OACP_HOME/org-memory/
+org-memory/
   recent.md           # rolling summary (~60K chars / ~15K tokens)
   decisions.md        # topical: org-wide decisions (illustrative default)
   rules.md            # topical: standing conventions (illustrative default)
@@ -33,7 +144,7 @@ budget governs. Collapse older detail into topical files or history so the
 file remains a bounded rolling summary when retrieved. This is a curation
 budget, not a requirement or allowance to load that much context at startup.
 
-## Event File Schema
+### Event File Schema
 
 ```markdown
 ---
@@ -50,7 +161,7 @@ supersedes: event/20260310-old-decision   # optional — for decisions that over
 Short description of what happened and why it matters.
 ```
 
-### Required Fields
+#### Required Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -60,15 +171,15 @@ Short description of what happened and why it matters.
 | `project` | string | Originating project |
 | `type` | enum | `decision`, `event`, or `rule` |
 
-### Optional Fields
+#### Optional Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `source_ref` | string | Provenance ID for dual-write reconciliation |
+| `source_ref` | string | Provenance ID for dual-write reconciliation; when the event was folded from a session debrief, the debrief-store filename stem (`<YYYYMMDD>-<agent>-<session>`) |
 | `related` | list | Cross-references to PRs, issues, or other events |
 | `supersedes` | string | Event path that this entry overrides |
 
-### File Naming
+#### File Naming
 
 Files are named `YYYYMMDD-HHMMSS-short-slug.md` where the timestamp provides sub-day ordering and the slug is a brief descriptor (lowercase, hyphen-separated).
 
@@ -84,14 +195,15 @@ per session — instead of in per-project trees. Debriefs are the full-fidelity
 session record; events remain the filtered-outcome channel. The two are
 distinct artifact classes and neither substitutes for the other.
 
-`oacp org-memory init` creates `debriefs/` (with a `.gitkeep` placeholder so
-the empty directory survives git-based sync). `oacp doctor` checks the store
-setup — directory presence, path layout, lingering staging artifacts,
+The org-tier scaffold creates `debriefs/` (with a `.gitkeep` placeholder so
+the empty directory survives git-based sync). The memory doctor checks the
+store setup — directory presence, path layout, lingering staging artifacts,
 irregular entries — and never opens debrief files: content and format
 verification belong to the writer contract (read-back at publication) and to
 git history, not to the doctor. The kernel owns only this layout and schema;
-the writer that produces debrief files is adopter tooling (for example, a
-debrief skill script) — there is no kernel subcommand for writing debriefs.
+the writer that produces debrief files is adopter tooling (for example,
+agent-memory's debrief verb) — there is no kernel subcommand for writing
+debriefs.
 
 ### Path and File Naming
 
@@ -258,47 +370,93 @@ configuration is needed.
 - Debriefs are permanent history: individual files are never rewritten (see
   Append-Only Rule); retention beyond that is adopter-defined
 
-## Integration Pattern (Cortex Reference Implementation)
+## Cross-Machine Tier
 
-Cortex demonstrates the dual-pipeline pattern — same source data, two audiences. This is a reference implementation, not a protocol requirement.
+Optional. A home that syncs is a plain git repository at the home root with
+one remote; the layout does not change and no server is involved. The two
+storage tiers are what syncs, selected by an allowlist; every other path in
+the home stays on the machine that wrote it. What an implementation does with
+the allowlist — commit, push, fast-forward pull, refuse to merge — is the
+tool's contract, not the kernel's: see agent-memory's
+[sync commands](https://github.com/kiloloop/agent-memory/blob/main/docs/commands.md#sync).
 
-**Debrief step (write):**
-- Debrief → cortex inbox (existing, for human)
-- Debrief → `org-memory/debriefs/` (the canonical immutable session record — see Debrief Store)
-- Curated outcome events → `org-memory/events/` (filtered derivatives, for agents — never the raw debrief; see Curation Guard)
-- All three writes treated as a logical unit — retry/warn on partial failure
-- `source_ref` in event frontmatter matches the debrief-store filename stem (`<YYYYMMDD>-<agent>-<session>`) for reconciliation
+### The marker
 
-**Sync step (curate):**
-- Debriefs (read from `org-memory/debriefs/`) → SSOT + vault daily notes (existing, for human)
-- Events → topical files + `recent.md` (new, for agents)
-- Sync cross-references SSOT when curating topical files to prevent drift
-- Sync is idempotent — handles duplicates/replays via `source_ref` + `created_at_utc`
+`.oacp-memory-repo` at the home root marks a home whose memory syncs. Presence
+is the whole signal: tooling and startup hooks that pull memory check for the
+file and do nothing when it is absent, so removing it disables sync locally
+without touching the repository or its history. Its content is informational.
+The name is a compatibility contract with every existing home; keep it
+verbatim. Syncing is opt-in, so scaffolding a home never creates the marker.
 
-**Consistency model:** Eventual, not strong. The pipelines may temporarily diverge. `source_ref` enables reconciliation against the debrief-store record. Adopter failure semantics (retryable partial failure, blocked debrief, or acceptable degraded mode) apply to the inbox and event writes; the debrief-store write is required by the Debrief Store section, and a store write that ultimately fails is a reported failure to retry, never an accepted degraded mode.
+### The sync allowlist
 
-## v0.2 Scope
+`.gitignore` at the home root carries the canonical allowlist, byte for byte:
 
-1. Format spec (directory structure, frontmatter schema, naming convention)
-2. CLI: `oacp org-memory init` (scaffold directory, including `debriefs/`) and `oacp write-event` (create event files)
-3. Agents write their full session debrief to `org-memory/debriefs/` (via adopter tooling — see Debrief Store) and curated outcome events during debrief
-4. Agents retrieve relevant sections of topical files and `recent.md` for org context on demand
-5. Coordinator maintains topical files during sync
+```gitignore
+*
+!*/
+!.gitignore
+!.oacp-memory-repo
+!org-memory/**
+!projects/*/memory/**
+projects/*/memory/.cache/
+# never sync private key material — explicit deny, wins over any future allowlist widening
+keys/
+```
 
-## v0.3+
+Line by line:
 
-- Agent write access to topical files (with schema validation)
-- `recent.md` auto-generation from topical files + recent events
-- Search/discovery tooling (BM25 or similar)
-- Structured `id` field on events for cross-referencing
+- **Deny everything, then re-allow directories** (`*`, `!*/`) so the tier
+  patterns below can reach into the tree.
+- **The synced set** is the ignore file itself, the marker, `org-memory/**`
+  in full (the debrief store included), and `projects/*/memory/**` for every
+  project.
+- **`projects/*/memory/.cache/` never syncs** — the one excluded subtree
+  inside a tier.
+- **`keys/` never syncs.** The signing keystore
+  ([key management](message_signing.md#key-management)) is denied last, after
+  every allow rule, so the deny wins even if the allowlist is widened above
+  it.
+
+### Which paths sync
+
+The allowlist is also a predicate over home-relative paths, and the predicate,
+not the ignore file, is what a sync engine trusts:
+
+- `.gitignore` and `.oacp-memory-repo` are allowed.
+- A path with any component named `keys` is denied, at any depth, whatever
+  the ignore file says.
+- A path strictly inside a tier directory (`org-memory/…`,
+  `projects/<project>/memory/…`) is allowed unless its first component below
+  the tier is one of that tier's unsynced names. The project tier excludes
+  `.cache`; the org tier excludes nothing, so `org-memory/.cache/…` syncs.
+  The tier directory itself is not a path inside it.
+- Every other path is denied.
+
+The tier directories an engine may stage are enumerated in allowlist order:
+`org-memory/` first, then each existing `projects/<project>/memory/` in
+project-name order.
+
+## Conformance
+
+The layout ships as data. `tests/conformance/memory_layout/layout.yaml`
+carries the same entry set as the Layout block above, and
+`canonical_memory_gitignore.txt` beside it is the allowlist byte for byte.
+`tests/test_memory_layout_fixture.py` holds this document, the fixture, and
+the kernel's project-tier scaffold to one another in both directions, and
+derives the allowlist's rule lines from the fixture's tiers and never-synced
+names so the two fixture files cannot disagree. An implementation vendors the
+two fixture files and asserts its own layout table, ignore text, and org-tier
+scaffold against them the same way.
 
 ## Design Rationale
 
 | Alternative | Why not |
 |---|---|
 | Single monolithic file | Wastes tokens, no progressive disclosure |
-| Events only (Codex pattern) | Optimizes for writing, weak for reading — "What's our API convention?" shouldn't require scanning 50 event files |
-| Topical only (Iris pattern) | No low-friction write path for agents — event files require only frontmatter, not schema knowledge |
+| Events only | Optimizes for writing, weak for reading — "What's our API convention?" shouldn't require scanning 50 event files |
+| Topical only | No low-friction write path for agents — event files require only frontmatter, not schema knowledge |
 | Inheritance model | Flat merge is simpler, no parent/child override complexity |
 
 The hybrid (topical + events) gives agents a fast read path (topical files) and a fast write path (events/), with coordinator curation bridging the two.

@@ -111,8 +111,9 @@ event it triggered; `org-memory/recent.md` points down at the project's
 
 ## Format reference
 
-- Event frontmatter schema, naming, and the promotion lifecycle:
+- The layout of both tiers, event frontmatter schema, naming, and the
+  promotion lifecycle:
   [`docs/protocol/org_memory.md`](../../docs/protocol/org_memory.md)
-- Blank scaffolds: `oacp org-memory init` (org level) and `oacp init
-  <project>` (project level — `memory/` files are created by the init
-  script).
+- Blank scaffolds: `agent-memory org init` (org level, from the memory
+  tool) and `oacp init <project>` (project level — `memory/` files are
+  created by the init script).

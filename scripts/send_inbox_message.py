@@ -39,7 +39,7 @@ Exit codes:
     1 — validation error
     2 — usage error or fatal failure
 
-Reference: docs/protocol/inbox_outbox.md, Issue #68/#77
+Reference: docs/protocol/inbox_outbox.md
 """
 
 from __future__ import annotations
@@ -810,7 +810,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Compose and send a protocol-compliant agent inbox message.",
         epilog=(
-            "Reference: docs/protocol/inbox_outbox.md (Issue #68/#80)\n\n"
+            "Reference: docs/protocol/inbox_outbox.md\n\n"
             "Sender resolution order: --from, OACP_AGENT, AGENT_NAME, project agent card runtime match.\n"
             "Card runtime fallback checks OACP_RUNTIME and runtime-specific environment markers.\n"
             "Suggested channels: brainstorm, review, deploy, incident\n"

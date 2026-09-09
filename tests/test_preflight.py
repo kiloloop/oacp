@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from preflight import (  # noqa: E402
     check_conflict_markers,
+    check_memory_boundary,
     check_packaging_boundary,
     check_yaml_syntax,
     parse_force_include,
@@ -236,6 +237,85 @@ class TestPackagingBoundary(unittest.TestCase):
             entries, errors = parse_force_include(repo / "pyproject.toml")
             self.assertEqual(errors, [])
             self.assertEqual(entries, [("scripts/a.py", "oacp/_scripts/a.py")])
+
+
+class TestMemoryBoundary(unittest.TestCase):
+    """No kernel module imports the memory engine, in either spelling or shape."""
+
+    def test_clean_kernel_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            _write(repo / "oacp" / "cli.py", "import shutil\nMEMORY_TOOL = 'agent-memory'\n")
+            _write(repo / "scripts" / "a.py", "from _oacp_env import resolve_oacp_home\n")
+            _write(
+                repo / "scripts" / "b.py",
+                '"""Docstring: from memory_sync import pull_memory."""\n'
+                "# import memory_sync in a comment only\n"
+                "HINT = 'import agent_memory'\n"
+                "PATH = ['agent_memory', 'memory_sync']\n"
+                "import importlib, sys\n"
+                "importlib.import_module(name=sys.argv[1])\n"
+                "importlib.import_module(sys.argv[1], package=None)\n"
+                "__import__(sys.argv[1], fromlist=[sys.argv[2]])\n",
+            )
+            result = check_memory_boundary(repo)
+            self.assertTrue(result.passed, result.details)
+            self.assertIn("3 kernel modules", result.details)
+
+    def test_each_import_shape_fails(self) -> None:
+        # (planted source appended after `import json`, line the guard reports)
+        planted = [
+            ("from memory_sync import pull_memory\n", 2),
+            ("import memory_cli\n", 2),
+            ("from agent_memory import sync\n", 2),
+            ("from agent_memory.sync import pull\n", 2),
+            ("import agent_memory\n", 2),
+            ("import os, memory_sync\n", 2),
+            ("import os as _os, memory_sync as ms\n", 2),
+            ("import os; import agent_memory\n", 2),
+            ("from . import memory_sync\n", 2),
+            ("from .. import pull_memory, memory_cli\n", 2),
+            ("from oacp._scripts.memory_sync import pull_memory\n", 2),
+            ("from oacp._scripts import memory_sync\n", 2),
+            ("def f():\n    from memory_sync import MemorySyncError, pull_memory\n", 3),
+            ("import importlib\nimportlib.import_module('memory_sync')\n", 3),
+            ("__import__('agent_memory')\n", 2),
+            ("import importlib\nimportlib.import_module(name='memory_sync')\n", 3),
+            ("__import__(name='agent_memory')\n", 2),
+            ("from importlib import import_module\nimport_module(name='memory_cli')\n", 3),
+            ("import importlib\nimportlib.import_module('.sync', package='agent_memory')\n", 3),
+            ("import importlib\nimportlib.import_module('.sync', 'memory_cli')\n", 3),
+            ("__import__('oacp._scripts', fromlist=['memory_sync'])\n", 2),
+            ("__import__('oacp._scripts', None, None, ('json', 'agent_memory'))\n", 2),
+        ]
+        for statement, lineno in planted:
+            with self.subTest(statement=statement.strip()):
+                with tempfile.TemporaryDirectory() as td:
+                    repo = Path(td)
+                    _write(repo / "scripts" / "clean.py", "import json\n")
+                    _write(repo / "scripts" / "planted.py", "import json\n" + statement)
+                    result = check_memory_boundary(repo)
+                    self.assertFalse(result.passed)
+                    self.assertIn(f"scripts/planted.py:{lineno}: ", result.details)
+                    self.assertNotIn("clean.py", result.details)
+
+    def test_unparseable_module_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            _write(repo / "scripts" / "a.py", "import json\n")
+            _write(repo / "scripts" / "broken.py", "import (\n")
+            result = check_memory_boundary(repo)
+            self.assertFalse(result.passed)
+            self.assertIn("scripts/broken.py:1: unparseable", result.details)
+
+    def test_only_kernel_dirs_are_scanned(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            _write(repo / "scripts" / "a.py", "import json\n")
+            _write(repo / "tests" / "test_x.py", "from memory_sync import x\n")
+            _write(repo / "scripts" / "__pycache__" / "junk.py", "import memory_sync\n")
+            result = check_memory_boundary(repo)
+            self.assertTrue(result.passed, result.details)
 
 
 class TestRunPreflight(unittest.TestCase):

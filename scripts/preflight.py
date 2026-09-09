@@ -17,6 +17,7 @@ Extended mode (`--full`): fast mode + `make test`.
 from __future__ import annotations
 
 import argparse
+import ast
 import re
 import shutil
 import subprocess
@@ -278,6 +279,122 @@ def check_packaging_boundary(repo_root: Path) -> CheckResult:
     )
 
 
+# The memory engine lives outside the kernel (`agent-memory-cli`). No kernel
+# module may import it, in either of its spellings: the retired in-tree
+# `memory_*` modules or the tool's `agent_memory` package. The check walks the
+# parsed module rather than matching lines, so every alias of a comma-list
+# import, semicolon-joined statements, relative (`from . import memory_sync`)
+# and qualified (`oacp._scripts.memory_sync`) forms, function-local imports,
+# and a dynamic import by string literal, whether the literal is the module
+# or the package it resolves against, are all caught, while a string or
+# comment that merely names a module is not.
+MEMORY_MODULE_RE = re.compile(r"^(?:memory_\w*|agent_memory)$")
+# Parameters of the dynamic importers that name a module, as (keyword,
+# position): `import_module(name, package=None)` and `__import__(name,
+# globals, locals, fromlist, level)`. Only literal strings are checkable.
+DYNAMIC_IMPORT_MODULE_PARAMS = {
+    "import_module": (("name", 0), ("package", 1)),
+    "__import__": (("name", 0), ("fromlist", 3)),
+}
+KERNEL_MODULE_DIRS = ("oacp", "scripts")
+
+
+def _iter_kernel_modules(repo_root: Path) -> List[Path]:
+    modules: List[Path] = []
+    for dirname in KERNEL_MODULE_DIRS:
+        root = repo_root / dirname
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*.py")):
+            rel = path.relative_to(repo_root)
+            if any(part in SKIP_DIRS or part.startswith(".") for part in rel.parts):
+                continue
+            modules.append(path)
+    return modules
+
+
+def _names_memory_engine(dotted: str) -> bool:
+    return any(MEMORY_MODULE_RE.match(part) for part in dotted.split("."))
+
+
+def _call_argument(node: ast.Call, keyword: str, position: int) -> Optional[ast.AST]:
+    """The argument passed for one parameter, positionally or by keyword."""
+    if position < len(node.args):
+        return node.args[position]
+    return next((kw.value for kw in node.keywords if kw.arg == keyword), None)
+
+
+def _literal_strings(node: Optional[ast.AST]) -> List[str]:
+    """String constants in a literal, or in the elements of a literal list/tuple."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    if isinstance(node, (ast.List, ast.Tuple)):
+        return [text for elt in node.elts for text in _literal_strings(elt)]
+    return []
+
+
+def _imported_names(node: ast.AST) -> List[str]:
+    """Dotted names an import-shaped node resolves; [] for any other node."""
+    if isinstance(node, ast.Import):
+        return [alias.name for alias in node.names]
+    if isinstance(node, ast.ImportFrom):
+        # `from pkg.memory_sync import x` names the module on the left;
+        # `from pkg import memory_sync` and `from . import memory_sync` name
+        # it as the imported item, so both sides are checked.
+        return [node.module or "", *(alias.name for alias in node.names)]
+    if isinstance(node, ast.Call):
+        func = node.func
+        callee = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+        return [
+            name
+            for keyword, position in DYNAMIC_IMPORT_MODULE_PARAMS.get(callee, ())
+            for name in _literal_strings(_call_argument(node, keyword, position))
+        ]
+    return []
+
+
+def memory_engine_imports(source: str, rel: str) -> List[str]:
+    """`<rel>:<line>: <statement>` for each import in `source` naming the engine.
+
+    A module that does not parse is reported as a hit: an import the guard
+    cannot see is not one it can vouch for.
+    """
+    try:
+        tree = ast.parse(source, filename=rel)
+    except SyntaxError as exc:
+        return [f"{rel}:{exc.lineno or 0}: unparseable ({exc.msg})"]
+    lines = source.splitlines()
+    hits: List[Tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if any(_names_memory_engine(name) for name in _imported_names(node)):
+            hits.append((node.lineno, lines[node.lineno - 1].strip()[:80]))
+    return [f"{rel}:{lineno}: {text}" for lineno, text in sorted(set(hits))]
+
+
+def check_memory_boundary(repo_root: Path) -> CheckResult:
+    """No kernel module imports the memory engine (`memory_*` or `agent_memory`)."""
+    start = time.monotonic()
+    hits: List[str] = []
+    modules = _iter_kernel_modules(repo_root)
+    for path in modules:
+        rel = path.relative_to(repo_root).as_posix()
+        source = path.read_text(encoding="utf-8", errors="replace")
+        hits.extend(memory_engine_imports(source, rel))
+    if hits:
+        return CheckResult(
+            name="memory-boundary",
+            passed=False,
+            details="kernel modules importing the memory engine:\n" + "\n".join(hits),
+            duration_s=time.monotonic() - start,
+        )
+    return CheckResult(
+        name="memory-boundary",
+        passed=True,
+        details=f"{len(modules)} kernel modules import no memory engine",
+        duration_s=time.monotonic() - start,
+    )
+
+
 def _discover_repo_files(repo_root: Path, runner: Runner) -> List[Path]:
     rc, output = runner(["git", "ls-files"], repo_root)
     if rc == 0:
@@ -517,6 +634,7 @@ def run_preflight(
         check_conflict_markers(repo_root, runner=runner),
         check_makefile(repo_root),
         check_packaging_boundary(repo_root),
+        check_memory_boundary(repo_root),
         check_yaml_syntax(repo_root, loader=yaml_loader),
         check_ruff(repo_root, runner=runner),
         check_shellcheck(repo_root, runner=runner),
