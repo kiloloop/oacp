@@ -31,7 +31,7 @@ from gen_readme_commands import (  # noqa: E402
     parse_commands,
     render_block,
 )
-from oacp.cli import SCRIPT_NAMES  # noqa: E402
+from oacp.cli import DELEGATED_COMMANDS, SCRIPT_NAMES  # noqa: E402
 
 
 def _readme_text() -> str:
@@ -62,7 +62,7 @@ def test_help_text_matches_executed_cli_help() -> None:
 def test_help_text_lists_exactly_the_dispatchable_commands() -> None:
     names = [name for name, _ in parse_commands(load_help_text())]
     assert len(names) == len(set(names)), f"duplicate command in HELP_TEXT: {names}"
-    assert sorted(names) == sorted(SCRIPT_NAMES)
+    assert sorted(names) == sorted([*SCRIPT_NAMES, *DELEGATED_COMMANDS])
 
 
 def test_parse_commands_rejects_help_text_without_commands_block() -> None:

@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import posixpath
 import re
+import shutil
 import subprocess
 import sys
 import zipfile
 from pathlib import Path
-from typing import Set
+from typing import Iterable, List, Set
 
 import pytest
 
@@ -41,12 +42,35 @@ REMOVED_SCRIPTS = [
     "oacp/_scripts/create_handoff_packet.py",
     "oacp/_scripts/init_project_workspace.sh",
     "oacp/_scripts/session_lifecycle_hooks.py",
+    "oacp/_scripts/init_org_memory.py",
+    "oacp/_scripts/promote_to_archive.py",
+    "oacp/_scripts/restore_from_archive.py",
+]
+# The memory engine ships as `agent-memory-cli`; the kernel wheel carries no
+# memory module and no org-memory templates. Matched by shape, not by name, so
+# a re-added module fails here before it is ever listed above. The script
+# shape covers a flat module and a package with everything under it, in
+# either spelling the preflight memory-boundary guard rejects.
+MEMORY_ENGINE_SHAPES = [
+    re.compile(r"^oacp/_scripts/(?:memory_|agent_memory)[^/]*(?:/|$)"),
+    re.compile(r"^oacp/_templates/org-memory/"),
+]
+# Force-included into a copy of this tree to prove the shapes against a real
+# build: (source path, wheel destination).
+PLANTED_ENGINE_FILES = [
+    ("scripts/memory_probe/__init__.py", "oacp/_scripts/memory_probe/__init__.py"),
+    ("scripts/memory_probe_flat.py", "oacp/_scripts/memory_probe_flat.py"),
+    ("templates/org-memory/probe.md", "oacp/_templates/org-memory/probe.md"),
 ]
 
 
-@pytest.fixture(scope="module")
-def wheel_names(tmp_path_factory) -> Set[str]:
-    outdir = tmp_path_factory.mktemp("wheel")
+def memory_engine_files(names: Iterable[str]) -> List[str]:
+    return sorted(
+        name for name in names if any(shape.match(name) for shape in MEMORY_ENGINE_SHAPES)
+    )
+
+
+def _build_wheel_names(tree: Path, outdir: Path) -> Set[str]:
     completed = subprocess.run(
         [
             sys.executable,
@@ -56,7 +80,7 @@ def wheel_names(tmp_path_factory) -> Set[str]:
             "--no-isolation",
             "--outdir",
             str(outdir),
-            str(REPO_ROOT),
+            str(tree),
         ],
         capture_output=True,
         text=True,
@@ -71,6 +95,44 @@ def wheel_names(tmp_path_factory) -> Set[str]:
     assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
     with zipfile.ZipFile(wheels[0]) as zf:
         return set(zf.namelist())
+
+
+@pytest.fixture(scope="module")
+def wheel_names(tmp_path_factory) -> Set[str]:
+    return _build_wheel_names(REPO_ROOT, tmp_path_factory.mktemp("wheel"))
+
+
+@pytest.fixture(scope="module")
+def planted_wheel_names(tmp_path_factory) -> Set[str]:
+    """Wheel built from a copy of this tree with engine-shaped files force-included."""
+    tracked = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", "-z"],
+        capture_output=True,
+        check=False,
+    )
+    if tracked.returncode != 0:
+        pytest.skip("planted build needs a git checkout to copy")
+    tree = tmp_path_factory.mktemp("planted-tree")
+    for raw in tracked.stdout.split(b"\0"):
+        rel = raw.decode()
+        source = REPO_ROOT / rel
+        if not rel or not source.is_file():
+            continue
+        target = tree / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    rows = []
+    for source_rel, destination in PLANTED_ENGINE_FILES:
+        planted = tree / source_rel
+        planted.parent.mkdir(parents=True, exist_ok=True)
+        planted.write_text("# planted by test_package_content\n")
+        rows.append(f'"{source_rel}" = "{destination}"\n')
+    pyproject = tree / "pyproject.toml"
+    header = "[tool.hatch.build.targets.wheel.force-include]\n"
+    text = pyproject.read_text()
+    assert text.count(header) == 1
+    pyproject.write_text(text.replace(header, header + "".join(rows), 1))
+    return _build_wheel_names(tree, tmp_path_factory.mktemp("planted-wheel"))
 
 
 class TestKernelDocsShipped:
@@ -124,6 +186,39 @@ class TestRemovedScriptsAbsent:
     def test_removed_scripts_not_shipped(self, wheel_names):
         present = [name for name in REMOVED_SCRIPTS if name in wheel_names]
         assert not present, f"removed scripts still in wheel: {present}"
+
+    def test_memory_engine_not_shipped(self, wheel_names):
+        present = memory_engine_files(wheel_names)
+        assert not present, f"memory engine files in wheel: {present}"
+
+    def test_memory_engine_shapes_trip_on_planted_build(self, planted_wheel_names):
+        # The same tree with a memory_* package, a flat memory_* module and an
+        # org-memory template force-included: every planted file is caught and
+        # nothing the real build ships is.
+        planted = {destination for _, destination in PLANTED_ENGINE_FILES}
+        assert planted <= planted_wheel_names
+        assert set(memory_engine_files(planted_wheel_names)) == planted
+
+
+class TestMemoryEngineShapes:
+    def test_shapes_cover_packages_modules_and_templates(self):
+        caught = [
+            "oacp/_scripts/memory_sync.py",
+            "oacp/_scripts/memory_probe/__init__.py",
+            "oacp/_scripts/memory_probe/nested/deep.py",
+            "oacp/_scripts/agent_memory.py",
+            "oacp/_scripts/agent_memory/__init__.py",
+            "oacp/_templates/org-memory/README.md",
+            "oacp/_templates/org-memory/events/.gitkeep",
+        ]
+        kept = [
+            "oacp/_scripts/oacp_doctor.py",
+            "oacp/_scripts/codex_session_init.py",
+            "oacp/_protocol/org_memory.md",
+            "oacp/guides/memory-context.md",
+            "oacp/_templates/inbox_message.template.yaml",
+        ]
+        assert memory_engine_files(caught + kept) == sorted(caught)
 
 
 # Retained shipped tools and templates must not direct users to the retired

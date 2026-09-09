@@ -1,5 +1,0 @@
-description: org-memory exists but debriefs/ was never created.
-findings:
-  - name: debriefs-dir
-    severity: warn
-    message_contains: "missing"

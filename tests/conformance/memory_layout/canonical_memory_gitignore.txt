@@ -1,0 +1,9 @@
+*
+!*/
+!.gitignore
+!.oacp-memory-repo
+!org-memory/**
+!projects/*/memory/**
+projects/*/memory/.cache/
+# never sync private key material — explicit deny, wins over any future allowlist widening
+keys/

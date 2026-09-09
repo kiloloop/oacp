@@ -234,13 +234,13 @@ uv tool install .
 | `oacp inbox` | List pending inbox messages |
 | `oacp watch` | Emit inbox delta events for Monitor-friendly polling |
 | `oacp retention` | Prune project message history by age and count |
-| `oacp memory` | Archive, restore, or sync memory files |
+| `oacp memory` | Run agent-memory (sync, archive, restore); shim until 0.5.2 |
 | `oacp session-init` | Verify Codex startup inputs and emit SessionStart context |
 | `oacp setup` | Generate runtime-specific config files in a repo |
 | `oacp send` | Send a protocol-compliant inbox message |
 | `oacp key` | Generate and inspect message-signing keys |
 | `oacp trust` | Import, inspect, and revoke trust-root entries (catalog + pins) |
-| `oacp org-memory` | Initialize org-level memory at $OACP_HOME/org-memory/ |
+| `oacp org-memory` | Run agent-memory org (init); shim until 0.5.2 |
 | `oacp write-event` | Write an event to org-memory/events/ |
 | `oacp autonomy-outcome` | Record a human approval/decline in an autonomy audit |
 | `oacp autonomy-finalize` | Record checkpoints and terminal states in an autonomy audit |
@@ -259,9 +259,9 @@ uv tool install .
 
 **`oacp watch`**: `--agent`, repeatable `--project`, `--all-projects`, `--json`, `--since` (default `now`), `--state-id <id>` for per-subscriber cursors, `--show-archived`
 
-**`oacp doctor`**: `--fix` (auto-fix safe issues), `--memory`, `--json`, `-o/--output`
+**`oacp doctor`**: `--fix` (auto-fix safe issues), `--json`, `-o/--output`
 
-**`oacp memory`**: `init [--remote URL]`, `clone <URL> [--force]`, `pull`, `push`, `disable`, `archive <project> <file>`, `restore <project> <file>`
+**`oacp memory`** / **`oacp org-memory`**: exec shims for [agent-memory](https://github.com/kiloloop/agent-memory) (`pip install agent-memory-cli`): argv passes through, `--oacp-dir` becomes `--home`, `oacp memory init` runs `agent-memory enable`. Kept through 0.5.1, removed in 0.5.2; call `agent-memory` directly.
 
 </details>
 
@@ -341,15 +341,12 @@ $OACP_HOME/projects/<project>/
 └── workspace.json           # Project metadata
 ```
 
-Optionally, `oacp org-memory init` creates org-level shared memory:
-
-```
-$OACP_HOME/org-memory/
-├── recent.md                # Rolling summary, retrieved on demand
-├── decisions.md             # Org-wide decisions
-├── rules.md                 # Standing conventions
-└── events/                  # Timestamped event entries
-```
+Org-level shared memory and cross-machine sync are the memory tool's:
+[agent-memory](https://github.com/kiloloop/agent-memory) (`pip install
+agent-memory-cli`) scaffolds `$OACP_HOME/org-memory/` (`agent-memory org init`),
+syncs the home (`enable`, `pull`, `push`), checks it (`agent-memory doctor`), and
+installs the runtime startup hook (`agent-memory setup <runtime>`). The layout it
+implements is the kernel's [memory layout spec](docs/protocol/org_memory.md).
 
 Init loads the four active project memory files. Org memory is retrieved on
 demand; syncing it to disk does not load it into context. See

@@ -163,7 +163,7 @@ def write_event_file(oacp_root: Path, event: dict) -> Path:
     if not events_dir.is_dir():
         raise ValueError(
             f"Events directory not found: {events_dir}\n"
-            f"Run `oacp org-memory init` first."
+            f"Run `agent-memory org init` first."
         )
 
     path = events_dir / event["filename"]

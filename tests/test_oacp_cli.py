@@ -48,15 +48,42 @@ class TestOacpCli(unittest.TestCase):
             "add_agent.py", ["demo", "alice", "--runtime", "claude"]
         )
 
+    @mock.patch("oacp.cli.os.execvp")
+    @mock.patch("oacp.cli.shutil.which", return_value="/opt/bin/agent-memory")
     @mock.patch("oacp.cli._run_script", return_value=0)
-    def test_dispatches_memory_namespace(self, run_script) -> None:
-        code, stdout, stderr = self._run(["memory", "archive", "demo", "notes.md"])
+    def test_memory_namespace_delegates_to_the_memory_tool(self, run_script, which, execvp) -> None:
+        code, stdout, stderr = self._run(["memory", "archive", "demo", "notes.md", "--oacp-dir", "/tmp/home"])
         self.assertEqual(code, 0)
         self.assertEqual(stdout, "")
         self.assertEqual(stderr, "")
-        run_script.assert_called_once_with(
-            "memory_cli.py", ["archive", "demo", "notes.md"]
+        run_script.assert_not_called()
+        which.assert_called_once_with("agent-memory")
+        execvp.assert_called_once_with(
+            "/opt/bin/agent-memory",
+            ["agent-memory", "archive", "demo", "notes.md", "--home", "/tmp/home"],
         )
+
+    @mock.patch("oacp.cli.os.execvp")
+    @mock.patch("oacp.cli.shutil.which", return_value="/opt/bin/agent-memory")
+    @mock.patch("oacp.cli._run_script", return_value=0)
+    def test_org_memory_init_delegates_to_the_org_tier_verb(self, run_script, which, execvp) -> None:
+        code, _stdout, _stderr = self._run(["org-memory", "init"])
+        self.assertEqual(code, 0)
+        run_script.assert_not_called()
+        execvp.assert_called_once_with("/opt/bin/agent-memory", ["agent-memory", "org", "init"])
+
+    @mock.patch("oacp.cli.os.execvp")
+    @mock.patch("oacp.cli.shutil.which", return_value=None)
+    @mock.patch("oacp.cli._run_script", return_value=0)
+    def test_memory_namespace_without_the_tool_exits_127(self, run_script, which, execvp) -> None:
+        code, stdout, stderr = self._run(["memory", "pull"])
+        self.assertEqual(code, 127)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr.count("\n"), 1)
+        self.assertIn("agent-memory", stderr)
+        self.assertIn("pip install agent-memory-cli", stderr)
+        run_script.assert_not_called()
+        execvp.assert_not_called()
 
     @mock.patch("oacp.cli._run_script", return_value=0)
     def test_dispatches_session_init(self, run_script) -> None:

@@ -8,6 +8,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -331,6 +333,16 @@ def run_session_init(
     }
 
 
+# The memory engine is the `agent-memory` tool (`agent-memory-cli` on PyPI).
+# The startup pull runs it as a subprocess when it is on PATH and reports
+# `disabled` with the install hint when it is not; the kernel bundles no
+# engine of its own. This bridge lasts until the runtime hooks are split out
+# of the kernel in 0.5.1.
+MEMORY_TOOL = "agent-memory"
+MEMORY_TOOL_INSTALL_HINT = "install it with `pip install agent-memory-cli`"
+MEMORY_PULL_TIMEOUT_SECONDS = 60
+
+
 def _pull_memory_report(*, hub_dir: Path, dry_run: bool) -> Dict[str, Any]:
     """Run the advisory startup pull and retain a compact result for hook context."""
     marker = hub_dir / ".oacp-memory-repo"
@@ -344,16 +356,38 @@ def _pull_memory_report(*, hub_dir: Path, dry_run: bool) -> Dict[str, Any]:
             "state": "dry-run",
             "messages": ["OACP memory pull skipped in dry-run mode."],
         }
+    tool = shutil.which(MEMORY_TOOL)
+    if tool is None:
+        return {
+            "state": "disabled",
+            "messages": [
+                f"{MEMORY_TOOL} is not on PATH; startup pull skipped ({MEMORY_TOOL_INSTALL_HINT})."
+            ],
+        }
 
     try:
-        from memory_sync import MemorySyncError, pull_memory
+        completed = subprocess.run(
+            [tool, "pull", "--home", str(hub_dir)],
+            capture_output=True,
+            text=True,
+            timeout=MEMORY_PULL_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"state": "failed", "messages": [f"{MEMORY_TOOL} pull: {exc}"]}
 
-        messages = pull_memory(hub_dir)
-    except (MemorySyncError, OSError, ValueError) as exc:
-        return {"state": "failed", "messages": [str(exc)]}
-
+    messages = [
+        line.rstrip()
+        for line in (completed.stdout + completed.stderr).splitlines()
+        if line.strip()
+    ]
+    if completed.returncode != 0:
+        return {
+            "state": "failed",
+            "messages": messages or [f"{MEMORY_TOOL} pull exited {completed.returncode}"],
+        }
     state = "warning" if any(line.startswith("WARNING:") for line in messages) else "ok"
-    return {"state": state, "messages": messages}
+    return {"state": state, "messages": messages or [f"{MEMORY_TOOL} pull: ok"]}
 
 
 def _bounded_hook_context(text: str) -> str:
@@ -369,7 +403,7 @@ def _bounded_hook_context(text: str) -> str:
 def build_session_start_hook_output(
     report: Dict[str, Any],
     *,
-    memory_sync: Optional[Dict[str, Any]] = None,
+    memory_pull: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Render concise developer context for the Codex ``SessionStart`` hook."""
     protocol_paths = report["protocol"]
@@ -383,7 +417,7 @@ def build_session_start_hook_output(
     memory_root = (
         str(Path(readable_memory_paths[0]).parent) if readable_memory_paths else "(none)"
     )
-    sync_state = str((memory_sync or {}).get("state", "not-requested"))
+    sync_state = str((memory_pull or {}).get("state", "not-requested"))
     verified_items = [
         item
         for item in [*protocol_paths.values(), *memory_paths.values()]
@@ -448,7 +482,7 @@ def _hook_input_error_output(message: str) -> Dict[str, Any]:
             "hookEventName": "SessionStart",
             "additionalContext": (
                 f"OACP startup verification did not run: {message}. "
-                "Before substantial work, run `oacp session-init --pull-memory` "
+                "Before substantial work, run `oacp session-init` "
                 "manually and report the resulting SESSION_INIT_ACK."
             ),
         },
@@ -464,7 +498,7 @@ def _hook_runtime_error_output(message: str) -> Dict[str, Any]:
             "additionalContext": _bounded_hook_context(
                 f"OACP startup verification failed after hook input was accepted: "
                 f"{message}. Before substantial work, run "
-                "`oacp session-init --pull-memory` manually and report the "
+                "`oacp session-init` manually and report the "
                 "resulting SESSION_INIT_ACK."
             ),
         },
@@ -541,7 +575,7 @@ def main() -> int:
                 "status.yaml records model: unknown"
             )
 
-        memory_sync = (
+        memory_pull = (
             _pull_memory_report(hub_dir=hub_dir, dry_run=args.dry_run)
             if args.pull_memory
             else None
@@ -566,12 +600,12 @@ def main() -> int:
         return 0
 
     if args.hook:
-        print(json.dumps(build_session_start_hook_output(report, memory_sync=memory_sync)))
+        print(json.dumps(build_session_start_hook_output(report, memory_pull=memory_pull)))
         return 0
 
     if args.json_output:
-        if memory_sync is not None:
-            report["memory_sync"] = memory_sync
+        if memory_pull is not None:
+            report["memory_sync"] = memory_pull
         print(json.dumps(report, indent=2, sort_keys=True))
         return 0
 
@@ -586,9 +620,9 @@ def main() -> int:
         item = report["memory"][name]
         print(f"- {name}: {item['state']}")
     print(f"status.yaml: {report['status_yaml'].get('state', 'unknown')}")
-    if memory_sync is not None:
-        print(f"memory pull: {memory_sync['state']}")
-        for message in memory_sync["messages"]:
+    if memory_pull is not None:
+        print(f"memory pull: {memory_pull['state']}")
+        for message in memory_pull["messages"]:
             print(f"- {message}")
     for warning in report["warnings"]:
         print(f"WARN: {warning}")

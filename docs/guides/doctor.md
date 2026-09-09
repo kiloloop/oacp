@@ -27,6 +27,7 @@ Verifies that required and optional CLI tools are installed and reachable on `PA
 | `ruff` | No | Python linter (optional, used in preflight) |
 | `shellcheck` | No | Shell script linter (optional) |
 | `pyyaml` | No | PyYAML library (needed for YAML validation) |
+| `agent-memory` | No | Memory tool (`agent-memory-cli`); the row reports its version and hands memory-home checks to `agent-memory doctor` |
 
 ### 2. Workspace
 
@@ -103,6 +104,8 @@ $ oacp doctor
     [+] ruff — ruff 0.8.1
     [-] shellcheck — not installed (optional)
         Install: brew install shellcheck
+    [-] agent-memory — not installed
+        Install: pip install agent-memory-cli
     [+] pyyaml — available
 
 No issues found.
@@ -120,6 +123,7 @@ $ oacp doctor --project my-project
     [+] ruff — ruff 0.8.1
     [-] shellcheck — not installed (optional)
         Install: brew install shellcheck
+    [+] agent-memory — agent-memory 0.1.0 (run agent-memory doctor)
     [+] pyyaml — available
 
 [+] Workspace
@@ -181,6 +185,7 @@ The exit code reflects the overall result:
 | `pyyaml — not importable` | `pip install pyyaml` |
 | `ruff — not installed` | `pip install ruff` (optional, for linting) |
 | `shellcheck — not installed` | `brew install shellcheck` (optional, for shell script linting) |
+| `agent-memory — not installed` | `pip install agent-memory-cli` (optional; `agent-memory doctor` then checks the memory home) |
 
 ### Workspace
 
@@ -220,7 +225,6 @@ oacp doctor --project <name>         # full workspace + agent checks
 oacp doctor --json                   # machine-readable JSON output
 oacp doctor --project <name> --json  # full checks in JSON format
 oacp doctor --project <name> --fix   # auto-fix safe issues (missing inbox dirs, missing/stale status.yaml)
-oacp doctor --memory                 # advisory checks for OACP_HOME memory git sync
 oacp doctor -o report.txt            # save report to file
 ```
 

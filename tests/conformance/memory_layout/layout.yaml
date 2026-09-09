@@ -1,0 +1,71 @@
+# Canonical three-tier memory layout — the vendored fixture that the kernel
+# and the memory tool (agent-memory) both test against.
+#
+# Paths are literal and home-relative. "*" stands for exactly one project
+# name; a trailing "/" marks a directory. The spec is docs/protocol/org_memory.md;
+# its "Layout" block enumerates the same set, and tests/test_memory_layout_fixture.py
+# fails when the two differ in either direction.
+schema_version: 1
+
+marker_file: .oacp-memory-repo
+gitignore_file: .gitignore
+projects_dir: projects
+project_wildcard: "*"
+
+# Top-level directory names denied by the sync predicate at any depth,
+# whatever the ignore file says. Listed after every allow rule in the
+# canonical .gitignore so the deny wins even if the allowlist is widened.
+never_synced_dirs:
+  - keys
+
+# The storage tiers, in allowlist order.
+tiers:
+  - name: org
+    pattern: org-memory
+    files:
+      - recent.md
+      - decisions.md
+      - rules.md
+    dirs:
+      - events
+      - debriefs
+    unsynced: []
+  - name: project
+    pattern: projects/*/memory
+    files:
+      - project_facts.md
+      - decision_log.md
+      - open_threads.md
+      - known_debt.md
+    dirs:
+      - archive
+    unsynced:
+      - .cache
+
+# Every entry the layout names, spelled out. This list is the closure of the
+# fields above (marker, ignore file, projects dir, and each tier's directory,
+# files, dirs, and unsynced dirs); the pinning test checks that it is.
+entries:
+  - .gitignore
+  - .oacp-memory-repo
+  - org-memory/
+  - org-memory/recent.md
+  - org-memory/decisions.md
+  - org-memory/rules.md
+  - org-memory/events/
+  - org-memory/debriefs/
+  - projects/
+  - projects/*/memory/
+  - projects/*/memory/project_facts.md
+  - projects/*/memory/decision_log.md
+  - projects/*/memory/open_threads.md
+  - projects/*/memory/known_debt.md
+  - projects/*/memory/archive/
+  - projects/*/memory/.cache/
+
+# The canonical sync allowlist lives beside this file as
+# canonical_memory_gitignore.txt (byte-exact; compare bytes, never lines).
+# Its rule lines, comments aside, are the fields above in allowlist order
+# (allow rules, each tier's unsynced dirs, never_synced_dirs last); the
+# pinning test derives them and fails when the two files disagree.
+gitignore_golden: canonical_memory_gitignore.txt
