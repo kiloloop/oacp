@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "oacp-cli"
-version = "0.5.0"
+version = "0.5.1"
 description = "Open Agent Coordination Protocol CLI for file-based multi-agent workflows"
 readme = "README.md"
 license = "Apache-2.0"
@@ -14,7 +14,7 @@ authors = [
   { name = "Kiloloop" },
 ]
 dependencies = [
-  "PyYAML>=6.0",
+  "PyYAML>=6.0.1",
 ]
 keywords = ["agents", "cli", "coordination", "oacp", "workflow"]
 classifiers = [
@@ -50,7 +50,7 @@ dev = [
   "build==1.5.0",
   "hatchling==1.27.0",
   "pytest==9.1.1",
-  "ruff==0.16.2",
+  "ruff==0.16.6",
 ]
 
 [tool.hatch.build.targets.sdist]
@@ -86,7 +86,6 @@ packages = ["oacp"]
 "scripts/agent_profile.py" = "oacp/_scripts/agent_profile.py"
 "scripts/oacp_inbox.py" = "oacp/_scripts/oacp_inbox.py"
 "scripts/oacp_watch.py" = "oacp/_scripts/oacp_watch.py"
-"scripts/retention.py" = "oacp/_scripts/retention.py"
 "scripts/setup_runtime.py" = "oacp/_scripts/setup_runtime.py"
 "scripts/write_event.py" = "oacp/_scripts/write_event.py"
 "scripts/check_quality_gate.py" = "oacp/_scripts/check_quality_gate.py"

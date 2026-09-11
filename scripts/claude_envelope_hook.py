@@ -135,7 +135,7 @@ OACP_ALWAYS_ALLOWED = {"send", "inbox", "validate", "doctor", "watch", "help", "
 # `result.final_state` values that mark the task lifecycle over. `paused`
 # is deliberately absent: a checkpoint-paused task keeps its envelope and
 # re-authorizes via the §E flow (recompile with --extend), never via clear.
-TERMINAL_AUDIT_STATES = {"done", "error"}
+TERMINAL_AUDIT_STATES = {"done", "error", "cancelled"}
 # Receiver-workspace directories that are protocol bookkeeping, not task
 # scope: audit records, inbox claims, outbox copies. Deliberately NOT the
 # receiver's state/ (the active envelope is the policy object — direct
@@ -1094,7 +1094,7 @@ def _classify_envelope_clear(
             "oacp envelope clear before any audit record matches "
             f"message_id {context.message_id!r} and receiver "
             f"{context.receiver!r}; the completion clear is sanctioned once "
-            "the record's result.final_state is terminal (done/error)"
+            "the record's result.final_state is terminal (done/error/cancelled)"
         )
     record = max(matches, key=lambda item: item[0])[1]
     result = record.get("result")
@@ -1104,7 +1104,7 @@ def _classify_envelope_clear(
     return _deny(
         f"oacp envelope clear while the audit record for "
         f"{context.message_id} shows result.final_state {state!r}; the "
-        "envelope stays active until the task completes (done/error) — a "
+        "envelope stays active until the task completes (done/error/cancelled) — a "
         "paused task re-authorizes via the §E checkpoint, and completion "
         "requires the audit record update first"
     )

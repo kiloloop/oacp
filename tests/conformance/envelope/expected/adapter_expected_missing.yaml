@@ -1,9 +1,9 @@
-case: granular_capabilities_compile
+case: adapter_expected_missing
 config: configs/auto_review_standard.yaml
 message: messages/granular_capabilities_task.yaml
 adapter:
   runtime: claude
-  console_on_path: true
+  console_on_path: false
   registered: true
 expected:
   compiles: true
@@ -12,27 +12,16 @@ expected:
     project: test-proj
     receiver: claude
     message_id: msg-20260717060500-alice-env2
-    enforcement: hooks
+    enforcement: none
+    enforcement_reason: adapter_expected_missing
     adapter:
       runtime: claude
-      state: resolved
+      state: expected_missing
       console: oacp-envelope-hook
     constraints:
       estimated_minutes: 35
       expected_files_touched: 4
-      risk_tier: P2
-      target_repo: example-org/private-repo
-      destructive_ops: false
-      external_side_effects: true
       creates_or_updates_pr: true
-      comments_on_github: true
-      commits_changes: true
-      merges_pr: true
-      files_issues: true
-      sends_oacp_reply_only: false
-      touches_auth_config_or_secrets: false
-      touches_dependencies: false
-      public_visibility: false
       private_repo_allowlist:
         - example-org/private-repo
     counters:

@@ -85,17 +85,83 @@ class TestOacpCli(unittest.TestCase):
         run_script.assert_not_called()
         execvp.assert_not_called()
 
+    @mock.patch("oacp.cli.os.execvp")
+    @mock.patch("oacp.cli.subprocess.run")
+    @mock.patch("oacp.cli.shutil.which", return_value="/opt/bin/agent-memory")
+    @mock.patch("oacp.cli._run_script", return_value=0)
+    def test_write_event_execs_the_event_verb_when_the_tool_serves_it(self, run_script, which, run, execvp) -> None:
+        run.return_value = mock.Mock(returncode=0)
+        argv = [
+            "--agent", "alice", "--project", "demo", "--type", "decision", "--slug", "api-convention",
+            "--body", "Use REST", "--oacp-dir", "/tmp/home", "--json",
+        ]
+        code, stdout, stderr = self._run(["write-event", *argv])
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "")
+        run_script.assert_not_called()
+        which.assert_called_once_with("agent-memory")
+        self.assertEqual(run.call_args.args[0], ["/opt/bin/agent-memory", "event", "write", "--help"])
+        execvp.assert_called_once_with(
+            "/opt/bin/agent-memory",
+            [
+                "agent-memory", "event", "write",
+                "--agent", "alice", "--project", "demo", "--type", "decision", "--slug", "api-convention",
+                "--body", "Use REST", "--home", "/tmp/home", "--json",
+            ],
+        )
+
+    @mock.patch("oacp.cli.os.execvp")
+    @mock.patch("oacp.cli.subprocess.run")
+    @mock.patch("oacp.cli.shutil.which", return_value=None)
+    @mock.patch("oacp.cli._run_script", return_value=0)
+    def test_write_event_runs_the_script_without_the_tool(self, run_script, which, run, execvp) -> None:
+        argv = ["--agent", "alice", "--project", "demo", "--type", "event", "--slug", "x", "--body", "b"]
+        code, stdout, stderr = self._run(["write-event", *argv])
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "")
+        run_script.assert_called_once_with("write_event.py", argv)
+        run.assert_not_called()
+        execvp.assert_not_called()
+
+    @mock.patch("oacp.cli.os.execvp")
+    @mock.patch("oacp.cli.subprocess.run")
+    @mock.patch("oacp.cli.shutil.which", return_value="/opt/bin/agent-memory")
+    @mock.patch("oacp.cli._run_script", return_value=0)
+    def test_write_event_runs_the_script_when_the_tool_predates_the_verb(self, run_script, which, run, execvp) -> None:
+        run.return_value = mock.Mock(returncode=2)  # argparse: invalid choice 'event'
+        argv = ["--agent", "alice", "--project", "demo", "--type", "event", "--slug", "x", "--body", "b"]
+        code, stdout, stderr = self._run(["write-event", *argv])
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "")
+        run_script.assert_called_once_with("write_event.py", argv)
+        execvp.assert_not_called()
+
+    @mock.patch("oacp.cli.os.execvp")
+    @mock.patch("oacp.cli.subprocess.run", side_effect=OSError("exec format error"))
+    @mock.patch("oacp.cli.shutil.which", return_value="/opt/bin/agent-memory")
+    @mock.patch("oacp.cli._run_script", return_value=0)
+    def test_write_event_runs_the_script_when_the_probe_fails(self, run_script, which, run, execvp) -> None:
+        argv = ["--agent", "alice", "--project", "demo", "--type", "rule", "--slug", "x", "--body", "b"]
+        code, _stdout, stderr = self._run(["write-event", *argv])
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        run_script.assert_called_once_with("write_event.py", argv)
+        execvp.assert_not_called()
+
     @mock.patch("oacp.cli._run_script", return_value=0)
     def test_dispatches_session_init(self, run_script) -> None:
         code, stdout, stderr = self._run(
-            ["session-init", "--hook", "--pull-memory", "--project", "demo"]
+            ["session-init", "--hook", "--project", "demo"]
         )
         self.assertEqual(code, 0)
         self.assertEqual(stdout, "")
         self.assertEqual(stderr, "")
         run_script.assert_called_once_with(
             "codex_session_init.py",
-            ["--hook", "--pull-memory", "--project", "demo"],
+            ["--hook", "--project", "demo"],
         )
 
     @mock.patch("oacp.cli._run_script", return_value=0)
@@ -168,6 +234,18 @@ class TestOacpCli(unittest.TestCase):
         self.assertEqual(stdout, "")
         self.assertEqual(stderr, "")
         run_script.assert_called_once_with("send_inbox_message.py", ["--help"])
+
+    @mock.patch("oacp.cli._run_script", return_value=0)
+    def test_retention_is_parked(self, run_script) -> None:
+        code, stdout, stderr = self._run(["retention", "demo", "--dry-run"])
+        self.assertEqual(code, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("parked", stderr)
+        self.assertIn("shared/archive/oacp-retention/retention.py", stderr)
+        self.assertIn("Nothing was pruned", stderr)
+        run_script.assert_not_called()
+        self.assertNotIn("retention", cli.SCRIPT_NAMES)
+        self.assertIn("retention", cli.HELP_TEXT)
 
     def test_unknown_command(self) -> None:
         code, stdout, stderr = self._run(["unknown"])

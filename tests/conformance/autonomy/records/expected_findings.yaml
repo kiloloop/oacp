@@ -48,3 +48,10 @@ paused_terminal_action_unreconciled.yaml:
 paused_terminal_completed_stamp.yaml:
 - paused_terminal_completed
 serialized_wave_item.yaml: []
+clean_terminal_cancelled.yaml: []
+cancelled_missing_actor.yaml:
+- invalid_cancellation
+two_clock_adjustments.yaml: []
+pause_and_clock_adjustment.yaml: []
+invalid_live_clock_adjustment.yaml:
+- invalid_clock_adjustments

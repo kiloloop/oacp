@@ -113,7 +113,7 @@ DECLARED_RISK_REASONS = (
     ("public_visibility", "public_visibility_pause"),
 )
 
-FINAL_STATES = {"done", "paused", "blocked", "superseded", "error"}
+FINAL_STATES = {"done", "paused", "blocked", "superseded", "error", "cancelled"}
 # `result.completion_kind` names the terminal shape of the EVALUATION only —
 # one axis, enumerated. The pause cause lives in `reason_codes` (already
 # pinned), the run state in `result.final_state`, and human decisions in

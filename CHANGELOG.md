@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-11
+
+### Added
+
+- Attributed work-clock deductions for multiple excluded intervals, including human-directed time away ([contract](docs/protocol/autonomy.md#threshold-exceeded-checkpoint)).
+- Cancellation receipts that close admitted tasks while preserving partial delivery and pause history ([contract](docs/protocol/autonomy.md#terminal-finalization-and-audit-integrity)).
+- Envelope compilation stamps the enforcement it resolved: `hooks` only when the receiver's adapter is present, `none` with a reason otherwise ([contract](docs/protocol/autonomy.md#enforcement-recording)).
+
+### Changed
+
+- Protocol contract stamp `spec_version` moves to `0.5.1` ([contract version](docs/protocol/autonomy.md#contract-version)).
+- `oacp retention` no longer prunes: the engine is parked outside the kernel and the subcommand prints where it went until its removal in 0.5.3 ([inbox/outbox](docs/protocol/inbox_outbox.md#message-history-retention)).
+- `oacp write-event` execs `agent-memory event write` when the installed tool serves it, falling back to the bundled script until its removal in 0.5.2 ([README](README.md#commands)).
+- The exec path prints `published:`/`idempotent:` where the bundled script prints `OK:` ([README](README.md#commands)).
+- `oacp session-init --pull-memory` is a no-op that names the memory tool's own SessionStart hook, until its removal in 0.5.3 ([codex](docs/protocol/session_init.md#codex)).
+
+### Fixed
+
+- The sync allowlist anchors `.gitignore` and `.oacp-memory-repo` to the home root, matching the memory tool's golden byte for byte ([memory layout](docs/protocol/org_memory.md#the-sync-allowlist)).
+- Preflight's conflict-marker check flags the diff3 `|||||||` base marker ([preflight](scripts/preflight.py)).
+
 ## [0.5.0] - 2026-09-09
 
 ### Added
@@ -868,6 +889,7 @@ The central debrief store is the headline change: every agent's full end-of-sess
 - Checkout step in github-release workflow job (#19)
 - Pre-release audit fixes: SHA-pinned actions, dangling doc refs (#15, #16)
 
+[0.5.1]: https://github.com/kiloloop/oacp/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/kiloloop/oacp/compare/v0.4.6...v0.5.0
 [0.4.6]: https://github.com/kiloloop/oacp/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/kiloloop/oacp/compare/v0.4.4...v0.4.5

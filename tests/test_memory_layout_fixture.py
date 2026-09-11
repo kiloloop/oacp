@@ -93,12 +93,14 @@ def test_fixture_wildcard_appears_only_in_the_project_pattern(fixture: Dict) -> 
 def _rules(fixture: Dict) -> List[str]:
     """The ignore file's rule lines, derived from the fixture fields in allowlist order.
 
-    Allow rules first (deny everything, re-allow directories, the ignore file,
-    the marker, each tier's subtree), then the denies that must win over them
+    Allow rules first (deny everything, re-allow directories, the root-only
+    ignore file and marker, each tier's subtree), then the denies that must win over them
     (each tier's unsynced dirs, then the never-synced names last). Comment
     lines are prose and stay out of the derivation.
     """
-    allow = ["*", "!*/", "!" + fixture["gitignore_file"], "!" + fixture["marker_file"]]
+    # The ignore file and the marker are named at the home root only: anchored, so
+    # a deeper file of either name is admitted by the tier rules or not at all.
+    allow = ["*", "!*/", "!/" + fixture["gitignore_file"], "!/" + fixture["marker_file"]]
     allow += ["!" + tier["pattern"] + "/**" for tier in fixture["tiers"]]
     deny = [f"{tier['pattern']}/{name}/" for tier in fixture["tiers"] for name in tier["unsynced"]]
     deny += [name + "/" for name in fixture["never_synced_dirs"]]
@@ -114,6 +116,13 @@ def test_golden_rules_are_derived_from_the_fixture(fixture: Dict, golden_gitigno
         "canonical .gitignore rules and the fixture's tiers / unsynced / never_synced_dirs differ "
         "(order is part of the contract: allow rules, per-tier denies, never-synced names last)"
     )
+
+
+def test_the_ignore_file_and_the_marker_are_root_only(fixture: Dict, golden_gitignore: bytes) -> None:
+    lines = _golden_rules(golden_gitignore)
+    for name in (fixture["gitignore_file"], fixture["marker_file"]):
+        assert "!/" + name in lines
+        assert "!" + name not in lines
 
 
 @pytest.mark.parametrize(

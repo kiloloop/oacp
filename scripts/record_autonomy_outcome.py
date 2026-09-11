@@ -264,7 +264,7 @@ def _completion_evidence(audit: Dict[str, Any]) -> Optional[str]:
     if not isinstance(result, dict):
         return None
     final_state = result.get("final_state")
-    if final_state in {"done", "error", "superseded"}:
+    if final_state in {"done", "error", "superseded", "cancelled"}:
         return f"final_state {final_state!r}"
     if result.get("completed_at_utc"):
         return f"completed_at_utc {result.get('completed_at_utc')!r}"

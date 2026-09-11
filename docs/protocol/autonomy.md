@@ -322,7 +322,7 @@ Every autonomy decision writes one YAML file:
 
 ```yaml
 schema_version: 2
-spec_version: "0.4.5"
+spec_version: "0.5.1"
 created_at_utc: "2026-05-12T13:23:25Z"
 receiver: codex
 sender: iris
@@ -470,6 +470,10 @@ terminal finalization. Records, envelopes, and workspaces written between the
 0.4.4 release (2026-08-28) and the 0.4.5 release are therefore stamped
 `0.4.3` under a contract that had already moved — readers tolerate that
 stamp on artifacts dated in the window and read them by the 0.4.5 shape.
+The 0.5.1 contract adds cancellation receipts and attributed clock adjustments. Existing records keep their
+original stamp; new cancellation fixtures use 0.5.1. Schema version remains 2
+because the record container is unchanged; readers must recognize the new
+terminal vocabulary before consuming 0.5.1 receipts.
 
 `evaluator` is **gate-emitted, not receiver-composed**: the evaluator
 self-stamps its provenance into every decision it returns, and receivers
@@ -823,7 +827,7 @@ in place with `--replace`.
 
 **Run-state vocabulary.** `result.final_state` splits by lifecycle phase:
 `pending`, `paused`, and `blocked` are live states; `done`, `superseded`,
-and `error` are terminal. Only terminal states can be finalized.
+`error`, and `cancelled` are terminal. Only terminal states can be finalized.
 `pending` is receiver-written (an admission record picked up for
 execution) — the evaluator itself never writes it.
 
@@ -857,10 +861,37 @@ actuals, whichever receiver writes it. Within the envelope, the
 checkpoint records `within_declared_envelope` (or
 `continued_with_grant`) and the terminal write proceeds; a breach leaves
 the record checkpoint-paused (exit code 4) and the §E re-authorization
-flow applies before any terminal state can be written. Realized effects
+flow applies before successful completion can be written. Cancellation
+closes the task without resuming or erasing a breached checkpoint. Realized effects
 use the canonical axis names only: `actual_minutes`,
 `actual_files_touched`, `side_effects_actual.<capability>`, and
 `task_profile.<field>` for declared-intent corrections.
+
+**Cancellation.** Use `cancelled` when the human or sender stops an admitted
+task; use `superseded` when a replacement evaluation inherits its authority.
+`oacp autonomy-finalize <record> --final-state cancelled --cancelled-by human
+--cancelled-at <UTC>` writes `result.cancelled_by` (`human` or `sender`),
+`cancelled_at_utc` (equal to `completed_at_utc`), optional `reason` (`--reason`),
+and `deliverables_landed` (a list of PR/commit reference strings, supplied with
+repeatable `--deliverable-landed`; empty when none landed). Cancellation must
+follow admission approval and any work start. It requires non-negative integer
+`actual_minutes` and `actual_files_touched`; existing work-start and pause stamps
+remain binding. Before work begins, no start is invented: both actuals are zero
+and the landed list is empty.
+
+Cancellation accepts live `pending`/`paused`/`blocked` records and the provisional
+`done` shape emitted at auto-admission (no completion stamp). A paused admission
+must have a recorded `approved`/`modified` human outcome. Completed `done`,
+`error`, `superseded`, and `cancelled` records refuse cancellation even with
+`--replace`. Cancelled history cannot be reopened by a checkpoint, another
+outcome, or a done/error correction; linked supersession remains available.
+Cancellation preserves the admission and any unresolved checkpoint evidence,
+including its historical `paused_for_reauthorization` action, but does not
+require an implementation-success checkpoint or manufacture resumed authority.
+Cancellation accepts only clock/count actuals (including `clock_adjustments`): record effects, risks, and
+re-authorization through a checkpoint while still live before cancelling.
+Unsupported actuals are refused rather than silently discarded. The cancelled
+lifecycle is closed for doctor and envelope clear.
 
 **Evaluation identity and supersession.** Every persisted evaluation
 carries an `evaluation_id` derived from receiver, message id, message
@@ -1047,7 +1078,55 @@ completion or the current checkpoint, rounded up to a whole minute, excluding
 each represented re-authorization pause from `paused_at_utc` through
 `cleared_paused_at_utc`. If a terminal outcome leaves that pause uncleared,
 active work ends at `paused_at_utc`; the subsequent paused wait does not count.
-The current record shape represents at most its current pause interval.
+The scalar pair keeps its original meaning. Explicit human-directed exclusions
+are carried separately in `result.clock_adjustments`, including deductions that
+were never checkpoint pauses. Supply additions through `--actuals <yaml>`:
+
+```yaml
+actual_files_touched: 2
+completed_at_utc: "2026-08-01T02:00:00Z"
+clock_adjustments:
+  - from_utc: "2026-08-01T01:30:00Z"
+    to_utc: "2026-08-01T01:45:00Z"
+    actor: alice
+    decided_at_utc: "2026-08-01T02:00:00Z"
+    reason: "Human directed exclusion for time away"
+```
+
+Each closed interval requires exactly these five input fields; the finalizer
+adds `recorded_at_utc` as writer provenance. The actor is a stable nonempty
+handle, the reason is nonempty, and all timestamps use `YYYY-MM-DDTHH:MM:SSZ`.
+The interval starts at or after work start and finishes after its start, no
+later than recording and the measurement/completion endpoint. The decision
+cannot postdate recording. Duration is derived from the interval, so no
+independently editable minutes field can disagree with it. Only explicit human
+direction authorizes a deduction; an adjustment neither grants scope nor
+resumes a checkpoint.
+
+Additions append to recorded evidence; omission or an empty list preserves it,
+and identical entries are idempotent. A supplied writer timestamp for a new
+entry is refused; only an exact replay may carry its existing writer stamp.
+Rewriting a stored timestamp is refused. Corrections that remove or rewrite history use linked supersession.
+The list survives checkpoints and metadata-only `--replace`. These rules
+apply to direct library calls as well as the CLI and to cancellation after
+work has begun.
+
+Arithmetic uses the union of the scalar pause and explicit intervals. Sort and
+merge overlapping or adjacent intervals, subtract their total seconds from
+elapsed seconds, then round active minutes up once. Every excluded second
+counts once, including a pause also recorded explicitly before a later
+checkpoint replaces the scalar pair. A malformed scalar remains invalid even
+when an explicit list exists. Existing scalar-only receipts keep their original
+behavior; absent adjustments mean no extra deduction. Read-back validates list
+shape and provenance even on live records without numeric actuals, and terminal
+actuals retain the one-minute `actual_minutes_inconsistent` tolerance.
+Live read-back does not bound `recorded_at_utc` against the reading wall clock;
+finalization rejects intervals beyond its measurement/completion endpoint.
+
+For `--final-state done --replace`, automatic scalar-pause derivation reads the
+stored checkpoint first. When also changing that scalar pause through actuals,
+supply explicit `actual_minutes`; the final read-back still checks the resulting
+clock. Newly supplied explicit adjustments participate in derivation immediately.
 Admission-to-start idle time never counts; time waiting on a peer reviewer does
 count because it is part of that task's review loop. Serialized tasks admitted
 together therefore stamp and measure their own starts independently.
@@ -1335,8 +1414,13 @@ and then human-approved), the receiver compiles the profile plus its own
 autonomy config into a runtime envelope:
 
 ```
-oacp envelope compile <message.yaml> --receiver <agent>
+oacp envelope compile <message.yaml> --receiver <agent> \
+  [--audit <admission-record.yaml>]
 ```
+
+With `--audit`, the compiler also stamps the admission record with the
+enforcement state it compiled (see Enforcement recording below); the
+record and the envelope then tell one story.
 
 **Admitted public-visibility tasks are the one explicit exception.** A
 compiled `public_visibility: true` envelope denies the entire chain the
@@ -1385,7 +1469,7 @@ The envelope is written to
 ```json
 {
   "envelope_version": 1,
-  "spec_version": "0.4.5",
+  "spec_version": "0.5.1",
   "compiler": "envelope_compiler.py",
   "compiled_at_utc": "2026-07-12T02:00:00Z",
   "project": "my-project",
@@ -1412,9 +1496,18 @@ The envelope is written to
   },
   "counters": {"files_touched": []},
   "enforcement": "hooks",
+  "adapter": {
+    "runtime": "claude",
+    "state": "resolved",
+    "console": "oacp-envelope-hook",
+    "detail": "console script 'oacp-envelope-hook' on PATH at …; registered as a PreToolUse hook"
+  },
   "session_id": "sess-…"
 }
 ```
+
+`enforcement_reason` appears beside `enforcement` exactly when it is
+`none`, naming the adapter state (below).
 
 Compilation rules:
 
@@ -1427,6 +1520,33 @@ Compilation rules:
   runtime enforcement never trusts sender declarations alone.
 - Granular side-effect fields absent from a legacy profile compile to
   `false`. `counters` are runtime state and always start empty.
+- **Adapter detection.** `enforcement` is earned, not assumed. The
+  compiler resolves the receiver's runtime from its agent card
+  (`agents/<receiver>/agent_card.yaml` → `runtime:`) and detects that
+  runtime's envelope adapter **by console name, never by module path**,
+  so the adapter can move between distributions without touching the
+  compiler. Every compile stamps exactly one of four `adapter.state`
+  values: `resolved` → `enforcement: hooks`; `unsupported`,
+  `expected_missing`, or `failed` → `enforcement: none` plus
+  `enforcement_reason` naming the state (`adapter_unsupported`,
+  `adapter_expected_missing`, `adapter_detection_failed`). Detection
+  inputs, per runtime:
+  - `claude` — the `oacp-envelope-hook` console script resolves on
+    PATH **and** is registered as a `PreToolUse` hook command in the
+    project repo's `.claude/settings.json` (the registration
+    `oacp setup claude` writes, reached through the workspace marker's
+    `repo_path`). Both present → `resolved`; either absent →
+    `expected_missing`; a workspace marker or settings file that cannot
+    be read → `failed`.
+  - `codex`, `cursor`, `gemini`, `human` — no envelope adapter by
+    design → `unsupported`.
+  - `unknown`, a missing or unreadable card, or a value outside the
+    card's runtime enum → `failed`.
+
+  `expected_missing` and `failed` are loud: the compiler prints a stderr
+  advisory naming the reason. The compile still succeeds (exit 0) and the
+  envelope is still written — degradation is named, never silent, and
+  never fail-closed here.
 - **Session binding.** The envelope records which harness session it
   belongs to. The runtime hook — the only party that sees the harness
   session id (it is not present in the command environment) — records a
@@ -1581,7 +1701,7 @@ the active envelope — `message_id` and `receiver` fields in the record
 itself; filenames are never trusted, and the envelope's message id (pinned
 to a safe-id grammar at compile time) never reaches a filesystem glob:
 
-- `result.final_state: done | error` — the lifecycle is over; the clear is
+- `result.final_state: done | error | cancelled` — the lifecycle is over; the clear is
   allowed and the enforcement window closes from inside the session.
 - `pending` or `paused` (or no matching record at all) — the clear is
   denied: an open task keeps its envelope, and a checkpoint-paused task
@@ -1625,15 +1745,26 @@ grants nothing durable. The envelope itself stays immutable; only `scope`
 
 ### Enforcement recording
 
-The audit `result` block records `envelope_enforcement: hooks | none`.
-Receivers set `hooks` after a successful compile on an adapter-equipped
-runtime; `none` means pickup-gate-only enforcement. Degradation must never
-be silent: when `none` is a **rule** rather than a runtime gap, the record
-carries the named reason alongside it —
-`envelope_enforcement_reason: public_visibility_admission_approved` for
-the admitted-public branch above, stamped by the compiler itself. A bare
-`none` with no reason means an adapterless runtime (the historical
-pickup-gate-only state), distinguishable from the rule-based mode.
+The audit `result` block records `envelope_enforcement: hooks | none`,
+and it tells the same story as the envelope. The admission gate writes
+`none` at admission. A compile run with `--audit <admission-record>`
+stamps the record with the detected adapter state — under the audit
+lock, in one locked read, on a record carrying a `schema_version` and
+content-matched on `message_id` + `receiver` + `message_sha256` (an
+unbound record is left untouched and the compile warns): `hooks` for a
+`resolved` adapter, with no reason; otherwise `none` plus
+`envelope_enforcement_reason` naming the state —
+`adapter_unsupported` (a runtime with no adapter by design, `codex`
+today), `adapter_expected_missing` (an adapter-capable runtime whose
+console or registration did not resolve), or
+`adapter_detection_failed` (the runtime or a probe could not be
+determined). Degradation must never be silent: `none` always carries
+its reason — `public_visibility_admission_approved` for the
+admitted-public branch above, one of the adapter reasons for a compiled
+envelope — and `none` means pickup-gate-only enforcement whatever the
+reason. A record still reading a bare `none` after pickup establishes
+only that no compiler stamp was recorded — the compile ran without
+`--audit`, or never ran — never that the runtime is adapterless.
 
 Enforcement boundary: hooks constrain every tool call inside the session,
 including subagent tool calls, and fire before sandbox/permission
@@ -1838,6 +1969,7 @@ Audit `result.final_state` is limited to:
 - `done` (terminal)
 - `superseded` (terminal; see "Terminal finalization and audit integrity")
 - `error` (terminal)
+- `cancelled` (terminal; admitted task stopped by the human or sender)
 
 `result.completion_kind` is separately pinned to the evaluation-shape enum
 above (see "Pinned completion_kind taxonomy"). Missing-profile messages that

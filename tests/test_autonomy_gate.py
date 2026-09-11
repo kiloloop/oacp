@@ -181,7 +181,7 @@ def test_autonomy_gate_matches_conformance_fixtures(tmp_path: Path) -> None:
 
 
 def test_autonomy_gate_output_uses_canonical_final_states() -> None:
-    allowed = {"done", "paused", "blocked", "superseded", "error"}
+    allowed = {"done", "paused", "blocked", "superseded", "error", "cancelled"}
     for expected_path in sorted((FIXTURE_ROOT / "expected").glob("*.yaml")):
         fixture = _load_yaml(expected_path)
         config = _load_yaml(FIXTURE_ROOT / fixture["config"])

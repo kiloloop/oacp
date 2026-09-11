@@ -233,7 +233,7 @@ uv tool install .
 | `oacp agent` | Manage global agent profiles (init, sync, show, list) |
 | `oacp inbox` | List pending inbox messages |
 | `oacp watch` | Emit inbox delta events for Monitor-friendly polling |
-| `oacp retention` | Prune project message history by age and count |
+| `oacp retention` | Parked: engine archived outside the kernel; advisory shim until 0.5.3 |
 | `oacp memory` | Run agent-memory (sync, archive, restore); shim until 0.5.2 |
 | `oacp session-init` | Verify Codex startup inputs and emit SessionStart context |
 | `oacp setup` | Generate runtime-specific config files in a repo |

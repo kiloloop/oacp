@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import runpy
 import shutil
+import subprocess
 import sys
 from typing import Dict, List, Optional, Sequence
 
@@ -26,7 +27,7 @@ Commands:
   agent          Manage global agent profiles (init, sync, show, list)
   inbox          List pending inbox messages
   watch          Emit inbox delta events for Monitor-friendly polling
-  retention      Prune project message history by age and count
+  retention      Parked: engine archived outside the kernel; advisory shim until 0.5.3
   memory         Run agent-memory (sync, archive, restore); shim until 0.5.2
   session-init   Verify Codex startup inputs and emit SessionStart context
   setup          Generate runtime-specific config files in a repo
@@ -48,7 +49,6 @@ Examples:
   oacp add-agent my-project alice --runtime claude
   oacp inbox my-project --agent claude
   oacp watch --agent claude --project my-project --json
-  oacp retention my-project --dry-run
   oacp memory archive my-project research_notes.md   # runs: agent-memory archive ...
   oacp session-init --project my-project
   oacp setup claude --project my-project
@@ -73,7 +73,6 @@ SCRIPT_NAMES = {
     "agent": "agent_profile.py",
     "inbox": "oacp_inbox.py",
     "watch": "oacp_watch.py",
-    "retention": "retention.py",
     "session-init": "codex_session_init.py",
     "setup": "setup_runtime.py",
     "send": "send_inbox_message.py",
@@ -136,6 +135,31 @@ DELEGATED_COMMANDS: Dict[str, Sequence[str]] = {
 _DELEGATED_VERBS: Dict[str, Dict[str, str]] = {"memory": {"init": "enable"}}
 _HOME_FLAG, _LEGACY_HOME_FLAG = "--home", "--oacp-dir"
 
+# `oacp write-event` execs `agent-memory event write` when the tool on PATH
+# serves the verb (agent-memory 0.1.1+) and runs the bundled script when the
+# tool is absent or predates it. argv passes through with the same rewrite as
+# the delegated verbs; the exec translates no output, so the verb's
+# `published:` / `idempotent: <path>` line stands where the script printed
+# `OK: <path>`, and its dry-run preview lands on stderr. This shim lasts
+# through 0.5.1 and is removed in 0.5.2.
+SHIMMED_COMMANDS: Dict[str, Sequence[str]] = {"write-event": ("event", "write")}
+VERB_PROBE_TIMEOUT_SECONDS = 10
+
+# `oacp retention` left the kernel in 0.5.1. The engine is parked, unwired to
+# any runtime, at `shared/archive/oacp-retention/retention.py` in the
+# agent-skills repository; the subcommand only says so and prunes nothing.
+# This shim lasts through 0.5.2 and is removed in 0.5.3.
+PARKED_COMMANDS: Dict[str, str] = {
+    "retention": (
+        "`oacp retention` is parked: the engine left the kernel in 0.5.1 and is "
+        "archived, unwired to any runtime, at shared/archive/oacp-retention/"
+        "retention.py in the agent-skills repository. Run it directly:\n"
+        "  python3 <agent-skills>/shared/archive/oacp-retention/retention.py "
+        "<project> --dry-run --json\n"
+        "Nothing was pruned. This shim is removed in 0.5.3."
+    ),
+}
+
 
 def delegated_argv(command: str, argv: Sequence[str]) -> List[str]:
     """Return the `agent-memory` argv for an `oacp <command> <argv>` call."""
@@ -151,7 +175,8 @@ def delegated_argv(command: str, argv: Sequence[str]) -> List[str]:
             rewritten.append(_HOME_FLAG + arg[len(_LEGACY_HOME_FLAG) :])
         else:
             rewritten.append(arg)
-    return [MEMORY_TOOL, *DELEGATED_COMMANDS[command], *rewritten]
+    verb = DELEGATED_COMMANDS[command] if command in DELEGATED_COMMANDS else SHIMMED_COMMANDS[command]
+    return [MEMORY_TOOL, *verb, *rewritten]
 
 
 def _delegate(command: str, argv: Sequence[str]) -> int:
@@ -163,15 +188,49 @@ def _delegate(command: str, argv: Sequence[str]) -> int:
             file=sys.stderr,
         )
         return 127
+    return _exec_memory_tool(tool, command, argv)
+
+
+def _exec_memory_tool(tool: str, command: str, argv: Sequence[str]) -> int:
     sys.stdout.flush()
     sys.stderr.flush()
     os.execvp(tool, delegated_argv(command, argv))
     return 0  # pragma: no cover - execvp does not return
 
 
+def _tool_serves(tool: str, verb: Sequence[str]) -> bool:
+    """Whether the memory tool at `tool` serves `verb`: its `--help` exits 0."""
+    try:
+        completed = subprocess.run(
+            [tool, *verb, "--help"],
+            capture_output=True,
+            timeout=VERB_PROBE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
+
+
+def _shim(command: str, argv: Sequence[str]) -> int:
+    tool = shutil.which(MEMORY_TOOL)
+    if tool is None or not _tool_serves(tool, SHIMMED_COMMANDS[command]):
+        return _run_script(SCRIPT_NAMES[command], argv)
+    return _exec_memory_tool(tool, command, argv)
+
+
+def _parked(command: str) -> int:
+    print(f"ERROR: {PARKED_COMMANDS[command]}", file=sys.stderr)
+    return 2
+
+
 def _dispatch(command: str, argv: Sequence[str]) -> int:
+    if command in PARKED_COMMANDS:
+        return _parked(command)
     if command in DELEGATED_COMMANDS:
         return _delegate(command, argv)
+    if command in SHIMMED_COMMANDS:
+        return _shim(command, argv)
     script_name = SCRIPT_NAMES.get(command)
     if script_name is None:
         print(f"ERROR: unknown command '{command}'", file=sys.stderr)
