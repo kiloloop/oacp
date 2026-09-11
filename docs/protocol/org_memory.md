@@ -396,8 +396,8 @@ verbatim. Syncing is opt-in, so scaffolding a home never creates the marker.
 ```gitignore
 *
 !*/
-!.gitignore
-!.oacp-memory-repo
+!/.gitignore
+!/.oacp-memory-repo
 !org-memory/**
 !projects/*/memory/**
 projects/*/memory/.cache/
@@ -409,7 +409,9 @@ Line by line:
 
 - **Deny everything, then re-allow directories** (`*`, `!*/`) so the tier
   patterns below can reach into the tree.
-- **The synced set** is the ignore file itself, the marker, `org-memory/**`
+- **The synced set** is the ignore file and the marker at the home root
+  (anchored: the two explicit name exceptions apply there only, and a deeper
+  file of either name follows the ordinary tier rules below), `org-memory/**`
   in full (the debrief store included), and `projects/*/memory/**` for every
   project.
 - **`projects/*/memory/.cache/` never syncs** — the one excluded subtree
@@ -424,7 +426,9 @@ Line by line:
 The allowlist is also a predicate over home-relative paths, and the predicate,
 not the ignore file, is what a sync engine trusts:
 
-- `.gitignore` and `.oacp-memory-repo` are allowed.
+- `.gitignore` and `.oacp-memory-repo` at the home root are allowed by name.
+  A deeper file of either name is admitted only when the tier rules below
+  admit it (`org-memory/.gitignore` is; `other/.gitignore` is not).
 - A path with any component named `keys` is denied, at any depth, whatever
   the ignore file says.
 - A path strictly inside a tier directory (`org-memory/…`,

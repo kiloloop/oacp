@@ -327,41 +327,21 @@ replacement is a retained error, never permission to overwrite history.
 
 ## Message History Retention
 
-`oacp retention <project>` applies one non-recursive pass across every visible
-agent's `outbox/`, `dead_letter/`, and `inbox/archive/`. A direct regular file is
-eligible when it is older than `max_age_days` **or** falls outside the newest
-`max_count` files. Age uses filesystem mtime. Hidden entries, metadata markers,
-directories, and symlinks are ignored, and each candidate's identity is
-rechecked immediately before unlinking.
+Pruning `outbox/`, `dead_letter/`, and `inbox/archive/` is an operator concern
+outside the kernel. Two invariants bind whatever does it, both scoped to
+`dead_letter/`: quarantine evidence written there by intake
+(`<original>.<sha256-prefix>.<UTC-stamp>[.<counter>]`) is outside automatic
+retention by construction, and a manually managed dead-letter file opts into
+the same protection with an adjacent empty `<filename>.retain` marker.
+Retention never parses dead-letter contents and never touches protected
+evidence.
 
-The protocol defaults for all three targets are 30 days and 1,000 files per
-agent. Projects may deep-override either dimension in `workspace.json`; `null`
-disables that dimension, omitted targets or keys inherit the defaults, and
-values otherwise must be positive integers:
-
-```json
-{
-  "retention": {
-    "outbox": {"max_age_days": 30, "max_count": 1000},
-    "dead_letter": {"max_age_days": 30, "max_count": 1000},
-    "inbox_archive": {"max_age_days": 30, "max_count": 1000}
-  }
-}
-```
-
-Run `oacp retention <project> --dry-run --json` before an interactive cleanup;
-omit `--dry-run` to apply the exact reported policy.
-
-Quarantine evidence is outside automatic retention by construction. Files
-written by the intake quarantine format
-`<original>.<sha256-prefix>.<UTC-stamp>[.<counter>]` never count toward age or
-count pruning. A manually managed dead-letter fixture can opt into the same
-protection with an adjacent empty `<filename>.retain` marker. Retention never
-parses dead-letter contents and never bulk-cleans protected evidence.
-
-Dispatcher cleanup archives completed inbound dispatch traffic under the same
-rule. Intermediate WIP/ack notifications are ordinary archived messages and
-expire through `inbox_archive` retention rather than runtime-specific deletion.
+The reference engine (`<project> --dry-run --json`, workspace `retention`
+override) is parked, unwired to any runtime, at
+`shared/archive/oacp-retention/` in the agent-skills repository; `oacp
+retention` only points there until its removal in 0.5.3. Dispatcher cleanup
+archives completed inbound dispatch traffic like any other message, and
+intermediate WIP/ack notifications are ordinary archived messages.
 
 ## Conversation Threading
 

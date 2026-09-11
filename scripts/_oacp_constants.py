@@ -17,7 +17,7 @@ REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 # names the contract it was produced under. Moves only under the
 # contract-version rule (docs/protocol/autonomy.md, "Contract version");
 # the spec's own literals must agree (tests/test_spec_version.py).
-SPEC_VERSION = "0.4.5"
+SPEC_VERSION = "0.5.1"
 CREATABLE_RUNTIMES = ("claude", "codex", "cursor", "gemini")
 ALL_RUNTIMES = ("claude", "codex", "cursor", "gemini", "human", "unknown")
 CODEX_SESSION_START_CONTEXT_LIMIT = 2_500

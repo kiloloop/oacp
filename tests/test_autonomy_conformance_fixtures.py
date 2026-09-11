@@ -39,7 +39,7 @@ def test_expected_cases_reference_existing_config_and_message() -> None:
         assert data["expected"]["reason_codes"]
         result = data["expected"].get("result")
         if result:
-            assert result.get("final_state") in {"done", "paused", "blocked", "superseded", "error"}
+            assert result.get("final_state") in {"done", "paused", "blocked", "superseded", "error", "cancelled"}
 
 
 def test_prior_grant_audits_use_schema_version_two() -> None:

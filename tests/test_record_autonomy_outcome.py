@@ -965,9 +965,10 @@ def test_cli_checkpoint_clear_reports_disposition(tmp_path: Path) -> None:
         {"final_state": "done"},
         {"final_state": "error"},
         {"final_state": "superseded"},
+        {"final_state": "cancelled"},
         {"completed_at_utc": "2026-08-01T02:25:00Z"},
     ],
-    ids=["done", "error", "superseded", "completed-at-only"],
+    ids=["done", "error", "superseded", "cancelled", "completed-at-only"],
 )
 def test_closed_record_refuses_every_outcome_write(
     with_prior_outcome: bool, evidence: Dict[str, Any]

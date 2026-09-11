@@ -1735,7 +1735,7 @@ def test_envelope_clear_denied_while_audit_paused(tmp_path: Path) -> None:
     assert "paused" in decision.reason
 
 
-@pytest.mark.parametrize("state", ["done", "error"])
+@pytest.mark.parametrize("state", ["done", "error", "cancelled"])
 def test_envelope_clear_allowed_after_terminal_audit(
     tmp_path: Path, state: str
 ) -> None:

@@ -413,7 +413,7 @@ class TestCodexSessionInit(unittest.TestCase):
         args = parser.parse_args(["--status", "offline"])
         self.assertEqual(args.status, "offline")
 
-    def test_parser_accepts_hook_and_pull_memory(self) -> None:
+    def test_parser_accepts_the_retired_pull_memory_flag(self) -> None:
         parser = _build_parser()
         args = parser.parse_args(["--hook", "--pull-memory"])
         self.assertTrue(args.hook)
@@ -437,10 +437,7 @@ class TestCodexSessionInit(unittest.TestCase):
                 dry_run=True,
                 protocol_dir=protocol_dir,
             )
-            output = build_session_start_hook_output(
-                report,
-                memory_pull={"state": "ok", "messages": ["already synced"]},
-            )
+            output = build_session_start_hook_output(report)
 
             context = output["hookSpecificOutput"]["additionalContext"]
             self.assertEqual(
@@ -457,6 +454,7 @@ class TestCodexSessionInit(unittest.TestCase):
             self.assertNotIn("# safety", context)
             self.assertNotIn("# facts", context)
             self.assertIn("SESSION_INIT_ACK: project=demo", context)
+            self.assertNotIn("Memory sync", context)
             ordered_names = [*session_init.PROTOCOL_FILES, *session_init.MEMORY_FILES]
             positions = [context.index(name) for name in ordered_names]
             self.assertEqual(positions, sorted(positions))
@@ -470,8 +468,7 @@ class TestCodexSessionInit(unittest.TestCase):
         self.assertEqual(len(context), CODEX_SESSION_START_CONTEXT_LIMIT)
         self.assertIn("OACP startup context truncated", context)
 
-    def test_hook_mode_runs_pull_before_verification(self) -> None:
-        call_order = []
+    def test_hook_mode_accepts_the_retired_pull_flag_as_a_no_op(self) -> None:
         hook_payload = {
             "hook_event_name": "SessionStart",
             "cwd": "/tmp",
@@ -482,19 +479,11 @@ class TestCodexSessionInit(unittest.TestCase):
             "project": "demo",
             "hub_dir": "/tmp/oacp",
             "protocol": {
-                name: {
-                    "path": f"/tmp/protocol/{name}",
-                    "state": "verified",
-                    "bytes": 1,
-                }
+                name: {"path": f"/tmp/protocol/{name}", "state": "verified", "bytes": 1}
                 for name in session_init.PROTOCOL_FILES
             },
             "memory": {
-                name: {
-                    "path": f"/tmp/memory/{name}",
-                    "state": "verified",
-                    "bytes": 1,
-                }
+                name: {"path": f"/tmp/memory/{name}", "state": "verified", "bytes": 1}
                 for name in session_init.MEMORY_FILES
             },
             "status_yaml": {"state": "updated"},
@@ -502,29 +491,28 @@ class TestCodexSessionInit(unittest.TestCase):
             "ack": "project=demo;context=manifest",
         }
 
-        def fake_pull(**kwargs):
-            call_order.append("pull")
-            return {"state": "ok", "messages": []}
-
         def fake_init(**kwargs):
-            call_order.append("verify")
             self.assertEqual(kwargs["model"], "gpt-test")
             return report
 
         stdout = io.StringIO()
+        stderr = io.StringIO()
         with mock.patch.object(sys, "argv", ["codex_session_init.py", "--hook", "--pull-memory"]), mock.patch.object(
             sys, "stdin", io.StringIO(json.dumps(hook_payload))
-        ), mock.patch.object(sys, "stdout", stdout), mock.patch.object(
-            session_init, "_pull_memory_report", side_effect=fake_pull
-        ), mock.patch.object(session_init, "run_session_init", side_effect=fake_init):
+        ), mock.patch.object(sys, "stdout", stdout), mock.patch.object(sys, "stderr", stderr), mock.patch.object(
+            session_init, "run_session_init", side_effect=fake_init
+        ) as init:
             code = session_init.main()
 
         self.assertEqual(code, 0)
-        self.assertEqual(call_order, ["pull", "verify"])
+        init.assert_called_once()
+        self.assertFalse(hasattr(session_init, "_pull_memory_report"))
+        self.assertEqual(stderr.getvalue().count("\n"), 1)
+        self.assertIn("no longer pulls", stderr.getvalue())
+        self.assertIn("agent-memory setup codex", stderr.getvalue())
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(
-            payload["hookSpecificOutput"]["hookEventName"], "SessionStart"
-        )
+        self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
+        self.assertNotIn("Memory sync", payload["hookSpecificOutput"]["additionalContext"])
 
     def test_hook_mode_records_unknown_when_model_is_missing(self) -> None:
         hook_payload = {
@@ -698,81 +686,6 @@ class TestCodexSessionInit(unittest.TestCase):
 
             self.assertNotIn("archive", report["memory"])
             self.assertNotIn("20260320T000000Z_notes.md", report["memory"])
-
-
-class TestPullMemoryReport(unittest.TestCase):
-    """The startup pull runs the memory tool as a subprocess, never in-process."""
-
-    def _hub(self, td: str, *, marker: bool) -> Path:
-        hub_dir = Path(td)
-        if marker:
-            (hub_dir / ".oacp-memory-repo").write_text("", encoding="utf-8")
-        return hub_dir
-
-    def test_no_marker_is_disabled_without_looking_for_the_tool(self) -> None:
-        with tempfile.TemporaryDirectory() as td, mock.patch.object(
-            session_init.shutil, "which"
-        ) as which, mock.patch.object(session_init.subprocess, "run") as run:
-            report = session_init._pull_memory_report(hub_dir=self._hub(td, marker=False), dry_run=False)
-        self.assertEqual(report["state"], "disabled")
-        which.assert_not_called()
-        run.assert_not_called()
-
-    def test_dry_run_skips_the_tool(self) -> None:
-        with tempfile.TemporaryDirectory() as td, mock.patch.object(
-            session_init.subprocess, "run"
-        ) as run:
-            report = session_init._pull_memory_report(hub_dir=self._hub(td, marker=True), dry_run=True)
-        self.assertEqual(report["state"], "dry-run")
-        run.assert_not_called()
-
-    def test_tool_absent_is_disabled_with_the_install_hint(self) -> None:
-        with tempfile.TemporaryDirectory() as td, mock.patch.object(
-            session_init.shutil, "which", return_value=None
-        ), mock.patch.object(session_init.subprocess, "run") as run:
-            report = session_init._pull_memory_report(hub_dir=self._hub(td, marker=True), dry_run=False)
-        self.assertEqual(report["state"], "disabled")
-        self.assertEqual(len(report["messages"]), 1)
-        self.assertIn("agent-memory is not on PATH", report["messages"][0])
-        self.assertIn("pip install agent-memory-cli", report["messages"][0])
-        run.assert_not_called()
-
-    def test_tool_present_runs_pull_with_home(self) -> None:
-        completed = mock.Mock(returncode=0, stdout="memory pull: already synced.\n", stderr="")
-        with tempfile.TemporaryDirectory() as td, mock.patch.object(
-            session_init.shutil, "which", return_value="/opt/bin/agent-memory"
-        ), mock.patch.object(session_init.subprocess, "run", return_value=completed) as run:
-            hub_dir = self._hub(td, marker=True)
-            report = session_init._pull_memory_report(hub_dir=hub_dir, dry_run=False)
-        self.assertEqual(report, {"state": "ok", "messages": ["memory pull: already synced."]})
-        argv = run.call_args.args[0]
-        self.assertEqual(argv, ["/opt/bin/agent-memory", "pull", "--home", str(hub_dir)])
-        self.assertEqual(run.call_args.kwargs["timeout"], session_init.MEMORY_PULL_TIMEOUT_SECONDS)
-
-    def test_nonzero_exit_is_failed_with_the_tool_output(self) -> None:
-        completed = mock.Mock(returncode=1, stdout="", stderr="memory pull: diverged from upstream; resolve manually.\n")
-        with tempfile.TemporaryDirectory() as td, mock.patch.object(
-            session_init.shutil, "which", return_value="/opt/bin/agent-memory"
-        ), mock.patch.object(session_init.subprocess, "run", return_value=completed):
-            report = session_init._pull_memory_report(hub_dir=self._hub(td, marker=True), dry_run=False)
-        self.assertEqual(report["state"], "failed")
-        self.assertEqual(report["messages"], ["memory pull: diverged from upstream; resolve manually."])
-
-    def test_warning_lines_downgrade_to_warning(self) -> None:
-        completed = mock.Mock(returncode=0, stdout="WARNING: fetch failed; local copy kept.\n", stderr="")
-        with tempfile.TemporaryDirectory() as td, mock.patch.object(
-            session_init.shutil, "which", return_value="/opt/bin/agent-memory"
-        ), mock.patch.object(session_init.subprocess, "run", return_value=completed):
-            report = session_init._pull_memory_report(hub_dir=self._hub(td, marker=True), dry_run=False)
-        self.assertEqual(report["state"], "warning")
-
-    def test_launch_failure_is_failed_not_raised(self) -> None:
-        with tempfile.TemporaryDirectory() as td, mock.patch.object(
-            session_init.shutil, "which", return_value="/opt/bin/agent-memory"
-        ), mock.patch.object(session_init.subprocess, "run", side_effect=OSError("exec format error")):
-            report = session_init._pull_memory_report(hub_dir=self._hub(td, marker=True), dry_run=False)
-        self.assertEqual(report["state"], "failed")
-        self.assertIn("exec format error", report["messages"][0])
 
 
 if __name__ == "__main__":

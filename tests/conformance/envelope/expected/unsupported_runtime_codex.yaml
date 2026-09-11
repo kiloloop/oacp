@@ -1,0 +1,27 @@
+case: unsupported_runtime_codex
+config: configs/auto_review_standard.yaml
+message: messages/granular_capabilities_task.yaml
+receiver: codex
+adapter:
+  runtime: codex
+expected:
+  compiles: true
+  envelope:
+    envelope_version: 1
+    project: test-proj
+    receiver: codex
+    message_id: msg-20260717060500-alice-env2
+    enforcement: none
+    enforcement_reason: adapter_unsupported
+    adapter:
+      runtime: codex
+      state: unsupported
+      console: null
+    constraints:
+      estimated_minutes: 35
+      expected_files_touched: 4
+      creates_or_updates_pr: true
+      private_repo_allowlist:
+        - example-org/private-repo
+    counters:
+      files_touched: []

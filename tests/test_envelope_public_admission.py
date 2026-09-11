@@ -89,6 +89,9 @@ def _workspace(tmp_path: Path, body: str) -> dict:
     audit_dir = receiver_dir / "audit" / "autonomy_decisions"
     audit_dir.mkdir(parents=True)
     (receiver_dir / "config.yaml").write_text(CONFIG_TEXT, encoding="utf-8")
+    (receiver_dir / "agent_card.yaml").write_text(
+        "agent: claude\nruntime: claude\n", encoding="utf-8"
+    )
     message_path = receiver_dir / "inbox" / "task.yaml"
     _write_message(message_path, body)
     return {
@@ -139,6 +142,8 @@ def _write_audit(
 
 
 def _compile(workspace: dict, *extra: str) -> tuple:
+    """Compile against a resolved claude adapter: this module pins the
+    none-by-rule branch, not adapter detection."""
     stdout, stderr = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
         exit_code = envelope_compiler.main(
@@ -148,7 +153,9 @@ def _compile(workspace: dict, *extra: str) -> tuple:
                 "--receiver", "claude",
                 "--oacp-dir", str(workspace["home"]),
                 *extra,
-            ]
+            ],
+            which_fn=lambda name: f"/opt/oacp/bin/{name}",
+            registration_fn=lambda console: True,
         )
     return exit_code, stdout.getvalue(), stderr.getvalue()
 
@@ -214,14 +221,20 @@ def test_mismatched_audit_record_falls_through_to_compile(tmp_path: Path) -> Non
     assert "envelope_enforcement_reason" not in audit["result"]
 
 
-def test_private_task_with_approved_audit_is_unaffected(tmp_path: Path) -> None:
+def test_private_task_with_approved_audit_compiles_and_stamps_hooks(
+    tmp_path: Path,
+) -> None:
+    """The none-by-rule branch is public-only; a private task compiles and
+    the bound record reads the compiled envelope's enforcement."""
     workspace = _workspace(tmp_path, PRIVATE_TASK_BODY)
     audit_path = _write_audit(workspace, decision="approved")
     exit_code, _stdout, _stderr = _compile(workspace, "--audit", str(audit_path))
     assert exit_code == 0
     envelope = yaml.safe_load(workspace["envelope_path"].read_text(encoding="utf-8"))
     assert envelope["constraints"]["public_visibility"] is False
+    assert envelope["enforcement"] == "hooks"
     audit = yaml.safe_load(audit_path.read_text(encoding="utf-8"))
+    assert audit["result"]["envelope_enforcement"] == "hooks"
     assert "envelope_enforcement_reason" not in audit["result"]
 
 
@@ -260,7 +273,10 @@ def test_wrong_message_hash_falls_through_to_compile(tmp_path: Path) -> None:
 
 
 def test_wrong_phase_record_falls_through_to_compile(tmp_path: Path) -> None:
-    """Only an admission-paused record qualifies — not an auto-accept."""
+    """Only an admission-paused record qualifies — not an auto-accept.
+
+    The compile that runs instead still binds to the record, so it is
+    stamped with the compiled envelope's enforcement, not the rule."""
     workspace = _workspace(tmp_path, PUBLIC_TASK_BODY)
     audit_path = _write_audit(
         workspace,
@@ -272,6 +288,7 @@ def test_wrong_phase_record_falls_through_to_compile(tmp_path: Path) -> None:
     assert exit_code == 0
     assert workspace["envelope_path"].exists()
     audit = yaml.safe_load(audit_path.read_text(encoding="utf-8"))
+    assert audit["result"]["envelope_enforcement"] == "hooks"
     assert "envelope_enforcement_reason" not in audit["result"]
 
 

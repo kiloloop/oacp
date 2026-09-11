@@ -30,7 +30,8 @@ from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 Runner = Callable[[Sequence[str], Path], Tuple[int, str]]
 YamlLoader = Callable[[str], object]
 
-MARKER_PREFIXES = ("<<<<<<<", "=======", ">>>>>>>")
+MARKER_PREFIXES = ("<<<<<<<", "|||||||", ">>>>>>>")
+MARKER_SEPARATOR = "======="
 YAML_EXTENSIONS = {".yaml", ".yml"}
 SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache"}
 
@@ -438,11 +439,7 @@ def check_conflict_markers(repo_root: Path, runner: Runner = run_command) -> Che
 
         for lineno, line in enumerate(raw.decode("utf-8", errors="replace").splitlines(), start=1):
             stripped = line.strip()
-            if (
-                stripped.startswith(MARKER_PREFIXES[0])
-                or stripped == MARKER_PREFIXES[1]
-                or stripped.startswith(MARKER_PREFIXES[2])
-            ):
+            if stripped == MARKER_SEPARATOR or stripped.startswith(MARKER_PREFIXES):
                 preview = stripped[:60]
                 hits.append(f"{rel}:{lineno}: {preview}")
                 if len(hits) >= 20:

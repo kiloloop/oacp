@@ -1907,3 +1907,336 @@ def test_admission_approve_checkpoint_clear_sequence_preserves_both_decisions(
     assert reauth["channel"] == "receiver_human"
     assert reauth["decided_at_utc"] == "2026-08-01T01:50:00Z"
     assert validate_audit_record(stored) == []
+
+
+CANCELLED_AT = "2026-08-01T02:00:00Z"
+
+
+def _cancel(record, tmp_path, **overrides):
+    kwargs = {
+        "final_state": "cancelled",
+        "actuals": {"actual_minutes": 0, "actual_files_touched": 0},
+        "cancellation": {
+            "cancelled_by": "human", "cancelled_at_utc": CANCELLED_AT,
+            "deliverables_landed": [],
+        },
+    }
+    kwargs.update(overrides)
+    return finalize_audit_record(tmp_path / "audit.yaml", record, **kwargs)
+
+
+@pytest.mark.parametrize("state", ["pending", "paused", "blocked", "done"])
+@pytest.mark.parametrize("actor", ["human", "sender"])
+def test_cancellation_transition_and_admission_preserved(tmp_path, state, actor):
+    import copy
+    record = _record(final_state=state, human_outcome=_human_outcome())
+    if state == "done":
+        record = _record(decision="auto_accepted", completion_kind="auto_accepted", final_state=state)
+    original = copy.deepcopy(record)
+    updated, paused = _cancel(record, tmp_path, cancellation={
+        "cancelled_by": actor, "cancelled_at_utc": CANCELLED_AT,
+        "deliverables_landed": [], "reason": "Scope stopped",
+    })
+    assert not paused
+    assert record == original
+    assert updated["decision"] == original["decision"]
+    assert updated["result"]["completion_kind"] == original["result"]["completion_kind"]
+    assert updated["result"].get("human_outcome") == original["result"].get("human_outcome")
+    assert updated["result"]["final_state"] == "cancelled"
+    assert validate_audit_record(updated) == []
+
+
+@pytest.mark.parametrize("state,completed", [
+    ("done", CANCELLED_AT), ("error", None), ("superseded", None), ("cancelled", None),
+    ("paused", CANCELLED_AT),
+])
+@pytest.mark.parametrize("replace", [False, True])
+def test_cancellation_refuses_closed_history_even_with_replace(tmp_path, state, completed, replace):
+    record = _record(final_state=state, human_outcome=_human_outcome())
+    record["result"]["completed_at_utc"] = completed
+    with pytest.raises(ValueError, match="already closed"):
+        _cancel(record, tmp_path, replace=replace)
+
+
+@pytest.mark.parametrize("outcome", [None, {"recorded": True, "decision": "declined"}])
+def test_cancellation_requires_admission(tmp_path, outcome):
+    with pytest.raises(ValueError, match="admitted task"):
+        _cancel(_record(human_outcome=outcome), tmp_path)
+
+
+@pytest.mark.parametrize("change", [
+    {"cancelled_by": "agent"}, {"cancelled_by": []}, {"cancelled_at_utc": None},
+    {"cancelled_at_utc": "2026-07-01T00:00:00Z"}, {"reason": False},
+    {"deliverables_landed": "abc"}, {"deliverables_landed": [""]},
+    {"actual_minutes": True}, {"actual_files_touched": -1},
+    {"actual_minutes": 5}, {"completed_at_utc": None},
+])
+def test_cancellation_readback_rejects_malformed_evidence(tmp_path, change):
+    updated, _ = _cancel(_record(human_outcome=_human_outcome()), tmp_path)
+    updated["result"].update(change)
+    assert "invalid_cancellation" in {f["code"] for f in validate_audit_record(updated)}
+
+
+def test_cancellation_preserves_unresolved_pause_and_landed_work(tmp_path):
+    record = _record(human_outcome=_human_outcome())
+    actuals = {
+        "work_started_at_utc": "2026-08-01T01:10:00Z",
+        "actual_minutes": 46, "actual_files_touched": 2,
+        "paused_at_utc": "2026-08-01T01:56:00Z",
+    }
+    record, paused = apply_checkpoint(record, actuals)
+    assert paused
+    checkpoint = record["result"]["threshold_checkpoint"]
+    updated, paused = _cancel(record, tmp_path, actuals={k: v for k, v in actuals.items() if k != "paused_at_utc"}, cancellation={
+        "cancelled_by": "human", "cancelled_at_utc": CANCELLED_AT,
+        "deliverables_landed": ["https://github.com/acme/widgets/pull/1"],
+    })
+    assert not paused
+    assert updated["result"]["threshold_checkpoint"]["reauthorization"] == checkpoint["reauthorization"]
+    assert updated["result"]["threshold_checkpoint"]["action"] == "paused_for_reauthorization"
+    assert validate_audit_record(updated) == []
+    with pytest.raises(ValueError, match="closed"):
+        apply_checkpoint(updated, actuals)
+    with pytest.raises(ValueError, match="closed"):
+        finalize_audit_record(tmp_path / "audit.yaml", updated, final_state="done", actuals=actuals, replace=True)
+
+
+def test_cancelled_cli_validate_doctor_and_done_refusal(tmp_path, capsys):
+    project = tmp_path / "projects" / "sample"
+    audit_dir = project / "agents" / "claude" / "audit" / "autonomy_decisions"
+    audit_dir.mkdir(parents=True)
+    path = _write(audit_dir, _record(human_outcome=_human_outcome()))
+    args = [str(path), "--final-state", "cancelled", "--cancelled-by", "human", "--cancelled-at", CANCELLED_AT]
+    assert main(args) == 0
+    assert main([str(path), "--validate"]) == 0
+    result = check_autonomy(project)
+    integrity = [c for c in result.results if c.name.endswith("/autonomy-audit-integrity")]
+    assert len(integrity) == 1 and integrity[0].severity.value == "ok"
+    assert not any(c.name.endswith("/autonomy-audit-advisories") for c in result.results)
+    before = path.read_bytes()
+    assert main(args + ["--replace"]) == 2
+    assert path.read_bytes() == before
+    done = _record(human_outcome=_human_outcome(), final_state="done")
+    done["result"]["completed_at_utc"] = CANCELLED_AT
+    path.write_text(yaml.safe_dump(done))
+    before = path.read_bytes()
+    assert main(args + ["--replace"]) == 2
+    assert path.read_bytes() == before
+
+
+def test_cancelled_cli_preserves_prior_file_count(tmp_path):
+    record = _record(human_outcome=_human_outcome())
+    record["result"].update(work_started_at_utc="2026-08-01T01:40:00Z", actual_files_touched=3)
+    path = _write(tmp_path, record)
+    assert main([str(path), "--final-state", "cancelled", "--cancelled-by", "human", "--cancelled-at", CANCELLED_AT]) == 0
+    result = load_audit_strict(path)["result"]
+    assert result["actual_files_touched"] == 3
+    assert result["actual_minutes"] == 20
+
+
+def test_cancelled_library_cannot_reopen_with_allow_closed(tmp_path):
+    record, _ = _cancel(_record(human_outcome=_human_outcome()), tmp_path)
+    with pytest.raises(ValueError, match="closed"):
+        apply_checkpoint(record, {"actual_minutes": 99}, allow_closed=True)
+
+
+@pytest.mark.parametrize("extra", ["side_effects_actual", "reauthorization", "predicted_risk_materialized", "task_profile"])
+def test_cancelled_refuses_unrecorded_effect_actuals(tmp_path, extra):
+    with pytest.raises(ValueError, match="checkpoint effects"):
+        _cancel(_record(human_outcome=_human_outcome()), tmp_path, actuals={"actual_minutes": 0, "actual_files_touched": 0, extra: {}})
+
+
+# Explicit human-directed exclusions are separate from checkpoint authority.
+def _adjustment(begin="2026-08-01T01:30:00Z", end="2026-08-01T01:45:00Z"):
+    return {"from_utc": begin, "to_utc": end, "actor": "alice",
+            "decided_at_utc": "2026-08-01T02:00:00Z", "reason": "Human directed deduction"}
+
+
+def _clock_record():
+    record = _record(human_outcome=_human_outcome("2026-08-01T01:00:00Z"))
+    record["result"]["work_started_at_utc"] = "2026-08-01T01:00:00Z"
+    return record
+
+
+def _clock_actuals(adjustments):
+    return {"actual_files_touched": 2, "completed_at_utc": "2026-08-01T02:00:00Z",
+            "clock_adjustments": adjustments}
+
+
+def test_two_clock_adjustments_finalize_and_validate(tmp_path):
+    record = _clock_record()
+    inputs = [_adjustment("2026-08-01T01:10:00Z", "2026-08-01T01:20:00Z"), _adjustment()]
+    done, paused = finalize_audit_record(tmp_path / "a.yaml", record, final_state="done", actuals=_clock_actuals(inputs))
+    assert not paused and done["result"]["actual_minutes"] == 35
+    assert validate_audit_record(done) == []
+    assert all(entry["recorded_at_utc"] for entry in done["result"]["clock_adjustments"])
+    done["result"]["actual_minutes"] = 39
+    assert "actual_minutes_inconsistent" in {f["code"] for f in validate_audit_record(done)}
+
+
+def test_checkpoint_pause_plus_human_deduction_cli(tmp_path):
+    record = _resolved_checkpoint_record()
+    record["result"]["work_started_at_utc"] = "2026-08-01T01:20:00Z"
+    record["result"]["threshold_checkpoint"] = _gate_checkpoint("approved")
+    path = _write(tmp_path, record)
+    actuals = _clock_actuals([_adjustment("2026-08-01T01:45:00Z", "2026-08-01T01:55:00Z")])
+    actuals_path = tmp_path / "actuals.yml"
+    actuals_path.write_text(yaml.safe_dump(actuals))
+    assert main([str(path), "--final-state", "done", "--actuals", str(actuals_path)]) == 0
+    done = load_audit_strict(path)
+    assert done["result"]["actual_minutes"] == 20
+    assert main([str(path), "--validate"]) == 0
+    assert done["result"]["threshold_checkpoint"]["reauthorization"] == record["result"]["threshold_checkpoint"]["reauthorization"]
+
+
+@pytest.mark.parametrize("intervals,minutes", [
+    ([("01:10:00", "01:20:00"), ("01:10:00", "01:20:00")], 50),
+    ([("01:10:00", "01:25:00"), ("01:20:00", "01:35:00")], 35),
+    ([("01:10:00", "01:20:00"), ("01:20:00", "01:30:00")], 40),
+    ([("01:10:00", "01:10:40"), ("01:20:00", "01:20:40")], 59),
+])
+def test_exclusions_use_union_and_round_only_once(intervals, minutes):
+    from finalize_autonomy_record import _active_minutes, _with_clock_adjustments
+    adjustments = [_adjustment("2026-08-01T" + a + "Z", "2026-08-01T" + b + "Z") for a, b in intervals]
+    record = _with_clock_adjustments(_clock_record(), _clock_actuals(adjustments))
+    assert _active_minutes(record, "2026-08-01T01:00:00Z", "2026-08-01T02:00:00Z") == minutes
+
+
+def test_scalar_and_adjustment_overlap_count_once():
+    from finalize_autonomy_record import _active_minutes, _with_clock_adjustments
+    record = _clock_record()
+    record["result"]["threshold_checkpoint"] = {"paused_at_utc": "2026-08-01T01:30:00Z", "reauthorization": {"cleared_paused_at_utc": "2026-08-01T01:40:00Z"}}
+    record = _with_clock_adjustments(record, _clock_actuals([_adjustment()]))
+    assert _active_minutes(record, "2026-08-01T01:00:00Z", "2026-08-01T02:00:00Z") == 45
+    record["result"]["threshold_checkpoint"].pop("paused_at_utc")
+    with pytest.raises(ValueError, match="requires a parseable"):
+        _active_minutes(record, "2026-08-01T01:00:00Z", "2026-08-01T02:00:00Z")
+
+
+def test_clock_adjustments_survive_checkpoint_and_replace(tmp_path):
+    record = _clock_record()
+    actuals = _clock_actuals([_adjustment()])
+    record, paused = apply_checkpoint(record, actuals)
+    assert not paused
+    history = record["result"]["clock_adjustments"]
+    assert record["result"]["actual_minutes"] == 45
+    record, paused = apply_checkpoint(record, {"actual_files_touched": 2, "completed_at_utc": "2026-08-01T02:00:00Z"})
+    assert not paused and record["result"]["clock_adjustments"] == history
+    path = _write(tmp_path, record)
+    actuals_path = tmp_path / "actuals.yml"
+    actuals_path.write_text(yaml.safe_dump(actuals))
+    assert main([str(path), "--final-state", "done", "--actuals", str(actuals_path)]) == 0
+    done = load_audit_strict(path)
+    assert done["result"]["clock_adjustments"] == history
+    assert main([str(path), "--final-state", "done", "--replace", "--actual-files-touched", "2"]) == 0
+    assert load_audit_strict(path)["result"]["clock_adjustments"] == history
+
+
+@pytest.mark.parametrize("value", [None, {}, [None], [{}], [{"from_utc": "bad"}]])
+def test_malformed_clock_adjustments_fail_live_readback(value):
+    record = _clock_record()
+    record["result"]["clock_adjustments"] = value
+    assert "invalid_clock_adjustments" in {f["code"] for f in validate_audit_record(record)}
+
+
+@pytest.mark.parametrize("field,value", [
+    ("actor", ""), ("actor", "a b"), ("reason", ""), ("from_utc", "2026-8-1T01:30:00Z"),
+    ("to_utc", "2026-08-01T01:25:00Z"), ("to_utc", "2026-08-01T02:01:00Z"),
+    ("from_utc", "2026-08-01T00:59:00Z"), ("decided_at_utc", "9999-01-01T00:00:00Z"),
+])
+def test_invalid_adjustments_refused_without_cli_write(tmp_path, field, value):
+    path = _write(tmp_path, _clock_record())
+    original = path.read_bytes()
+    adjustment = _adjustment()
+    adjustment[field] = value
+    actuals_path = tmp_path / "actuals.yml"
+    actuals_path.write_text(yaml.safe_dump(_clock_actuals([adjustment])))
+    assert main([str(path), "--final-state", "done", "--actuals", str(actuals_path)]) == 2
+    assert path.read_bytes() == original
+
+
+def test_clock_adjustments_can_finalize_cancelled(tmp_path):
+    record = _clock_record()
+    cancelled, paused = _cancel(record, tmp_path, actuals=_clock_actuals([_adjustment()]))
+    assert not paused and cancelled["result"]["actual_minutes"] == 45
+    assert validate_audit_record(cancelled) == []
+    with pytest.raises(ValueError, match="work_started_at_utc"):
+        _cancel(_record(human_outcome=_human_outcome()), tmp_path, actuals=_clock_actuals([_adjustment()]))
+
+
+def test_adjustment_input_duplicate_keys_refused_without_write(tmp_path):
+    path = _write(tmp_path, _clock_record())
+    original = path.read_bytes()
+    actuals = tmp_path / "actuals.yml"
+    actuals.write_text("actual_files_touched: 2\nclock_adjustments: []\nclock_adjustments: null\n")
+    assert main([str(path), "--final-state", "done", "--actuals", str(actuals)]) == 2
+    assert path.read_bytes() == original
+
+
+def test_checkpoint_adjustment_horizon_applies_with_explicit_minutes():
+    with pytest.raises(ValueError, match="beyond completion"):
+        apply_checkpoint(_clock_record(), {"actual_minutes": 0, "actual_files_touched": 2, "clock_adjustments": [_adjustment()]}, now_utc="2026-08-01T01:20:00Z")
+
+
+def test_checkpoint_clock_identity_validated_and_read_back():
+    actuals = dict(_clock_actuals([_adjustment()]), actual_minutes=0)
+    with pytest.raises(ValueError, match="actual_minutes_inconsistent"):
+        apply_checkpoint(_clock_record(), actuals)
+    actuals.pop("actual_minutes")
+    record, _ = apply_checkpoint(_clock_record(), actuals)
+    record["result"]["actual_minutes"] = 0
+    assert "actual_minutes_inconsistent" in {f["code"] for f in validate_audit_record(record)}
+
+
+@pytest.mark.parametrize("state", ["done", "error", "cancelled"])
+def test_new_adjustment_cannot_supply_writer_stamp(tmp_path, state):
+    entry = dict(_adjustment(), recorded_at_utc="2026-08-01T02:01:00Z")
+    kwargs = {"cancellation": {"cancelled_by": "human", "cancelled_at_utc": CANCELLED_AT, "deliverables_landed": []}} if state == "cancelled" else {}
+    with pytest.raises(ValueError, match="writer-owned"):
+        finalize_audit_record(tmp_path / "a.yaml", _clock_record(), final_state=state, actuals=_clock_actuals([entry]), **kwargs)
+
+
+@pytest.mark.parametrize("rewritten_stamp", ["2026-08-01T01:59:59Z", "2026-08-01T02:00:01Z"])
+def test_replayed_adjustment_cannot_rewrite_writer_stamp(monkeypatch, rewritten_stamp):
+    from finalize_autonomy_record import _with_clock_adjustments
+    monkeypatch.setattr("finalize_autonomy_record.utc_now_iso", lambda: "2026-08-01T02:00:00Z")
+    record = _with_clock_adjustments(_clock_record(), _clock_actuals([_adjustment()]))
+    stored = dict(record["result"]["clock_adjustments"][0])
+    replay = dict(stored, recorded_at_utc=rewritten_stamp)
+
+    with pytest.raises(ValueError, match="cannot rewrite clock adjustment provenance"):
+        _with_clock_adjustments(record, _clock_actuals([replay]))
+
+    assert record["result"]["clock_adjustments"] == [stored]
+
+
+def test_supersession_preserves_invalid_clock_history_without_derivation(tmp_path):
+    record = _clock_record()
+    record["result"]["clock_adjustments"] = None
+    path = _write(tmp_path, record)
+    successor = _write_successor(tmp_path, supersedes=_predecessor_evaluation_id(record))
+    successor_id = load_audit_strict(successor)["evaluation_id"]
+    assert main([str(path), "--final-state", "superseded", "--superseded-by", successor_id]) == 0
+    stored = load_audit_strict(path)
+    assert stored["result"]["clock_adjustments"] is None
+    assert stored["result"]["final_state"] == "superseded"
+    assert validate_audit_record(stored) == []
+
+
+@pytest.mark.parametrize("field", ["cancelled_by", "cancelled_at_utc", "deliverables_landed", "reason"])
+def test_cancellation_evidence_rejected_on_done(field):
+    record = _clean_done_record()
+    record["result"][field] = "stray cancellation evidence"
+    assert "invalid_cancellation" in {f["code"] for f in validate_audit_record(record)}
+
+
+def test_library_refuses_cancellation_metadata_for_done(tmp_path):
+    with pytest.raises(ValueError, match="valid only with final_state cancelled"):
+        finalize_audit_record(tmp_path / "a.yaml", _record(human_outcome=_human_outcome()), final_state="done", actuals={}, cancellation={"cancelled_by": "human"})
+
+
+def test_cli_refuses_cancellation_flags_for_done_without_write(tmp_path):
+    path = _write(tmp_path, _record(human_outcome=_human_outcome()))
+    original = path.read_bytes()
+    assert main([str(path), "--final-state", "done", "--cancelled-by", "human"]) == 2
+    assert path.read_bytes() == original

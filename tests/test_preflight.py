@@ -107,6 +107,22 @@ class TestConflictMarkerScan(unittest.TestCase):
             self.assertIn("README.md", result.details)
 
 
+    def test_diff3_base_marker_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            marker_base = "|" * 7 + " parent of 1234567"
+            _write(repo / "notes.md", "\n".join(["mine", marker_base, "base"]) + "\n")
+
+            def runner(command: Sequence[str], _cwd: Path):
+                if list(command) == ["git", "ls-files"]:
+                    return 0, "notes.md\n"
+                return 0, ""
+
+            result = check_conflict_markers(repo, runner=runner)
+            self.assertFalse(result.passed)
+            self.assertIn("notes.md:2: " + marker_base, result.details)
+
+
 class TestYamlValidation(unittest.TestCase):
     def test_invalid_yaml_is_reported(self) -> None:
         with tempfile.TemporaryDirectory() as td:

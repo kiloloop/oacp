@@ -1,7 +1,7 @@
 *
 !*/
-!.gitignore
-!.oacp-memory-repo
+!/.gitignore
+!/.oacp-memory-repo
 !org-memory/**
 !projects/*/memory/**
 projects/*/memory/.cache/

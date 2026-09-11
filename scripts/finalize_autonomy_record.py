@@ -14,7 +14,9 @@ exposes the same checks as a validator (`validate_audit_record`,
 
 Exit codes: 0 written (or validated) · 2 usage/validation error ·
 4 checkpoint breached — the record is now checkpoint-paused and the §E
-re-authorization flow applies before any terminal state can be written.
+re-authorization flow applies before successful completion can be written.
+On ``--final-state done --replace``, scalar-pause derivation reads the stored
+checkpoint first; pass explicit actual_minutes when also changing that pause.
 """
 
 from __future__ import annotations
@@ -65,7 +67,7 @@ __all__ = [
 # receiver-written in-flight value (an admission record picked up for
 # execution); the evaluator itself never writes it, so it extends the
 # evaluator's FINAL_STATES rather than appearing there.
-TERMINAL_FINAL_STATES = frozenset({"done", "superseded", "error"})
+TERMINAL_FINAL_STATES = frozenset({"done", "superseded", "error", "cancelled"})
 LIVE_FINAL_STATES = frozenset({"pending", "paused", "blocked"})
 VALID_FINAL_STATES = TERMINAL_FINAL_STATES | LIVE_FINAL_STATES
 assert TERMINAL_FINAL_STATES | (LIVE_FINAL_STATES - {"pending"}) == FINAL_STATES
@@ -122,6 +124,8 @@ FINDING_SEVERITIES = {
     "invalid_finalizer_provenance": "error",
     "actual_minutes_inconsistent": "error",
     "work_started_before_admission": "error",
+    "invalid_cancellation": "error",
+    "invalid_clock_adjustments": "error",
 }
 
 # Writer-era marker for checkpoint and non-supersession terminal receipts.
@@ -211,6 +215,95 @@ def _require_work_start(
     return normalized
 
 
+CLOCK_ADJUSTMENT_FIELDS = frozenset({
+    "from_utc", "to_utc", "actor", "decided_at_utc", "reason",
+})
+
+
+def _clock_utc(value: Any, field: str) -> dt.datetime:
+    parsed = _parse_utc(value)
+    if not isinstance(value, str) or parsed is None or parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != value:
+        raise ValueError(f"{field} must use YYYY-MM-DDTHH:MM:SSZ")
+    return parsed
+
+
+def _adjustment_intervals(
+    record: Dict[str, Any],
+    started_at_utc: Any,
+    completed_at_utc: Any = None,
+) -> List[Tuple[dt.datetime, dt.datetime]]:
+    """Read attributed, closed intervals even when terminal actuals are absent."""
+    result = _result_block(record)
+    entries = result.get("clock_adjustments", [])
+    if not isinstance(entries, list):
+        raise ValueError("clock_adjustments must be a list")
+    if not entries:
+        return []
+    started = _clock_utc(started_at_utc, "work_started_at_utc")
+    completed = (
+        _clock_utc(completed_at_utc, "completed_at_utc")
+        if completed_at_utc is not None else None
+    )
+    intervals = []
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != CLOCK_ADJUSTMENT_FIELDS | {"recorded_at_utc"}:
+            raise ValueError("each clock adjustment requires interval, actor, decision, reason and writer timestamp only")
+        actor = entry["actor"]
+        if not isinstance(actor, str) or not actor or any(c.isspace() for c in actor):
+            raise ValueError("clock adjustment actor must be a stable nonempty handle")
+        if not isinstance(entry["reason"], str) or not entry["reason"].strip():
+            raise ValueError("clock adjustment reason must be nonempty")
+        begin = _clock_utc(entry["from_utc"], "from_utc")
+        end = _clock_utc(entry["to_utc"], "to_utc")
+        decided = _clock_utc(entry["decided_at_utc"], "decided_at_utc")
+        recorded = _clock_utc(entry["recorded_at_utc"], "recorded_at_utc")
+        if not (started <= begin < end <= recorded) or decided > recorded:
+            raise ValueError("clock adjustment must follow work start and finish before recording; its decision must precede recording")
+        if completed is not None and end > completed:
+            raise ValueError("clock adjustment extends beyond completion")
+        intervals.append((begin, end))
+    return intervals
+
+
+def _with_clock_adjustments(
+    record: Dict[str, Any], actuals: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Append attributed deductions; omission and repeated inputs preserve history.
+
+    The writer stamps new entries. Input cannot rewrite a stored entry's
+    provenance; exact repeats are idempotent. No adjustment grants authority
+    or changes the checkpoint's re-authorization state.
+    """
+    updated = copy.deepcopy(record)
+    result = updated.setdefault("result", {})
+    started = actuals.get("work_started_at_utc", result.get("work_started_at_utc"))
+    _adjustment_intervals(record, started)
+    if "clock_adjustments" in actuals:
+        additions = actuals["clock_adjustments"]
+        if not isinstance(additions, list):
+            raise ValueError("actuals.clock_adjustments must be a list")
+        entries = result.setdefault("clock_adjustments", [])
+        for entry in additions:
+            if (
+                not isinstance(entry, dict)
+                or not CLOCK_ADJUSTMENT_FIELDS <= set(entry)
+                or set(entry) - (CLOCK_ADJUSTMENT_FIELDS | {"recorded_at_utc"})
+            ):
+                raise ValueError("clock adjustment input requires from_utc, to_utc, actor, decided_at_utc and reason")
+            core = {key: entry[key] for key in CLOCK_ADJUSTMENT_FIELDS}
+            prior = next((e for e in entries if all(e[k] == core[k] for k in core)), None)
+            if prior is not None:
+                if "recorded_at_utc" in entry and entry["recorded_at_utc"] != prior["recorded_at_utc"]:
+                    raise ValueError("cannot rewrite clock adjustment provenance")
+                continue
+            if "recorded_at_utc" in entry:
+                raise ValueError("recorded_at_utc is writer-owned for new clock adjustments")
+            entries.append(dict(core, recorded_at_utc=utc_now_iso()))
+    endpoint = actuals.get("completed_at_utc", result.get("completed_at_utc"))
+    _adjustment_intervals(updated, started, endpoint)
+    return updated
+
+
 def _active_minutes(
     record: Dict[str, Any],
     started_at_utc: Any,
@@ -221,7 +314,10 @@ def _active_minutes(
     A checkpoint may carry one re-authorization pause interval.  Peer-review
     waits remain inside the wall clock.  A resolved pause excludes the
     explicit ``paused_at_utc`` -> ``cleared_paused_at_utc`` interval; an
-    uncleared pause ends the active clock at ``paused_at_utc``.
+    uncleared pause ends the active clock at ``paused_at_utc``. Attributed
+    clock adjustments are additional exclusions. Their union with the scalar
+    pause is subtracted in seconds, then rounded once; overlap never deducts
+    the same second twice.
     """
     started = _parse_utc(started_at_utc)
     completed = _parse_utc(completed_at_utc)
@@ -233,7 +329,7 @@ def _active_minutes(
     if completed < started:
         raise ValueError("completed_at_utc precedes work_started_at_utc")
 
-    paused_seconds = 0.0
+    intervals = _adjustment_intervals(record, started_at_utc, completed_at_utc)
     checkpoint = _checkpoint_block(record)
     paused_text = checkpoint.get("paused_at_utc")
     reauthorization = checkpoint.get("reauthorization")
@@ -255,13 +351,22 @@ def _active_minutes(
                 "the re-authorization pause interval must fall within the "
                 "work-start to completion interval"
             )
-        paused_seconds = (cleared - paused).total_seconds()
+        intervals.append((paused, cleared))
     elif cleared_text is not None:
         raise ValueError(
             "cleared_paused_at_utc requires a parseable paused_at_utc timestamp"
         )
 
-    active_seconds = (completed - started).total_seconds() - paused_seconds
+    excluded_seconds = 0.0
+    merged: List[Tuple[dt.datetime, dt.datetime]] = []
+    for begin, end in sorted(intervals):
+        if merged and begin <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((begin, end))
+    for begin, end in merged:
+        excluded_seconds += (end - begin).total_seconds()
+    active_seconds = (completed - started).total_seconds() - excluded_seconds
     if active_seconds < 0:  # pragma: no cover - guarded by interval ordering
         raise ValueError("re-authorization pauses exceed the task wall clock")
     return int(math.ceil(active_seconds / 60.0))
@@ -272,10 +377,10 @@ def _is_closed(record: Dict[str, Any]) -> bool:
 
     ``final_state`` alone cannot answer this: auto-accepted records are
     born ``done`` (conformance-pinned admission shape) with null actuals
-    and no completion stamp. ``superseded`` closes unconditionally — its
-    authority transferred to the superseding evaluation.
+    and no completion stamp. ``error`` and ``cancelled`` close
+    unconditionally, as does ``superseded`` (authority transferred).
     """
-    if _result_block(record).get("final_state") == "superseded":
+    if _result_block(record).get("final_state") in {"superseded", "error", "cancelled"}:
         return True
     return bool(_result_block(record).get("completed_at_utc"))
 
@@ -283,6 +388,52 @@ def _is_closed(record: Dict[str, Any]) -> bool:
 def _human_outcome_recorded(record: Dict[str, Any]) -> bool:
     outcome = _result_block(record).get("human_outcome")
     return isinstance(outcome, dict) and outcome.get("recorded") is True
+
+
+def _cancellation_errors(record: Dict[str, Any]) -> List[str]:
+    """Validate cancellation evidence identically at write and read-back."""
+    result = _result_block(record)
+    errors = []
+    outcome = result.get("human_outcome")
+    admitted = record.get("decision") == "auto_accepted" or (
+        record.get("decision") == "paused"
+        and isinstance(outcome, dict)
+        and outcome.get("recorded") is True
+        and outcome.get("decision") in {"approved", "modified"}
+    )
+    if not admitted:
+        errors.append("cancelled requires an admitted task")
+    if result.get("cancelled_by") not in ("human", "sender"):
+        errors.append("cancelled_by must be human or sender")
+    cancelled = _parse_utc(result.get("cancelled_at_utc"))
+    completed = _parse_utc(result.get("completed_at_utc"))
+    if cancelled is None or completed is None or cancelled != completed:
+        errors.append("cancelled_at_utc must be a UTC timestamp equal to completed_at_utc")
+    lower = _parse_utc(result.get("work_started_at_utc") or record.get("created_at_utc"))
+    if cancelled is not None and lower is not None and cancelled < lower:
+        errors.append("cancelled_at_utc precedes admission or work start")
+    if isinstance(outcome, dict) and outcome.get("recorded") is True:
+        approved_at = _parse_utc(outcome.get("decided_at_utc"))
+        if cancelled is not None and approved_at is not None and cancelled < approved_at:
+            errors.append("cancelled_at_utc precedes the admission outcome")
+    if "reason" in result and not isinstance(result["reason"], str):
+        errors.append("reason must be a string when supplied")
+    landed = result.get("deliverables_landed")
+    if not isinstance(landed, list) or any(
+        not isinstance(ref, str) or not ref.strip() for ref in landed
+    ):
+        errors.append("deliverables_landed must be a list of nonempty reference strings")
+    for key in CANONICAL_NUMERIC_AXES:
+        value = result.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            errors.append(f"cancelled requires a non-negative integer {key}")
+    if result.get("work_started_at_utc") is None and (
+        result.get("actual_minutes") != 0
+        or result.get("actual_files_touched") != 0
+        or landed
+    ):
+        errors.append("cancellation before work start requires zero actuals and no deliverables")
+    return errors
 
 
 def _checkpoint_resolved(record: Dict[str, Any]) -> bool:
@@ -384,6 +535,22 @@ def validate_audit_record(
             ))
 
     completed_at = result.get("completed_at_utc")
+    clock_endpoint = completed_at or (
+        checkpoint.get("completed_at_utc") if "clock_adjustments" in result else None
+    )
+    try:
+        _adjustment_intervals(record, result.get("work_started_at_utc"), clock_endpoint)
+    except ValueError as exc:
+        findings.append(_finding("invalid_clock_adjustments", f"{source}: {exc}"))
+    if state == "cancelled":
+        findings.extend(
+            _finding("invalid_cancellation", f"{source}: {detail}")
+            for detail in _cancellation_errors(record)
+        )
+    elif any(key in result for key in ("cancelled_by", "cancelled_at_utc", "deliverables_landed", "reason")):
+        findings.append(_finding(
+            "invalid_cancellation", f"{source}: cancellation evidence requires final_state cancelled",
+        ))
     finalizer = result.get("finalizer")
     canonical_writer = finalizer == FINALIZER_PROVENANCE
     if finalizer is not None and not canonical_writer:
@@ -393,7 +560,7 @@ def validate_audit_record(
             "canonical writer marker",
         ))
     if state in TERMINAL_FINAL_STATES:
-        if checkpoint.get("action") == "paused_for_reauthorization":
+        if state != "cancelled" and checkpoint.get("action") == "paused_for_reauthorization":
             findings.append(_finding(
                 "paused_terminal_checkpoint_action",
                 f"{source}: final_state {state!r} with threshold_checkpoint."
@@ -473,13 +640,13 @@ def validate_audit_record(
                 ))
             actual_minutes = result.get("actual_minutes")
             if (
-                completed_at is not None
+                clock_endpoint is not None
                 and isinstance(actual_minutes, int)
                 and not isinstance(actual_minutes, bool)
             ):
                 try:
                     derived_minutes = _active_minutes(
-                        record, started_at, completed_at
+                        record, started_at, clock_endpoint
                     )
                 except ValueError as exc:
                     findings.append(_finding(
@@ -727,7 +894,7 @@ def _build_actuals(
     measured_at_utc: str,
 ) -> Dict[str, Any]:
     if args.actuals is not None:
-        data = yaml.safe_load(args.actuals.read_text(encoding="utf-8"))
+        data = load_yaml_strict(args.actuals)
         if not isinstance(data, dict):
             raise ValueError(f"{args.actuals} must contain a YAML mapping")
         actuals = dict(data)
@@ -745,6 +912,26 @@ def _build_actuals(
             actuals["predicted_risk_materialized"] = (
                 args.predicted_risk_materialized == "true"
             )
+
+    if args.final_state == "superseded":
+        if "clock_adjustments" in actuals:
+            raise ValueError("supersession cannot add clock adjustments")
+        return actuals
+
+    if args.final_state == "cancelled":
+        if args.cancelled_at is None:
+            raise ValueError("--final-state cancelled requires --cancelled-at")
+        if (
+            args.completed_at not in (None, args.cancelled_at)
+            or actuals.get("completed_at_utc", args.cancelled_at) != args.cancelled_at
+        ):
+            raise ValueError("--completed-at must equal --cancelled-at")
+        actuals["completed_at_utc"] = args.cancelled_at
+        previous_files = _result_block(record).get("actual_files_touched")
+        if previous_files is not None:
+            actuals.setdefault("actual_files_touched", previous_files)
+        elif not (_result_block(record).get("work_started_at_utc") or args.started_at or actuals.get("work_started_at_utc")):
+            actuals.setdefault("actual_files_touched", 0)
 
     if args.started_at is not None:
         existing = actuals.get("work_started_at_utc")
@@ -795,8 +982,11 @@ def _build_actuals(
                 or measured_at_utc
             )
             actuals["actual_minutes"] = _active_minutes(
-                record, started_at, completed_at
+                _with_clock_adjustments(record, actuals), started_at, completed_at
             )
+    if args.final_state == "cancelled" and started_at is None:
+        previous_minutes = record_result.get("actual_minutes")
+        actuals.setdefault("actual_minutes", 0 if previous_minutes is None else previous_minutes)
     return actuals
 
 
@@ -977,18 +1167,36 @@ def apply_checkpoint(
     ``allow_closed`` exists solely for the finalizer's explicit
     ``--replace`` correction path.
     """
-    if _is_closed(record) and not allow_closed:
+    if _result_block(record).get("final_state") == "cancelled" or (
+        _is_closed(record) and not allow_closed
+    ):
         raise ValueError(
             "record is already closed (completed_at_utc set or superseded); "
             "a checkpoint cannot reopen terminal state"
         )
-    updated = copy.deepcopy(record)
+    actuals = dict(actuals)
+    has_adjustments = (
+        "clock_adjustments" in actuals or "clock_adjustments" in _result_block(record)
+    )
+    if has_adjustments:
+        endpoint = _result_block(record).get("completed_at_utc") if allow_closed else None
+        actuals.setdefault("completed_at_utc", endpoint or now_utc or utc_now_iso())
+    updated = _with_clock_adjustments(record, actuals)
     envelope = updated.get("scope_envelope")
     if not isinstance(envelope, dict):
         raise ValueError(
             "record carries no scope_envelope; nothing to checkpoint against"
         )
     actuals = _require_work_start(record, actuals, operation="checkpoint")
+    if has_adjustments:
+        derived_minutes = _active_minutes(
+            updated, actuals["work_started_at_utc"],
+            actuals["completed_at_utc"],
+        )
+        actuals.setdefault("actual_minutes", derived_minutes)
+        supplied_minutes = actuals["actual_minutes"]
+        if isinstance(supplied_minutes, int) and abs(supplied_minutes - derived_minutes) > 1:
+            raise ValueError("actual_minutes_inconsistent: checkpoint differs from its work clock")
     checkpoint = evaluate_threshold_checkpoint(
         envelope, _grant_result(updated), actuals, policy=policy
     )
@@ -1130,6 +1338,7 @@ def finalize_audit_record(
     reply_message_id: Optional[str] = None,
     artifacts: Optional[Sequence[str]] = None,
     superseded_by: Optional[str] = None,
+    cancellation: Optional[Dict[str, Any]] = None,
     replace: bool = False,
     now_utc: Optional[str] = None,
     policy: Optional[Dict[str, Any]] = None,
@@ -1148,6 +1357,32 @@ def finalize_audit_record(
     result = _result_block(record)
     kind = result.get("completion_kind")
     current_state = result.get("final_state")
+    if final_state == "cancelled":
+        if _is_closed(record):
+            raise ValueError("record is already closed; cancellation cannot replace terminal history")
+        supported_actuals = {
+            "actual_minutes", "actual_files_touched", "work_started_at_utc",
+            "completed_at_utc", "clock_adjustments",
+        }
+        if set(actuals) - supported_actuals:
+            raise ValueError(
+                "cancellation accepts clock/count actuals only; checkpoint "
+                "effects, risks and re-authorization while the record is live"
+            )
+        if not isinstance(cancellation, dict):
+            raise ValueError("cancelled requires cancellation metadata")
+        allowed = {"cancelled_by", "cancelled_at_utc", "reason", "deliverables_landed"}
+        if set(cancellation) - allowed:
+            raise ValueError("unsupported cancellation metadata")
+        if actuals.get("completed_at_utc", cancellation.get("cancelled_at_utc")) != cancellation.get("cancelled_at_utc"):
+            raise ValueError("completed_at_utc must equal cancelled_at_utc")
+        actuals = dict(actuals, completed_at_utc=cancellation.get("cancelled_at_utc"))
+        if result.get("work_started_at_utc") is not None or actuals.get("work_started_at_utc") is not None:
+            actuals = _require_work_start(record, actuals, operation="cancellation")
+    elif cancellation is not None:
+        raise ValueError("cancellation metadata is valid only with final_state cancelled")
+    if current_state == "cancelled" and final_state != "superseded":
+        raise ValueError("cancelled record is closed; cannot reopen terminal history")
     if superseded_by is not None and final_state != "superseded":
         raise ValueError("--superseded-by is valid only with final_state superseded")
     if final_state == "superseded":
@@ -1195,7 +1430,16 @@ def finalize_audit_record(
                 "superseded); use --replace only for a deliberate correction"
             )
 
-    updated = copy.deepcopy(record)
+    if final_state == "superseded" and "clock_adjustments" in actuals:
+        raise ValueError("supersession preserves history; it cannot add clock adjustments")
+    updated = copy.deepcopy(record) if final_state == "superseded" else _with_clock_adjustments(record, actuals)
+    if final_state != "superseded" and "clock_adjustments" in _result_block(updated):
+        started = actuals.get("work_started_at_utc") or result.get("work_started_at_utc")
+        if "actual_minutes" not in actuals and started is not None:
+            actuals = dict(actuals, actual_minutes=_active_minutes(
+                updated, started,
+                actuals.get("completed_at_utc") or result.get("completed_at_utc") or now_utc or utc_now_iso(),
+            ))
     if final_state == "superseded" and current_state not in VALID_FINAL_STATES:
         # Preserve the legacy off-enum run state as history — supersession
         # overwrites final_state, and the original value is part of what
@@ -1255,6 +1499,8 @@ def finalize_audit_record(
         )
 
     result_block = updated.setdefault("result", {})
+    if cancellation is not None:
+        result_block.update(copy.deepcopy(cancellation))
     if "work_started_at_utc" in actuals:
         result_block["work_started_at_utc"] = actuals["work_started_at_utc"]
     completed = (
@@ -1390,6 +1636,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--reply-message-id")
     parser.add_argument("--artifact", action="append", dest="artifacts")
     parser.add_argument("--completed-at")
+    parser.add_argument("--cancelled-by", choices=("human", "sender"))
+    parser.add_argument("--cancelled-at", help="cancellation time (YYYY-MM-DDTHH:MM:SSZ)")
+    parser.add_argument("--reason", help="optional cancellation explanation")
+    parser.add_argument("--deliverable-landed", action="append", default=[])
     parser.add_argument(
         "--predicted-risk-materialized", choices=("true", "false"), default=None
     )
@@ -1408,6 +1658,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        cancellation = None
+        if args.final_state == "cancelled":
+            cancellation = {
+                "cancelled_by": args.cancelled_by,
+                "cancelled_at_utc": args.cancelled_at,
+                "deliverables_landed": args.deliverable_landed,
+            }
+            if args.reason is not None:
+                cancellation["reason"] = args.reason
+        elif args.cancelled_by is not None or args.cancelled_at is not None or args.reason is not None or args.deliverable_landed:
+            raise ValueError("cancellation options require --final-state cancelled")
         if args.validate:
             if args.sweep:
                 report = sweep_audit_dir(args.audit_file.parent if args.audit_file.is_file() else args.audit_file)
@@ -1459,6 +1720,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     reply_message_id=args.reply_message_id,
                     artifacts=args.artifacts,
                     superseded_by=args.superseded_by,
+                    cancellation=cancellation,
                     replace=args.replace,
                     now_utc=measured_at_utc,
                     policy=policy,
