@@ -15,9 +15,9 @@ expected:
     - hard_stops_clear
     - workspace_check_required
   result:
-    final_state: done
+    final_state: pending
     predicted_risk_materialized: false
-    completed_at_utc: "2026-05-12T12:25:00Z"
+    completed_at_utc: null
     threshold_checkpoint:
       evaluated: true
       breached: false

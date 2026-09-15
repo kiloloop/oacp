@@ -1,0 +1,168 @@
+# Finite authority grammar: each row changes one bound or vocabulary member.
+base_scope:
+  allowed_types:
+  - review_request
+  max_round: 3
+  expires_at_utc: '2026-06-30T00:00:00Z'
+  max_actual_minutes: 30
+  max_actual_files_touched: 3
+  writes_findings_packet: true
+  sends_oacp_reply: true
+scope_cases:
+- case: allows-task_request
+  set:
+    allowed_types:
+    - task_request
+  valid: true
+- case: allows-question
+  set:
+    allowed_types:
+    - question
+  valid: true
+- case: allows-brainstorm_request
+  set:
+    allowed_types:
+    - brainstorm_request
+  valid: true
+- case: allows-brainstorm_followup
+  set:
+    allowed_types:
+    - brainstorm_followup
+  valid: true
+- case: allows-handoff
+  set:
+    allowed_types:
+    - handoff
+  valid: true
+- case: allows-review_request
+  set:
+    allowed_types:
+    - review_request
+  valid: true
+- case: allows-review_addressed
+  set:
+    allowed_types:
+    - review_addressed
+  valid: true
+- case: rejects-review_feedback
+  set:
+    allowed_types:
+    - review_feedback
+  valid: false
+  error: continuation_grant_missing_scope
+- case: rejects-review_lgtm
+  set:
+    allowed_types:
+    - review_lgtm
+  valid: false
+  error: continuation_grant_missing_scope
+- case: rejects-notification
+  set:
+    allowed_types:
+    - notification
+  valid: false
+  error: continuation_grant_missing_scope
+- case: rejects-follow_up
+  set:
+    allowed_types:
+    - follow_up
+  valid: false
+  error: continuation_grant_missing_scope
+- case: rejects-handoff_complete
+  set:
+    allowed_types:
+    - handoff_complete
+  valid: false
+  error: continuation_grant_missing_scope
+- case: rejects-unknown
+  set:
+    allowed_types:
+    - unknown
+  valid: false
+  error: continuation_grant_missing_scope
+- case: missing-allowed_types
+  remove:
+  - allowed_types
+  valid: false
+  error: continuation_grant_missing_scope
+- case: missing-max_round
+  remove:
+  - max_round
+  valid: false
+  error: continuation_grant_missing_scope
+- case: missing-expires_at_utc
+  remove:
+  - expires_at_utc
+  valid: false
+  error: continuation_grant_missing_scope
+- case: invalid-allowed_types-16
+  set:
+    allowed_types: []
+  valid: false
+  error: continuation_grant_missing_scope
+- case: invalid-allowed_types-17
+  set:
+    allowed_types: review_request
+  valid: false
+  error: continuation_grant_missing_scope
+- case: invalid-allowed_types-18
+  set:
+    allowed_types:
+    - true
+  valid: false
+  error: continuation_grant_missing_scope
+- case: invalid-max_round-19
+  set:
+    max_round: true
+  valid: false
+  error: continuation_grant_missing_scope
+- case: invalid-max_round-20
+  set:
+    max_round: 0
+  valid: false
+  error: continuation_grant_missing_scope
+- case: invalid-max_round-21
+  set:
+    max_round: '3'
+  valid: false
+  error: continuation_grant_missing_scope
+- case: invalid-expires_at_utc-22
+  set:
+    expires_at_utc: '2026-02-30T00:00:00Z'
+  valid: false
+  error: continuation_grant_missing_scope
+- case: invalid-expires_at_utc-23
+  set:
+    expires_at_utc: null
+  valid: false
+  error: continuation_grant_missing_scope
+- case: invalid-review_loop-24
+  set:
+    review_loop: {}
+  valid: false
+  error: continuation_grant_missing_scope
+- case: invalid-submits_github_review-25
+  set:
+    submits_github_review: 'true'
+  valid: false
+  error: continuation_grant_missing_scope
+- case: missing-max_actual_minutes
+  remove:
+  - max_actual_minutes
+  valid: false
+  error: max_actual_minutes_invalid
+- case: boolean-max_actual_minutes
+  set:
+    max_actual_minutes: true
+  valid: false
+  error: max_actual_minutes_invalid
+- case: missing-max_actual_files_touched
+  remove:
+  - max_actual_files_touched
+  valid: false
+  error: max_actual_files_touched_invalid
+- case: boolean-max_actual_files_touched
+  set:
+    max_actual_files_touched: true
+  valid: false
+  error: max_actual_files_touched_invalid

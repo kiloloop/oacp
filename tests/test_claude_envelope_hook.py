@@ -1685,10 +1685,16 @@ def _write_audit_record(
     audit_dir.mkdir(parents=True, exist_ok=True)
     record = audit_dir / f"{stamp}_{filename_id or message_id}.yaml"
     if body is None:
+        # A finalized `done` always carries its completion stamp; the
+        # stamp-less legacy shape is written explicitly by the test that
+        # exercises it.
+        stamp_line = (
+            '  completed_at_utc: "2026-07-13T00:10:00Z"\n' if final_state == "done" else ""
+        )
         body = (
             f"message_id: {message_id}\n"
             f"receiver: {receiver}\n"
-            f"result:\n  final_state: {final_state}\n"
+            f"result:\n  final_state: {final_state}\n{stamp_line}"
         )
     record.write_text(body, encoding="utf-8")
     return record
@@ -1723,6 +1729,27 @@ def test_envelope_clear_denied_while_audit_pending(tmp_path: Path) -> None:
     decision = _process_bash(repo, CLEAR_CMD)
     assert decision.action == "deny"
     assert "pending" in decision.reason
+
+
+def test_envelope_clear_denied_for_legacy_done_without_completion_stamp(tmp_path: Path) -> None:
+    # A pre-0.5.2 auto-accepted record was born `done` with no completion
+    # stamp; it is unfinalized history, not a completed task.
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    _write_audit_record(
+        tmp_path,
+        body="message_id: msg-1\nreceiver: claude\nresult:\n  final_state: done\n  completed_at_utc: null\n",
+    )
+    decision = _process_bash(repo, CLEAR_CMD)
+    assert decision.action == "deny"
+    assert "legacy born-done" in decision.reason
+
+
+def test_envelope_clear_allowed_for_stamped_done(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    _write_audit_record(tmp_path, final_state="done")
+    assert _process_bash(repo, CLEAR_CMD).action == "allow"
 
 
 def test_envelope_clear_denied_while_audit_paused(tmp_path: Path) -> None:

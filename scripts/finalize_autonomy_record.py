@@ -40,15 +40,17 @@ from autonomy_gate import (
     AUTONOMY_AUDIT_SCHEMA_VERSION,
     BREACH_BASES,
     BREACH_SUB_BASES,
-    COVERABLE_CONTINUATION_FIELDS,
+    CONTINUATION_SIDE_EFFECT_FIELDS,
     DuplicateKeyError,
     FINAL_STATES,
     LEGACY_PROFILE_BOOL_FIELDS,
     PINNED_COMPLETION_KINDS,
+    REAUTH_GOVERNING_CHANNELS,
     _actual_side_effects,
     evaluate_threshold_checkpoint,
     evaluation_identity,
     load_yaml_strict,
+    normalize_continuation_scope,
     receiver_policy,
 )
 from record_autonomy_outcome import GRANT_DECISIONS, HUMAN_DECISIONS
@@ -64,13 +66,12 @@ __all__ = [
 
 
 # The run-state vocabulary, split by lifecycle phase. ``pending`` is the
-# receiver-written in-flight value (an admission record picked up for
-# execution); the evaluator itself never writes it, so it extends the
-# evaluator's FINAL_STATES rather than appearing there.
+# evaluator's birth state for an auto-accepted admission; only terminal
+# finalization (this module) moves a record to ``done``.
 TERMINAL_FINAL_STATES = frozenset({"done", "superseded", "error", "cancelled"})
 LIVE_FINAL_STATES = frozenset({"pending", "paused", "blocked"})
 VALID_FINAL_STATES = TERMINAL_FINAL_STATES | LIVE_FINAL_STATES
-assert TERMINAL_FINAL_STATES | (LIVE_FINAL_STATES - {"pending"}) == FINAL_STATES
+assert VALID_FINAL_STATES == FINAL_STATES
 
 # Canonical mapping for off-enum vocabulary observed in pre-rail records.
 # The mapping is documentation for auditors and collectors — history is
@@ -88,18 +89,22 @@ LEGACY_FINAL_STATE_MAP = {"completed": "done"}
 # evaluator emits is drawn from these; receiver-composed variants (three
 # observed spellings for the file axis alone) fragment calibration.
 CANONICAL_NUMERIC_AXES = ("actual_minutes", "actual_files_touched")
-CANONICAL_CHECKPOINT_AXES = frozenset(CANONICAL_NUMERIC_AXES) | {
-    f"side_effects_actual.{field}" for field in COVERABLE_CONTINUATION_FIELDS
-} | {
-    f"task_profile.{field}"
-    for field in (*LEGACY_PROFILE_BOOL_FIELDS, *COVERABLE_CONTINUATION_FIELDS)
-}
+CANONICAL_CHECKPOINT_AXES = (
+    frozenset(CANONICAL_NUMERIC_AXES)
+    | {f"side_effects_actual.{field}" for field in CONTINUATION_SIDE_EFFECT_FIELDS}
+    | {
+        f"task_profile.{field}"
+        for field in (*LEGACY_PROFILE_BOOL_FIELDS, *CONTINUATION_SIDE_EFFECT_FIELDS)
+    }
+)
 
 # Validator finding codes, pinned like reason codes. ``error`` findings are
 # integrity violations the fleet drives to zero; ``advisory`` findings are
-# ambiguous-by-construction (an auto-accepted record is born
-# ``final_state: done`` with null actuals, so missing terminal data cannot
-# be distinguished from work still in flight) or purely historical.
+# purely historical: legacy receipts flagged without rewriting history. Work
+# in flight is ``final_state: pending``, so a ``done`` receipt missing its
+# actuals is a completed record that never recorded them — advisory when an
+# unmarked legacy writer produced it, an error when the canonical finalizer
+# claims it (the finalizer refuses that shape at write time).
 FINDING_SEVERITIES = {
     "record_unparsable": "error",
     "duplicate_yaml_key": "error",
@@ -119,6 +124,8 @@ FINDING_SEVERITIES = {
     "duplicate_logical_id": "error",
     "noncanonical_checkpoint_axis": "advisory",
     "terminal_missing_actuals": "advisory",
+    "canonical_writer_missing_actuals": "error",
+    "legacy_born_done_unfinalized": "advisory",
     "terminal_missing_work_started_at": "advisory",
     "canonical_writer_missing_work_started_at": "error",
     "invalid_finalizer_provenance": "error",
@@ -126,6 +133,7 @@ FINDING_SEVERITIES = {
     "work_started_before_admission": "error",
     "invalid_cancellation": "error",
     "invalid_clock_adjustments": "error",
+    "invalid_pause_intervals": "error",
 }
 
 # Writer-era marker for checkpoint and non-supersession terminal receipts.
@@ -219,6 +227,16 @@ CLOCK_ADJUSTMENT_FIELDS = frozenset({
     "from_utc", "to_utc", "actor", "decided_at_utc", "reason",
 })
 
+# A pause interval is a checkpoint pause that a later checkpoint evaluation
+# replaced on ``threshold_checkpoint``: the finalizer retires the answered
+# scalar pair into ``result.pause_intervals`` so the work clock keeps
+# excluding it. Distinct from clock adjustments, which are human-directed
+# deductions that were never pauses.
+PAUSE_INTERVAL_FIELDS = frozenset({
+    "paused_at_utc", "cleared_paused_at_utc", "breached_fields", "channel",
+    "decided_at_utc", "recorded_at_utc",
+})
+
 
 def _clock_utc(value: Any, field: str) -> dt.datetime:
     parsed = _parse_utc(value)
@@ -304,6 +322,186 @@ def _with_clock_adjustments(
     return updated
 
 
+def _pause_intervals(
+    record: Dict[str, Any],
+    started_at_utc: Any,
+    completed_at_utc: Any = None,
+) -> List[Tuple[dt.datetime, dt.datetime]]:
+    """Read retired checkpoint pauses even when terminal actuals are absent."""
+    result = _result_block(record)
+    entries = result.get("pause_intervals", [])
+    if not isinstance(entries, list):
+        raise ValueError("pause_intervals must be a list")
+    if not entries:
+        return []
+    started = _clock_utc(started_at_utc, "work_started_at_utc")
+    completed = (
+        _clock_utc(completed_at_utc, "completed_at_utc")
+        if completed_at_utc is not None else None
+    )
+    intervals = []
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != PAUSE_INTERVAL_FIELDS:
+            raise ValueError(
+                "each pause interval requires paused_at_utc, "
+                "cleared_paused_at_utc, breached_fields, channel, "
+                "decided_at_utc and recorded_at_utc only"
+            )
+        fields = entry["breached_fields"]
+        if not isinstance(fields, list) or not fields or any(
+            not isinstance(field, str) or not field for field in fields
+        ):
+            raise ValueError(
+                "pause interval breached_fields must be a nonempty list of axis names"
+            )
+        if entry["channel"] not in REAUTH_GOVERNING_CHANNELS:
+            raise ValueError(
+                "pause interval channel must be a governing re-authorization channel"
+            )
+        paused = _clock_utc(entry["paused_at_utc"], "paused_at_utc")
+        cleared = _clock_utc(entry["cleared_paused_at_utc"], "cleared_paused_at_utc")
+        decided = _clock_utc(entry["decided_at_utc"], "decided_at_utc")
+        recorded = _clock_utc(entry["recorded_at_utc"], "recorded_at_utc")
+        if not (started <= paused <= cleared <= recorded) or decided > recorded:
+            raise ValueError(
+                "pause interval must follow work start, clear no earlier than "
+                "it pauses, and be recorded after its clear and decision"
+            )
+        if completed is not None and cleared > completed:
+            raise ValueError("pause interval extends beyond completion")
+        intervals.append((paused, cleared))
+    return intervals
+
+
+def _effective_clear(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The governing answer that cleared the current pause, or ``None``.
+
+    Two representations of an answered checkpoint pause are supported and
+    every clock consumer reads both. A checkpoint clear arbitrated into
+    ``threshold_checkpoint.reauthorization`` names its own clear time and
+    channel. A receiver-side human outcome recorded on the record AFTER the
+    pause — the outcome recorder's first-answer route on an auto-accepted
+    admission that carried no prior outcome — clears the pause at its
+    decision time through the ``receiver_human`` channel. An unanswered
+    pause, a declined answer, and an admission outcome decided before the
+    pause clear nothing. Only the governing answer confers a clear: a
+    clear timestamp the recorder retained beside a later ``declined``
+    arbitration is history, and a declined answer recorded at or after a
+    human outcome withdraws that outcome's clear.
+    """
+    checkpoint = result.get("threshold_checkpoint")
+    checkpoint = checkpoint if isinstance(checkpoint, dict) else {}
+    reauth = checkpoint.get("reauthorization")
+    reauth = reauth if isinstance(reauth, dict) else {}
+    declined = (
+        reauth.get("disposition") == "declined" or reauth.get("decision") == "declined"
+    )
+    if reauth.get("disposition") == "resumed" and reauth.get("cleared_paused_at_utc"):
+        return {
+            "cleared_paused_at_utc": reauth["cleared_paused_at_utc"],
+            "channel": reauth.get("channel"),
+            "decided_at_utc": reauth.get("decided_at_utc"),
+        }
+    if checkpoint.get("breached") is not True:
+        return None
+    outcome = result.get("human_outcome")
+    if not isinstance(outcome, dict) or outcome.get("recorded") is not True:
+        return None
+    if outcome.get("decision") not in {"approved", "modified"}:
+        return None
+    decided = _parse_utc(outcome.get("decided_at_utc"))
+    paused = _parse_utc(checkpoint.get("paused_at_utc"))
+    if decided is None or paused is None or decided < paused:
+        return None
+    if declined:
+        declined_at = _parse_utc(reauth.get("decided_at_utc"))
+        if declined_at is None or declined_at >= decided:
+            return None
+    return {
+        "cleared_paused_at_utc": outcome["decided_at_utc"],
+        "channel": "receiver_human",
+        "decided_at_utc": outcome["decided_at_utc"],
+    }
+
+
+def _current_pause(record: Dict[str, Any]) -> Dict[str, Any]:
+    """The record's current breached pause, or an empty mapping.
+
+    Keys: ``paused_at_utc``, ``cleared_paused_at_utc`` (the governing clear
+    from either answered representation, ``_effective_clear``; None while
+    the pause is unanswered), ``terminal_time`` (True when the breach fired at
+    terminal finalization) and ``completed_at_utc`` (the completion a
+    terminal-time pause pinned).
+    """
+    checkpoint = _checkpoint_block(record)
+    if checkpoint.get("breached") is not True or not checkpoint.get("paused_at_utc"):
+        return {}
+    clear = _effective_clear(_result_block(record)) or {}
+    return {
+        "paused_at_utc": checkpoint.get("paused_at_utc"),
+        "cleared_paused_at_utc": clear.get("cleared_paused_at_utc"),
+        "terminal_time": checkpoint.get("terminal_time") is True,
+        "completed_at_utc": checkpoint.get("completed_at_utc"),
+    }
+
+
+def _pin_terminal_completion(
+    record: Dict[str, Any], actuals: Dict[str, Any], *, operation: str,
+) -> Dict[str, Any]:
+    """Bind actuals to the completion a terminal-time checkpoint pinned.
+
+    A breach at terminal finalization fired when the work was complete:
+    the pause begins at that completion and the answer clears exactly the
+    pinned extent. Every later write on that pause derives the clock to
+    the pinned completion — the wait for the answer lies outside the work
+    clock — so a supplied ``completed_at_utc`` that differs is refused.
+    """
+    pause = _current_pause(record)
+    pinned = pause.get("completed_at_utc") if pause.get("terminal_time") else None
+    if pinned is None:
+        return actuals
+    supplied = actuals.get("completed_at_utc")
+    if supplied is not None and supplied != pinned:
+        raise ValueError(
+            f"completed_at_utc {supplied} conflicts with the completion the "
+            f"terminal-time checkpoint pinned at {pinned} — omit it for "
+            f"{operation}: the wait for the clear lies outside the work clock, "
+            "and work after completion needs a fresh admission"
+        )
+    return dict(actuals, completed_at_utc=pinned)
+
+
+def _retire_answered_pause(result: Dict[str, Any], now_utc: Optional[str]) -> None:
+    """Move an answered scalar pause into ``pause_intervals`` before a new
+    checkpoint evaluation replaces the scalar pair.
+
+    Only a breached pause with a governing clear (``_effective_clear``, in
+    either representation) is retired; an unanswered or declined pause
+    stays the current pause. Retirement is idempotent on ``paused_at_utc``
+    and never edits a stored entry.
+    """
+    checkpoint = result.get("threshold_checkpoint")
+    if not isinstance(checkpoint, dict) or checkpoint.get("breached") is not True:
+        return
+    paused = checkpoint.get("paused_at_utc")
+    clear = _effective_clear(result)
+    if not paused or clear is None:
+        return
+    entries = result.setdefault("pause_intervals", [])
+    if not isinstance(entries, list):
+        raise ValueError("pause_intervals must be a list")
+    if any(isinstance(e, dict) and e.get("paused_at_utc") == paused for e in entries):
+        return
+    entries.append({
+        "paused_at_utc": paused,
+        "cleared_paused_at_utc": clear["cleared_paused_at_utc"],
+        "breached_fields": list(checkpoint.get("breached_fields") or []),
+        "channel": clear["channel"],
+        "decided_at_utc": clear["decided_at_utc"],
+        "recorded_at_utc": now_utc or utc_now_iso(),
+    })
+
+
 def _active_minutes(
     record: Dict[str, Any],
     started_at_utc: Any,
@@ -311,13 +509,16 @@ def _active_minutes(
 ) -> int:
     """Return active wall-clock minutes, rounded up to a whole minute.
 
-    A checkpoint may carry one re-authorization pause interval.  Peer-review
-    waits remain inside the wall clock.  A resolved pause excludes the
-    explicit ``paused_at_utc`` -> ``cleared_paused_at_utc`` interval; an
-    uncleared pause ends the active clock at ``paused_at_utc``. Attributed
-    clock adjustments are additional exclusions. Their union with the scalar
-    pause is subtracted in seconds, then rounded once; overlap never deducts
-    the same second twice.
+    A checkpoint carries one current re-authorization pause interval; the
+    answered pauses that later checkpoints replaced live in
+    ``result.pause_intervals``.  Peer-review waits remain inside the wall
+    clock.  A resolved pause excludes the explicit ``paused_at_utc`` ->
+    ``cleared_paused_at_utc`` interval, the clear taken from either answered
+    representation (``_effective_clear``); an uncleared pause ends the
+    active clock at ``paused_at_utc``. Attributed clock adjustments are additional
+    exclusions. The union of the scalar pause, the retired intervals and
+    the adjustments is subtracted in seconds, then rounded once; overlap
+    never deducts the same second twice.
     """
     started = _parse_utc(started_at_utc)
     completed = _parse_utc(completed_at_utc)
@@ -330,14 +531,11 @@ def _active_minutes(
         raise ValueError("completed_at_utc precedes work_started_at_utc")
 
     intervals = _adjustment_intervals(record, started_at_utc, completed_at_utc)
+    intervals.extend(_pause_intervals(record, started_at_utc, completed_at_utc))
     checkpoint = _checkpoint_block(record)
     paused_text = checkpoint.get("paused_at_utc")
-    reauthorization = checkpoint.get("reauthorization")
-    cleared_text = (
-        reauthorization.get("cleared_paused_at_utc")
-        if isinstance(reauthorization, dict)
-        else None
-    )
+    clear = _effective_clear(_result_block(record))
+    cleared_text = clear["cleared_paused_at_utc"] if clear else None
     if paused_text is not None:
         paused = _parse_utc(paused_text)
         cleared = completed if cleared_text is None else _parse_utc(cleared_text)
@@ -346,7 +544,17 @@ def _active_minutes(
                 "a re-authorization pause needs parseable paused_at_utc and, "
                 "when present, cleared_paused_at_utc timestamps"
             )
-        if not (started <= paused <= cleared <= completed):
+        if checkpoint.get("terminal_time") is True:
+            # The breach fired at terminal finalization: the pause begins
+            # at the recorded completion, and its clear may postdate it
+            # without adding work — clamp the exclusion to the endpoint.
+            if not (started <= paused <= completed):
+                raise ValueError(
+                    "a terminal-time pause must begin between work start and "
+                    "the recorded completion"
+                )
+            cleared = min(cleared, completed)
+        elif not (started <= paused <= cleared <= completed):
             raise ValueError(
                 "the re-authorization pause interval must fall within the "
                 "work-start to completion interval"
@@ -375,9 +583,11 @@ def _active_minutes(
 def _is_closed(record: Dict[str, Any]) -> bool:
     """A record is closed once it carries completion evidence.
 
-    ``final_state`` alone cannot answer this: auto-accepted records are
-    born ``done`` (conformance-pinned admission shape) with null actuals
-    and no completion stamp. ``error`` and ``cancelled`` close
+    The evidence is ``completed_at_utc``, which only terminal finalization
+    writes. An auto-accepted admission is born ``pending`` and stays open
+    until then; a ``done`` record with no completion stamp is a legacy
+    receipt born ``done`` under the pre-0.5.2 admission shape and is still
+    open to exactly one finalization. ``error`` and ``cancelled`` close
     unconditionally, as does ``superseded`` (authority transferred).
     """
     if _result_block(record).get("final_state") in {"superseded", "error", "cancelled"}:
@@ -449,16 +659,8 @@ def _checkpoint_resolved(record: Dict[str, Any]) -> bool:
     # clears it: the recorder refuses checkpoint records without a
     # paused_at_utc stamp, so a recorded outcome whose decision time is
     # not before the pause is a checkpoint answer, not the admission one.
-    outcome = _result_block(record).get("human_outcome")
-    if not isinstance(outcome, dict) or outcome.get("recorded") is not True:
-        return False
-    if outcome.get("decision") not in {"approved", "modified"}:
-        return False
-    decided = _parse_utc(outcome.get("decided_at_utc"))
-    paused = _parse_utc(checkpoint.get("paused_at_utc"))
-    if decided is None or paused is None:
-        return False
-    return decided >= paused
+    # The same resolver feeds the work clock and pause retirement.
+    return _effective_clear(_result_block(record)) is not None
 
 
 _EVALUATION_ID_RE = re.compile(r"^eval-[0-9a-f]{16}$")
@@ -535,6 +737,16 @@ def validate_audit_record(
             ))
 
     completed_at = result.get("completed_at_utc")
+    if decision == "auto_accepted" and state == "done" and not completed_at:
+        # The pre-0.5.2 evaluator wrote auto-accepted admissions born `done`
+        # with no completion stamp; `done` is now only ever the finalizer's
+        # stamped write, so this shape is a legacy receipt that was never
+        # finalized — flagged, never rewritten, still open to one finalize.
+        findings.append(_finding(
+            "legacy_born_done_unfinalized",
+            f"{source}: auto-accepted record born done with no "
+            "completed_at_utc — legacy admission shape, never finalized",
+        ))
     clock_endpoint = completed_at or (
         checkpoint.get("completed_at_utc") if "clock_adjustments" in result else None
     )
@@ -542,6 +754,10 @@ def validate_audit_record(
         _adjustment_intervals(record, result.get("work_started_at_utc"), clock_endpoint)
     except ValueError as exc:
         findings.append(_finding("invalid_clock_adjustments", f"{source}: {exc}"))
+    try:
+        _pause_intervals(record, result.get("work_started_at_utc"), clock_endpoint)
+    except ValueError as exc:
+        findings.append(_finding("invalid_pause_intervals", f"{source}: {exc}"))
     if state == "cancelled":
         findings.extend(
             _finding("invalid_cancellation", f"{source}: {detail}")
@@ -582,12 +798,23 @@ def validate_audit_record(
                     "human outcome",
                 ))
         if state == "done" and completed_at:
+            # In-flight work is `pending`, so a completed record without
+            # numeric actuals never recorded them. The canonical finalizer
+            # refuses that shape at write time; its marker on such a record
+            # is an integrity error, an unmarked one is a legacy receipt.
             for key in CANONICAL_NUMERIC_AXES:
                 value = result.get(key)
                 if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                     findings.append(_finding(
-                        "terminal_missing_actuals",
-                        f"{source}: completed record has no usable result.{key}",
+                        "canonical_writer_missing_actuals"
+                        if canonical_writer
+                        else "terminal_missing_actuals",
+                        f"{source}: completed record has no usable result.{key}"
+                        + (
+                            " despite claiming the canonical finalizer"
+                            if canonical_writer
+                            else " (legacy receipt; flag without rewriting history)"
+                        ),
                     ))
     elif state in LIVE_FINAL_STATES and completed_at:
         findings.append(_finding(
@@ -765,6 +992,41 @@ def validate_audit_record(
                 f"{sub_basis!r} cannot apply — " + "; ".join(misplaced),
             ))
 
+    continuation = record.get("continuation_grant")
+    if record.get("scope_envelope_source") == "continuation_grant" or (
+        decision == "auto_accepted" and isinstance(continuation, dict)
+        and continuation.get("decision") == "accepted"
+    ):
+        scope = continuation.get("scope") if isinstance(continuation, dict) else None
+        normalized, error = normalize_continuation_scope(scope)
+        envelope = record.get("scope_envelope")
+        invalid = (
+            error or not isinstance(envelope, dict)
+            or not isinstance(continuation, dict)
+            or continuation.get("decision") != "accepted"
+            or record.get("message_type") not in (normalized or {}).get("allowed_types", [])
+        )
+        if not invalid:
+            for field, cap in (("estimated_minutes", "max_actual_minutes"),
+                               ("expected_files_touched", "max_actual_files_touched")):
+                value = envelope.get(field)
+                invalid = invalid or not isinstance(value, int) or isinstance(value, bool)
+                if isinstance(value, int):
+                    invalid = invalid or value < 0 or value > normalized[cap]
+            for field in CONTINUATION_SIDE_EFFECT_FIELDS:
+                value = envelope.get(field, False)
+                invalid = invalid or not isinstance(value, bool) or (value and not normalized[field])
+            for field in LEGACY_PROFILE_BOOL_FIELDS:
+                value = envelope.get(field)
+                invalid = invalid or not isinstance(value, bool)
+                if field != "external_side_effects":
+                    invalid = invalid or value is True
+        if invalid:
+            findings.append(_finding(
+                "decision_kind_incoherent",
+                f"{source}: generic continuation lacks a valid accepted scope/envelope "
+                "or its envelope exceeds the grant",
+            ))
     outcome = result.get("human_outcome")
     if isinstance(outcome, dict) and outcome.get("recorded") is True:
         problems: List[str] = []
@@ -782,6 +1044,16 @@ def validate_audit_record(
         grant_decision = grant.get("decision") if isinstance(grant, dict) else None
         if grant_decision not in GRANT_DECISIONS | {"not_recorded"}:
             problems.append(f"grant.decision {grant_decision!r} off-enum")
+        granted_scope = grant.get("granted_scope") if isinstance(grant, dict) else None
+        # Old receipts remain readable historical evidence; only scopes
+        # claiming the new generic grammar are validated under that grammar.
+        if isinstance(granted_scope, dict) and any(
+            key in granted_scope
+            for key in ("allowed_types", "max_round", "expires_at_utc")
+        ):
+            _normalized, scope_error = normalize_continuation_scope(granted_scope)
+            if scope_error:
+                problems.append(f"grant.granted_scope invalid: {scope_error}")
         if problems:
             findings.append(_finding(
                 "invalid_human_outcome",
@@ -959,6 +1231,11 @@ def _build_actuals(
     requires_start = args.checkpoint or args.final_state in {"done", "error"}
     if requires_start:
         actuals = _require_work_start(
+            record,
+            actuals,
+            operation=("checkpoint" if args.checkpoint else "terminal finalization"),
+        )
+        actuals = _pin_terminal_completion(
             record,
             actuals,
             operation=("checkpoint" if args.checkpoint else "terminal finalization"),
@@ -1141,8 +1418,20 @@ def apply_checkpoint(
     now_utc: Optional[str] = None,
     allow_closed: bool = False,
     policy: Optional[Dict[str, Any]] = None,
+    terminal: bool = False,
 ) -> Tuple[Dict[str, Any], bool]:
     """Evaluate and record a §E checkpoint in place; return (record, paused).
+
+    ``terminal`` marks the evaluation terminal finalization runs against
+    the final actuals: a breach there is a terminal-time checkpoint, which
+    pins ``completed_at_utc`` at the breach (the pause begins at completion)
+    and stamps ``terminal_time`` on the block.
+
+    The pause stamp is written once, at the breach. Re-evaluating an
+    unanswered pause — a resumed ``--checkpoint`` presenting the answer —
+    reads the recorded ``paused_at_utc`` (and a terminal-time pause's pinned
+    completion); a supplied value that differs is refused. Only a new
+    breach after an answered pause stamps afresh.
 
     ``policy`` is the receiver's parsed admission policy, threaded into the
     checkpoint evaluation so sender_reply re-authorizations are arbitrated
@@ -1157,7 +1446,9 @@ def apply_checkpoint(
     not a receiver-composed value), ``final_state: paused``, and a
     ``paused_at_utc`` stamp. A breach arbitrated to ``resumed`` keeps the
     admission kind and run state, mirroring the evaluator's own resumed
-    decision shape. Admission-time fields (decision, reason_codes,
+    decision shape. A prior pause that was already answered is retired
+    into ``result.pause_intervals`` before the new evaluation replaces the
+    scalar pair, so every cleared pause keeps excluding its interval. Admission-time fields (decision, reason_codes,
     co_occurring_reason_codes, admission_axes, breached) stay untouched as
     history — checkpoint reasons live in ``result.threshold_checkpoint``
     and never replace admission reasons.
@@ -1175,6 +1466,33 @@ def apply_checkpoint(
             "a checkpoint cannot reopen terminal state"
         )
     actuals = dict(actuals)
+    current = _current_pause(record)
+    if current and current["cleared_paused_at_utc"] is None:
+        # Stamp-once: the unanswered pause keeps its breach moment across
+        # re-evaluation; the answer clears that pause, not a re-stamped one.
+        supplied = actuals.get("paused_at_utc")
+        if supplied is not None and supplied != current["paused_at_utc"]:
+            raise ValueError(
+                f"paused_at_utc {supplied} conflicts with the pause already "
+                f"stamped at {current['paused_at_utc']} — the stamp is written "
+                "once at the breach; omit it to re-evaluate that pause"
+            )
+        actuals["paused_at_utc"] = current["paused_at_utc"]
+        actuals = _pin_terminal_completion(record, actuals, operation="checkpoint")
+    elif current.get("terminal_time") and not terminal:
+        raise ValueError(
+            "the terminal-time checkpoint pinned completion at "
+            f"{current['completed_at_utc']} and its pause is answered; a "
+            "checkpoint cannot extend work past its recorded completion — "
+            "finalize the record (or cancel it)"
+        )
+    elif terminal:
+        # A breach here fires when the work is complete: the pause begins
+        # at the measured completion, which the block pins (a closed record
+        # under --replace keeps its recorded completion).
+        recorded = _result_block(record).get("completed_at_utc") if allow_closed else None
+        actuals.setdefault("completed_at_utc", recorded or now_utc or utc_now_iso())
+        actuals.setdefault("paused_at_utc", actuals["completed_at_utc"])
     has_adjustments = (
         "clock_adjustments" in actuals or "clock_adjustments" in _result_block(record)
     )
@@ -1187,6 +1505,10 @@ def apply_checkpoint(
         raise ValueError(
             "record carries no scope_envelope; nothing to checkpoint against"
         )
+    # The evaluation below replaces the scalar pause pair; an answered pause
+    # is retired first so the clock keeps excluding it (an unanswered one
+    # stays current).
+    _retire_answered_pause(updated.setdefault("result", {}), now_utc)
     actuals = _require_work_start(record, actuals, operation="checkpoint")
     if has_adjustments:
         derived_minutes = _active_minutes(
@@ -1209,6 +1531,11 @@ def apply_checkpoint(
             checkpoint["paused_at_utc"] = now_utc or utc_now_iso()
         result["completion_kind"] = "checkpoint_paused"
         result["final_state"] = "paused"
+    if breached and (terminal or current.get("terminal_time")):
+        # The marker follows the pause it describes: stamped at a
+        # terminal-time breach, carried across the re-evaluation that
+        # answers it.
+        checkpoint["terminal_time"] = True
     result["threshold_checkpoint"] = checkpoint
     result["actual_minutes"] = checkpoint.get("actual_minutes")
     result["actual_files_touched"] = checkpoint.get("actual_files_touched")
@@ -1432,6 +1759,14 @@ def finalize_audit_record(
 
     if final_state == "superseded" and "clock_adjustments" in actuals:
         raise ValueError("supersession preserves history; it cannot add clock adjustments")
+    if final_state in {"done", "error"}:
+        # Bind to the completion a terminal-time checkpoint pinned before
+        # anything reads the endpoint: the adjustment-interval validation and
+        # the derived clock below both consume it, so a caller that omits the
+        # completion (as documented) lands on the pin rather than on now.
+        actuals = _pin_terminal_completion(
+            record, actuals, operation="terminal finalization"
+        )
     updated = copy.deepcopy(record) if final_state == "superseded" else _with_clock_adjustments(record, actuals)
     if final_state != "superseded" and "clock_adjustments" in _result_block(updated):
         started = actuals.get("work_started_at_utc") or result.get("work_started_at_utc")
@@ -1475,7 +1810,7 @@ def finalize_audit_record(
             # depends on which receiver wrote the record.
             updated, checkpoint_paused = apply_checkpoint(
                 updated, actuals, now_utc=now_utc, allow_closed=replace,
-                policy=policy,
+                policy=policy, terminal=True,
             )
             if checkpoint_paused:
                 return updated, True
@@ -1630,7 +1965,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument(
         "--realized",
         action="append",
-        choices=sorted(COVERABLE_CONTINUATION_FIELDS),
+        choices=sorted(CONTINUATION_SIDE_EFFECT_FIELDS),
         help="side effect actually performed (repeatable)",
     )
     parser.add_argument("--reply-message-id")

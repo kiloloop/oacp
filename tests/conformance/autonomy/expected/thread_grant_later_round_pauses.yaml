@@ -1,0 +1,18 @@
+case: thread_grant_later_round_pauses
+config: configs/auto_review_continuation_enabled.yaml
+message: messages/thread_grant_round4.yaml
+audits:
+- audits/prior_generic_grant_approved.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+  - continuation_grant_round_exceeded
+  result:
+    final_state: paused
+    completion_kind: admission_paused
+  continuation_grant:
+    decision: round_exceeded
+    effective_round: 4
+    standing_grant_found: true
+now: '2026-05-26T12:30:00Z'

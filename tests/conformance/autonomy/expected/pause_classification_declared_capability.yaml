@@ -1,0 +1,15 @@
+case: pause_classification_declared_capability
+config: configs/auto_review_standard.yaml
+message: messages/pause_classification_declared_capability.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - dependency_changes_pause
+  pause_classification: designed
+  expected_pause_codes:
+    - dependency_changes_pause
+  unplanned_pause_codes: []
+  logged_notes:
+    - code: lexical_advisory_declared
+      matched_pattern: install dependency

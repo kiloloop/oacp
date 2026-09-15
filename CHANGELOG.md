@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-09-15
+
+### Added
+
+- Every cleared checkpoint pause is excluded from recorded work time ([contract](docs/protocol/autonomy.md#threshold-exceeded-checkpoint)).
+- `oacp doctor` advises on records born `done` but never finalized ([run state](docs/protocol/autonomy.md#terminal-finalization-and-audit-integrity)).
+
+### Changed
+
+- Protocol contract stamp `spec_version` moves to `0.5.2` ([contract version](docs/protocol/autonomy.md#contract-version)).
+- Handoff-body schema failures become advisories, not rejections ([validation boundary](docs/protocol/inbox_outbox.md#validation-boundary)).
+- Task and review continuations share one bounded generic thread grant ([continuation grants](docs/protocol/autonomy.md#continuation-grants)).
+- Legacy review-continuation grant scopes need fresh human approval ([continuation grants](docs/protocol/autonomy.md#continuation-grants)).
+- A terminal-time checkpoint pins completion at the breach ([checkpoint](docs/protocol/autonomy.md#terminal-finalization-and-audit-integrity)).
+- Auto-accepted records are born `pending`; finalize writes `done` ([run state](docs/protocol/autonomy.md#terminal-finalization-and-audit-integrity)).
+- A `done` record sanctions `oacp envelope clear` only with a completion stamp ([completion clear](docs/protocol/autonomy.md#completion-clear)).
+- Dependency, credential, and auth/config wording demotes to the declared flag's own pause ([Gate 3](docs/protocol/autonomy.md#four-gate-evaluator)).
+- The `oacp memory`/`org-memory` shims and the write-event fallback stay through 0.5.2; removal moves to 0.5.3 ([README](README.md#commands)).
+
+### Fixed
+
+- Resuming an unanswered checkpoint keeps its original pause time ([contract](docs/protocol/autonomy.md#threshold-exceeded-checkpoint)).
+
 ## [0.5.1] - 2026-09-11
 
 ### Added
@@ -889,6 +912,7 @@ The central debrief store is the headline change: every agent's full end-of-sess
 - Checkout step in github-release workflow job (#19)
 - Pre-release audit fixes: SHA-pinned actions, dangling doc refs (#15, #16)
 
+[0.5.2]: https://github.com/kiloloop/oacp/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/kiloloop/oacp/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/kiloloop/oacp/compare/v0.4.6...v0.5.0
 [0.4.6]: https://github.com/kiloloop/oacp/compare/v0.4.5...v0.4.6

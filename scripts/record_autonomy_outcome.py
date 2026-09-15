@@ -255,16 +255,17 @@ def build_human_outcome(
 def _completion_evidence(audit: Dict[str, Any]) -> Optional[str]:
     """Name the evidence closing this record, or None while it is live.
 
-    Mirrors the finalizer's closed-record test, with the terminal
-    ``final_state`` values added: a checkpoint-paused record awaiting a
-    clear is always ``pending``/``paused``, so any terminal state here
-    means the record was finalized and is historical evidence now.
+    Mirrors the finalizer's closed-record test: ``error``, ``superseded``
+    and ``cancelled`` close unconditionally, and otherwise the evidence is
+    the ``completed_at_utc`` stamp that only terminal finalization writes.
+    A ``done`` with no stamp is a pre-0.5.2 receipt that was never
+    finalized — still live, still open to exactly one finalization.
     """
     result = audit.get("result")
     if not isinstance(result, dict):
         return None
     final_state = result.get("final_state")
-    if final_state in {"done", "error", "superseded", "cancelled"}:
+    if final_state in {"error", "superseded", "cancelled"}:
         return f"final_state {final_state!r}"
     if result.get("completed_at_utc"):
         return f"completed_at_utc {result.get('completed_at_utc')!r}"

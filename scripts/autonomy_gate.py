@@ -113,7 +113,12 @@ DECLARED_RISK_REASONS = (
     ("public_visibility", "public_visibility_pause"),
 )
 
-FINAL_STATES = {"done", "paused", "blocked", "superseded", "error", "cancelled"}
+# `pending` is the birth state of every auto-accepted admission: the evaluator
+# writes it, and the receiver's terminal finalization moves the record to
+# `done` (or `error` / `cancelled`). The evaluator never writes `done`.
+FINAL_STATES = {
+    "pending", "done", "paused", "blocked", "superseded", "error", "cancelled",
+}
 # `result.completion_kind` names the terminal shape of the EVALUATION only —
 # one axis, enumerated. The pause cause lives in `reason_codes` (already
 # pinned), the run state in `result.final_state`, and human decisions in
@@ -162,110 +167,108 @@ REVIEW_LIFECYCLE_TYPES = (
     "review_addressed",
     "review_lgtm",
 )
-REVIEW_CONTINUATION_GRANTABLE_TYPES = frozenset({
-    "review_request",
-    "review_addressed",
-})
-# Side effects a granted review invocation may produce. This is the review
-# surface's own vocabulary — a review round never commits, merges, or files
-# issues, so the task-side COVERABLE_CONTINUATION_FIELDS do not apply here.
-REVIEW_SIDE_EFFECT_FIELDS = (
+CONTINUATION_GRANTABLE_TYPES = frozenset(
+    {
+        "task_request",
+        "question",
+        "brainstorm_request",
+        "brainstorm_followup",
+        "handoff",
+        "review_request",
+        "review_addressed",
+    }
+)
+# One vocabulary for granted effects, declarations and measured actuals.
+# These additions do not expand sender-grantable boundary actions.
+CONTINUATION_SIDE_EFFECT_FIELDS = (
+    *COVERABLE_CONTINUATION_FIELDS,
     "writes_findings_packet",
     "sends_oacp_reply",
-    "comments_on_github",
     "submits_github_review",
 )
-# The review side effects a round performs when the request declares none:
-# every reviewer invocation writes a findings packet and answers on the
-# OACP channel. Anything beyond that must be requested and granted.
 DEFAULT_REVIEW_SIDE_EFFECTS = ("writes_findings_packet", "sends_oacp_reply")
-PINNED_REASON_CODES = frozenset({
-    "auth_config_or_secrets_pause",
-    "checkpoint_reauthorization_stale",
-    "checkpoint_reauthorized",
-    "comments_on_github_invalid",
-    "comments_on_github_pause",
-    "commits_changes_invalid",
-    "commits_changes_pause",
-    "config_malformed",
-    "continuation_grant_accepted",
-    "continuation_grant_denied",
-    "continuation_grant_ignored_disabled",
-    "continuation_grant_missing_approval",
-    "continuation_grant_missing_scope",
-    "continuation_grant_missing_thread",
-    "continuation_grant_scope_exceeded",
-    "creates_or_updates_pr_invalid",
-    "creates_or_updates_pr_pause",
-    "declaration_error",
-    "dependency_changes_pause",
-    "destructive_ops_pause",
-    "envelope_compile_error",
-    "estimated_minutes_exceeds_threshold",
-    "expected_files_touched_exceeds_threshold",
-    "external_side_effects_not_pr_artifact",
-    "external_side_effects_pause",
-    "file_scope_ambiguous",
-    "files_issues_invalid",
-    "files_issues_pause",
-    "hard_stop_content_sensitivity",
-    "hard_stop_destructive_command",
-    "hard_stop_external_side_effect",
-    "hard_stop_sensitive_scope",
-    "hard_stops_clear",
-    "lexical_advisory",
-    "max_actual_files_touched_invalid",
-    "max_actual_minutes_invalid",
-    "merges_pr_invalid",
-    "merges_pr_pause",
-    "message_expired",
-    "message_hash_recorded",
-    "message_invalid",
-    "message_not_expired",
-    "message_replayed",
-    "message_valid",
-    "mode_always_pause",
-    "policy_auth_invalid",
-    "public_visibility_pause",
-    "review_continuation_accepted",
-    "review_continuation_confirmation_required",
-    "review_continuation_context_only",
-    "review_continuation_expired",
-    "review_continuation_head_mismatch",
-    "review_continuation_ignored_disabled",
-    "review_continuation_missing_approval",
-    "review_continuation_revoked",
-    "review_continuation_round_exceeded",
-    "review_continuation_scope_exceeded",
-    "review_loop_invalid",
-    "risk_obvious_no_profile",
-    "risk_threshold_passed",
-    "task_profile_missing",
-    "task_profile_not_required",
-    "task_profile_present",
-    "task_profile_unparsable",
-    "task_type_allowed",
-    "threshold_checkpoint_breached",
-    "workspace_check_required",
-})
+PINNED_REASON_CODES = frozenset(
+    {
+        "auth_config_or_secrets_pause",
+        "checkpoint_reauthorization_stale",
+        "checkpoint_reauthorized",
+        "comments_on_github_invalid",
+        "comments_on_github_pause",
+        "commits_changes_invalid",
+        "commits_changes_pause",
+        "config_malformed",
+        "continuation_grant_accepted",
+        "continuation_grant_denied",
+        "continuation_grant_ignored_disabled",
+        "continuation_grant_missing_approval",
+        "continuation_grant_missing_scope",
+        "continuation_grant_missing_thread",
+        "continuation_grant_scope_exceeded",
+        "continuation_grant_type_not_granted",
+        "continuation_grant_round_exceeded",
+        "continuation_grant_expired",
+        "continuation_grant_revoked",
+        "creates_or_updates_pr_invalid",
+        "creates_or_updates_pr_pause",
+        "declaration_error",
+        "dependency_changes_pause",
+        "destructive_ops_pause",
+        "envelope_compile_error",
+        "estimated_minutes_exceeds_threshold",
+        "expected_files_touched_exceeds_threshold",
+        "external_side_effects_not_pr_artifact",
+        "external_side_effects_pause",
+        "file_scope_ambiguous",
+        "files_issues_invalid",
+        "files_issues_pause",
+        "hard_stop_content_sensitivity",
+        "hard_stop_destructive_command",
+        "hard_stop_external_side_effect",
+        "hard_stop_sensitive_scope",
+        "hard_stops_clear",
+        "lexical_advisory",
+        "max_actual_files_touched_invalid",
+        "max_actual_minutes_invalid",
+        "merges_pr_invalid",
+        "merges_pr_pause",
+        "message_expired",
+        "message_hash_recorded",
+        "message_invalid",
+        "message_not_expired",
+        "message_replayed",
+        "message_valid",
+        "mode_always_pause",
+        "policy_auth_invalid",
+        "public_visibility_pause",
+        "risk_obvious_no_profile",
+        "risk_threshold_passed",
+        "task_profile_missing",
+        "task_profile_not_required",
+        "task_profile_present",
+        "task_profile_unparsable",
+        "task_type_allowed",
+        "threshold_checkpoint_breached",
+        "workspace_check_required",
+    }
+)
 # Success and advisory evidence belongs in reason_codes but never names a
 # fired pause, even if a caller records that evidence alongside a blocker.
-PAUSE_REASON_CODES = PINNED_REASON_CODES - frozenset({
-    "checkpoint_reauthorized",
-    "continuation_grant_accepted",
-    "hard_stops_clear",
-    "lexical_advisory",
-    "message_hash_recorded",
-    "message_not_expired",
-    "message_valid",
-    "review_continuation_accepted",
-    "review_continuation_head_mismatch",
-    "risk_threshold_passed",
-    "task_profile_not_required",
-    "task_profile_present",
-    "task_type_allowed",
-    "workspace_check_required",
-})
+PAUSE_REASON_CODES = PINNED_REASON_CODES - frozenset(
+    {
+        "checkpoint_reauthorized",
+        "continuation_grant_accepted",
+        "hard_stops_clear",
+        "lexical_advisory",
+        "message_hash_recorded",
+        "message_not_expired",
+        "message_valid",
+        "risk_threshold_passed",
+        "task_profile_not_required",
+        "task_profile_present",
+        "task_type_allowed",
+        "workspace_check_required",
+    }
+)
 
 GUARDRAILS_FENCE_RE = re.compile(
     r"(?ms)^[ \t]*```oacp-guardrails[ \t]*\n"
@@ -340,6 +343,16 @@ NON_DEMOTABLE_SIDE_EFFECT_PATTERNS = (
         "install dependency",
         INSTALL_DEPENDENCY_RE,
     ),
+)
+
+# The declared-capability partner of each non-demotable side-effect label. A
+# match on a partnered label demotes to the partner flag's own granular
+# admission pause when a complete, non-contradictory profile declares the
+# flag `true`; the direct default-branch push label has no partner and stays
+# hard on every profile shape.
+DECLARED_CAPABILITY_PARTNERS = (
+    ("install dependency", "touches_dependencies"),
+    ("rotate credentials", "touches_auth_config_or_secrets"),
 )
 
 DECLARATION_AWARE_SENSITIVE_PATTERNS = (
@@ -600,25 +613,14 @@ def write_audit_record(
             f"{completion_kind!r} is not a pinned completion kind "
             f"({', '.join(sorted(PINNED_COMPLETION_KINDS))})"
         )
-    if decision.get("decision") == "auto_accepted" and decision.get("scope_envelope") is None:
-        # An admitted decision always carries a bound: profiled admissions
-        # envelope from the profile, profileless admissions from the
-        # documented default, and review-loop continuations the granted
-        # review_loop scope. Null-on-admitted with no bound at all is a
-        # schema violation, not a persistable state.
-        review_block = decision.get("review_continuation")
-        review_bound = (
-            isinstance(review_block, dict)
-            and review_block.get("decision") == "accepted"
-            and isinstance(review_block.get("scope"), dict)
+    if (
+        decision.get("decision") == "auto_accepted"
+        and decision.get("scope_envelope") is None
+    ):
+        raise ValueError(
+            "refusing to write audit record: an admitted decision must "
+            "carry a scope bound in scope_envelope (schema violation)"
         )
-        if not review_bound:
-            raise ValueError(
-                "refusing to write audit record: an admitted decision must "
-                "carry a scope bound — a task scope_envelope or an accepted "
-                "review_continuation scope (null with neither is a schema "
-                "violation)"
-            )
     audit_dir.mkdir(parents=True, exist_ok=True)
     created_at = utc_now_iso(now_utc)
     autonomy = config.get("autonomy")
@@ -1007,6 +1009,37 @@ def _profile_is_complete(profile: Optional[Dict[str, Any]]) -> bool:
     return isinstance(profile, dict) and all(key in profile for key in COMPLETE_PROFILE_FIELDS)
 
 
+def _declared_capability_governs(
+    profile: Optional[Dict[str, Any]],
+    envelope: Optional[Dict[str, Any]],
+    field: str,
+) -> bool:
+    """True when a complete, non-contradictory profile declares ``field`` true.
+
+    That declaration routes the matching lexical class to the flag's own
+    granular admission pause instead of a hard stop. A declared ``false``,
+    a missing, unparsable, or contradictory profile, and the profileless
+    default envelope never qualify.
+    """
+    if not _profile_is_complete(profile) or envelope is None:
+        return False
+    if _profile_declaration_errors(envelope):
+        return False
+    return bool(envelope.get(field))
+
+
+def _declared_capability_labels(
+    profile: Optional[Dict[str, Any]],
+    envelope: Optional[Dict[str, Any]],
+) -> FrozenSet[str]:
+    """Non-demotable labels whose declared partner capability governs."""
+    return frozenset(
+        label
+        for label, field in DECLARED_CAPABILITY_PARTNERS
+        if _declared_capability_governs(profile, envelope, field)
+    )
+
+
 # Every side-effect flag other than `sends_oacp_reply_only`: the legacy
 # aggregate plus each granular capability. All must be false for a profile
 # to have the reply-only shape.
@@ -1216,6 +1249,7 @@ def _collect_lexical_provenance(
     if isinstance(policy, dict) and isinstance(policy.get("thresholds"), dict):
         external_policy = policy["thresholds"].get("external_side_effects")
     content_reply_only = _reply_only_profile_shape(profile, envelope)
+    declared_labels = _declared_capability_labels(profile, envelope)
     profileless_type = (
         profile is None
         and isinstance(policy, dict)
@@ -1258,7 +1292,10 @@ def _collect_lexical_provenance(
         if category == "non_demotable_side_effect":
             if profileless_risk:
                 return "profileless_risk"
-            return _contextual_non_demotable_basis(label, body, match)
+            contextual = _contextual_non_demotable_basis(label, body, match)
+            if contextual == "non_demotable" and label in declared_labels:
+                return "profile_true"
+            return contextual
         if category == "sensitive_scope":
             if fenced:
                 return "guardrails_fence"
@@ -1271,6 +1308,10 @@ def _collect_lexical_provenance(
                 and not envelope[profile_field]
             ):
                 return "profile_false"
+            if profile_field is not None and _declared_capability_governs(
+                profile, envelope, profile_field
+            ):
+                return "profile_true"
             return "affirmative"
         if category == "content_sensitivity":
             return "reply_only_advisory" if content_reply_only else "non_demotable"
@@ -1390,8 +1431,15 @@ def _first_contextual_non_demotable_match(
     notes: List[Dict[str, str]],
     *,
     contextual_labels: FrozenSet[str],
+    declared_labels: FrozenSet[str] = frozenset(),
 ) -> Optional[str]:
-    """Keep a class hard while demoting only documented contextual matches."""
+    """Keep a class hard while demoting only documented contextual matches.
+
+    ``declared_labels`` are the labels whose declared partner capability
+    governs (see ``_declared_capability_labels``): an affirmative match on
+    one records a ``lexical_advisory_declared`` note and falls through to
+    the partner flag's own admission pause instead of the hard stop.
+    """
     for label, pattern in patterns:
         for match in pattern.finditer(body):
             if label in contextual_labels:
@@ -1404,6 +1452,9 @@ def _first_contextual_non_demotable_match(
                         notes, "lexical_advisory_reference_only", label
                     )
                     continue
+            if label in declared_labels:
+                _record_lexical_note(notes, "lexical_advisory_declared", label)
+                continue
             return label
     return None
 
@@ -1421,6 +1472,12 @@ def _first_sensitive_match(
                 _record_lexical_note(notes, "lexical_advisory_negated", label)
                 continue
             if profile_complete and envelope is not None and not envelope[profile_field]:
+                _record_lexical_note(notes, "lexical_advisory_declared", label)
+                continue
+            if _declared_capability_governs(profile, envelope, profile_field):
+                # The declared flag governs: the match records as an
+                # advisory and the flag's own admission pause carries the
+                # verdict at Gate 2.
                 _record_lexical_note(notes, "lexical_advisory_declared", label)
                 continue
             return label
@@ -1628,7 +1685,7 @@ def _supersede_audit_record_locked(
         raise ValueError(f"{audit_path}: result must be a mapping")
     if result.get("final_state") == "superseded":
         return
-    if result.get("final_state") not in FINAL_STATES | {"pending"}:
+    if result.get("final_state") not in FINAL_STATES:
         # Preserve legacy off-enum run state as history before the
         # overwrite — the original value is part of what supersession
         # documents.
@@ -1939,229 +1996,300 @@ def obvious_no_profile_risk(body: str) -> bool:
     return first_match(patterns, body) is not None
 
 
-def normalize_review_loop_scope(
-    block: Any,
+def normalize_continuation_scope(
+    scope: Any,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Normalize a grant scope's ``review_loop`` sub-block.
+    """Normalize one complete bounded grant, never discard restrictions.
 
-    Every bound is explicit: the repository and PR pin the thread's subject,
-    ``allowed_types`` pins which inbound lifecycle types may trigger a round,
-    ``max_round`` and ``expires_at_utc`` bound depth and wall clock, and
-    ``permitted_side_effects`` pins what the granted invocation may produce.
-    A malformed block invalidates the whole grant surface — a partially
-    understood authority is never honored.
+    Legacy scopes (including the retired review sub-block) need fresh human
+    approval. Ignoring unknown restrictions would broaden their authority.
     """
-    if not isinstance(block, dict):
-        return None, "review_loop_invalid"
-    repository = block.get("repository")
-    if not isinstance(repository, str) or not REPO_SLUG_RE.fullmatch(repository):
-        return None, "review_loop_invalid"
-    pr_number = block.get("pr_number")
-    if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number < 1:
-        return None, "review_loop_invalid"
-    allowed = block.get("allowed_types")
+    required = {
+        "allowed_types",
+        "max_round",
+        "expires_at_utc",
+        "max_actual_minutes",
+        "max_actual_files_touched",
+    }
+    if not isinstance(scope, dict) or set(scope) - (
+        required | set(CONTINUATION_SIDE_EFFECT_FIELDS)
+    ):
+        return None, "continuation_grant_missing_scope"
+    normalized: Dict[str, Any] = {}
+    for key in ("max_actual_minutes", "max_actual_files_touched"):
+        value = scope.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return None, f"{key}_invalid"
+        normalized[key] = value
+    allowed = scope.get("allowed_types")
+    max_round = scope.get("max_round")
+    expires = scope.get("expires_at_utc")
     if (
         not isinstance(allowed, list)
         or not allowed
         or any(
-            not isinstance(item, str)
-            or item not in REVIEW_CONTINUATION_GRANTABLE_TYPES
-            for item in allowed
+            not isinstance(t, str) or t not in CONTINUATION_GRANTABLE_TYPES
+            for t in allowed
         )
+        or not isinstance(max_round, int)
+        or isinstance(max_round, bool)
+        or max_round < 1
+        or not isinstance(expires, str)
     ):
-        return None, "review_loop_invalid"
-    max_round = block.get("max_round")
-    if not isinstance(max_round, int) or isinstance(max_round, bool) or max_round < 1:
-        return None, "review_loop_invalid"
-    expires = block.get("expires_at_utc")
-    if not isinstance(expires, str):
-        return None, "review_loop_invalid"
-    try:
-        dt.datetime.strptime(expires, "%Y-%m-%dT%H:%M:%SZ")
-    except ValueError:
-        return None, "review_loop_invalid"
-    effects_in = block.get("permitted_side_effects", {})
-    if effects_in is None:
-        effects_in = {}
-    if not isinstance(effects_in, dict) or any(
-        key not in REVIEW_SIDE_EFFECT_FIELDS for key in effects_in
-    ):
-        return None, "review_loop_invalid"
-    effects: Dict[str, bool] = {}
-    for key in REVIEW_SIDE_EFFECT_FIELDS:
-        value = effects_in.get(key, False)
-        if not isinstance(value, bool):
-            return None, "review_loop_invalid"
-        effects[key] = value
-    return {
-        "repository": repository.lower(),
-        "pr_number": pr_number,
-        "allowed_types": sorted(set(allowed)),
-        "max_round": max_round,
-        "expires_at_utc": expires,
-        "permitted_side_effects": effects,
-    }, None
-
-
-def normalize_continuation_scope(
-    scope: Any,
-) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    if not isinstance(scope, dict):
         return None, "continuation_grant_missing_scope"
-
-    normalized: Dict[str, Any] = {}
-    has_review_loop = "review_loop" in scope
-    for key in ("max_actual_minutes", "max_actual_files_touched"):
-        value = scope.get(key)
-        if value is None and has_review_loop:
-            # A review-only grant may omit the task budget keys; they
-            # default to zero so the grant carries no task-continuation
-            # authority (any task follow-up breaches immediately).
-            normalized[key] = 0
-            continue
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            return None, f"{key}_invalid"
-        normalized[key] = value
-    for key in COVERABLE_CONTINUATION_FIELDS:
+    try:
+        _parse_utc_z(expires)
+    except ValueError:
+        return None, "continuation_grant_missing_scope"
+    normalized.update(
+        allowed_types=sorted(set(allowed)), max_round=max_round, expires_at_utc=expires
+    )
+    for key in CONTINUATION_SIDE_EFFECT_FIELDS:
         value = scope.get(key, False)
         if not isinstance(value, bool):
-            return None, f"{key}_invalid"
+            return None, (
+                f"{key}_invalid"
+                if key in COVERABLE_CONTINUATION_FIELDS
+                else "continuation_grant_missing_scope"
+            )
         normalized[key] = value
-    if has_review_loop:
-        review_scope, error = normalize_review_loop_scope(scope.get("review_loop"))
-        if error:
-            return None, error
-        normalized["review_loop"] = review_scope
     return normalized, None
-
-
-def _grant_scope(
-    grant: Dict[str, Any],
-) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    return normalize_continuation_scope(grant.get("scope"))
 
 
 def _audit_thread_matches(message: Dict[str, Any], audit: Dict[str, Any]) -> bool:
     sender = str(message.get("from") or "").strip()
-    audit_sender = str(audit.get("sender") or "").strip()
-    if not sender or audit_sender != sender:
+    if not sender or str(audit.get("sender") or "").strip() != sender:
         return False
+    conversation = str(message.get("conversation_id") or "").strip()
+    parent = str(message.get("parent_message_id") or "").strip()
+    return bool(
+        (
+            conversation
+            and conversation == str(audit.get("conversation_id") or "").strip()
+        )
+        or (parent and audit.get("message_id") == parent)
+    )
 
-    conversation_id = str(message.get("conversation_id") or "").strip()
-    parent_message_id = str(message.get("parent_message_id") or "").strip()
-    audit_conversation_id = str(audit.get("conversation_id") or "").strip()
 
-    if conversation_id and audit_conversation_id == conversation_id:
-        return True
-    return bool(parent_message_id and audit.get("message_id") == parent_message_id)
+def _aware_utc(value: Optional[dt.datetime]) -> dt.datetime:
+    now = value if value is not None else dt.datetime.now(dt.timezone.utc)
+    if now.tzinfo is None:
+        return now.replace(tzinfo=dt.timezone.utc)
+    return now.astimezone(dt.timezone.utc)
+
+
+def _parse_utc_z(text: str) -> dt.datetime:
+    parsed = dt.datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ")
+    if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != text:
+        raise ValueError("UTC timestamp must use YYYY-MM-DDTHH:MM:SSZ")
+    return parsed.replace(tzinfo=dt.timezone.utc)
+
+
+def _audit_consumed_round(audit: Dict[str, Any], now: dt.datetime) -> bool:
+    """Only authorized work with receiver-owned execution evidence counts."""
+    result = audit.get("result")
+    if not isinstance(result, dict) or result.get("final_state") == "superseded":
+        return False
+    continuation = audit.get("continuation_grant")
+    if (
+        isinstance(continuation, dict)
+        and continuation.get("decision") == "context_only"
+    ):
+        return False
+    outcome = result.get("human_outcome") or {}
+    authorized = audit.get("decision") == "auto_accepted" or (
+        isinstance(outcome, dict)
+        and outcome.get("recorded") is True
+        and outcome.get("decision") in {"approved", "modified"}
+    )
+    if not authorized or audit.get("message_type") not in CONTINUATION_GRANTABLE_TYPES:
+        return False
+    if audit.get("decision") != "auto_accepted":
+        try:
+            if _parse_utc_z(outcome.get("decided_at_utc")) > now:
+                return False
+        except (ValueError, TypeError):
+            return False
+    started = result.get("work_started_at_utc")
+    if started is not None:
+        try:
+            return _parse_utc_z(started) <= now
+        except (ValueError, TypeError):
+            return False
+    # Older canonical terminal receipts recorded measured work without a
+    # start stamp. Merely approving or auto-admitting a pending request is
+    # not proof that its invocation ran.
+    completed = result.get("completed_at_utc")
+    if completed is not None:
+        try:
+            if _parse_utc_z(completed) > now:
+                return False
+        except (ValueError, TypeError):
+            return False
+        if result.get("final_state") == "done":
+            return True
+    return any(
+        isinstance(result.get(k), int)
+        and not isinstance(result[k], bool)
+        and result[k] >= 0
+        for k in ("actual_minutes", "actual_files_touched")
+    )
 
 
 def _prior_thread_grant(
     message: Dict[str, Any],
     audit_dir: Optional[Path],
     receiver: str,
-) -> Optional[Dict[str, Any]]:
+    now_utc: Optional[dt.datetime] = None,
+) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Approvals predate messages; denials revoke at evaluation, winning ties."""
     if audit_dir is None or not audit_dir.is_dir():
-        return None
-
-    candidates: List[Tuple[str, str, Dict[str, Any]]] = []
-    current_message_id = str(message.get("id") or "")
-    message_created_at = dt.datetime.strptime(
-        str(message.get("created_at_utc") or ""),
-        "%Y-%m-%dT%H:%M:%SZ",
-    )
-    for audit_path in audit_dir.glob("*.yaml"):
+        return None, []
+    approvals: List[Tuple[str, str, Dict[str, Any]]] = []
+    denials: List[Tuple[str, str, Dict[str, Any]]] = []
+    invoked: Dict[str, Dict[str, Any]] = {}
+    created = _parse_utc_z(str(message.get("created_at_utc") or ""))
+    now = _aware_utc(now_utc)
+    for path in sorted(audit_dir.glob("*.yaml")):
         try:
-            audit = yaml.safe_load(audit_path.read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError):
+            audit = load_yaml_strict(path)
+        except (OSError, ValueError, yaml.YAMLError):
             continue
-        if not isinstance(audit, dict):
+        if (
+            not isinstance(audit, dict)
+            or audit.get("schema_version") != AUTONOMY_AUDIT_SCHEMA_VERSION
+            or audit.get("receiver") != receiver
+            or audit.get("message_id") == message.get("id")
+            or not _audit_thread_matches(message, audit)
+        ):
             continue
-        if audit.get("schema_version") != AUTONOMY_AUDIT_SCHEMA_VERSION:
-            continue
-        if audit.get("receiver") != receiver:
-            continue
-        if audit.get("decision") != "paused":
-            continue
-        if audit.get("message_id") == current_message_id:
-            continue
-        if not _audit_thread_matches(message, audit):
-            continue
-
+        stamp = audit.get("created_at_utc")
+        if stamp is not None:
+            try:
+                if _parse_utc_z(stamp) > now:
+                    continue
+            except (ValueError, TypeError):
+                continue
         result = audit.get("result")
-        outcome = result.get("human_outcome") if isinstance(result, dict) else None
-        grant = outcome.get("grant") if isinstance(outcome, dict) else None
+        if not isinstance(result, dict) or result.get("final_state") == "superseded":
+            continue
+        identity = audit.get("message_id")
+        if isinstance(identity, str) and identity and _audit_consumed_round(audit, now):
+            invoked[identity] = audit
+        outcome = result.get("human_outcome")
         if not isinstance(outcome, dict) or outcome.get("recorded") is not True:
             continue
-        if not isinstance(grant, dict):
+        grant = outcome.get("grant")
+        if not isinstance(grant, dict) or grant.get("decision") not in {
+            "approved",
+            "modified",
+            "denied",
+        }:
             continue
-        grant_decision = str(grant.get("decision") or "")
-        if grant_decision not in {"approved", "modified", "denied"}:
-            continue
-        decided_at = str(outcome.get("decided_at_utc") or "")
+        decided = outcome.get("decided_at_utc")
         try:
-            decision_time = dt.datetime.strptime(decided_at, "%Y-%m-%dT%H:%M:%SZ")
-        except ValueError:
+            decision_time = _parse_utc_z(decided)
+        except (ValueError, TypeError):
             continue
-        if decision_time > message_created_at:
-            continue
-        candidates.append((decided_at, audit_path.name, audit))
-
-    if not candidates:
-        return None
-
-    _decided_at, audit_name, audit = sorted(candidates)[-1]
-    outcome = audit["result"]["human_outcome"]
-    grant = outcome["grant"]
-    grant_decision = str(grant["decision"])
-    source = {
-        "source_audit": audit_name,
-        "source_message_id": audit.get("message_id"),
-        "human_decision": outcome.get("decision"),
-        "grant_decision": grant_decision,
-    }
-    if grant_decision == "denied":
+        denied = grant["decision"] == "denied" or outcome.get("decision") not in {
+            "approved",
+            "modified",
+        }
+        if denied and decision_time <= now:
+            denials.append((decided, path.name, audit))
+        elif not denied and decision_time <= min(created, now):
+            approvals.append((decided, path.name, audit))
+    governing = max(approvals, default=None)
+    denial = max(denials, default=None)
+    revoked = denial is not None and (governing is None or denial[0] >= governing[0])
+    selected = denial if revoked else governing
+    if selected is None:
+        return None, list(invoked.values())
+    _, name, audit = selected
+    source = {"source_audit": name, "source_message_id": audit.get("message_id")}
+    if revoked:
         return {
             **source,
-            "decision": "denied",
-            "reason_codes": ["continuation_grant_denied"],
+            "decision": "revoked",
             "scope": None,
-        }
-
-    if outcome.get("decision") not in {"approved", "modified"}:
-        return {
-            **source,
-            "decision": "denied",
-            "reason_codes": ["continuation_grant_denied"],
-            "scope": None,
-        }
-
-    scope, error = normalize_continuation_scope(grant.get("granted_scope"))
-    if error:
-        return {
-            **source,
-            "decision": "invalid",
-            "reason_codes": [error],
-            "scope": None,
-        }
+            "reason_codes": ["continuation_grant_revoked"],
+        }, list(invoked.values())
+    scope, error = normalize_continuation_scope(
+        audit["result"]["human_outcome"]["grant"].get("granted_scope")
+    )
     return {
         **source,
-        "decision": "accepted",
-        "reason_codes": ["continuation_grant_accepted"],
+        "decision": "invalid" if error else "accepted",
         "scope": scope,
+        "reason_codes": [error or "continuation_grant_accepted"],
+    }, list(invoked.values())
+
+
+def _continuation_declaration(message: Dict[str, Any]) -> Dict[str, Any]:
+    """Read only generic round/effect declarations, never PR/head metadata."""
+    body = str(message.get("body") or "")
+    errors = []
+    try:
+        parsed = yaml.load(body, Loader=_StrictYamlLoader)
+    except (yaml.YAMLError, ValueError, TypeError):
+        parsed = None
+        # Profile fences are ordinary task prose; generic invocation
+        # declarations live in the structured body, not inside that profile.
+        prose = re.sub(r"(?ms)^```[^\n]*\n.*?^```[ \t]*$", "", body)
+        if message.get("type") in REVIEW_LIFECYCLE_TYPES or re.search(
+            r"(?m)^(?:[ \t]*(?:round|side_effects)|continuation_grants)[ \t]*:", prose
+        ):
+            errors.append("body")
+    data = parsed if isinstance(parsed, dict) else {}
+    round_value = data.get("round", 1)
+    effects = data.get(
+        "side_effects",
+        list(DEFAULT_REVIEW_SIDE_EFFECTS)
+        if message.get("type") in {"review_request", "review_addressed"}
+        else [],
+    )
+    if (
+        not isinstance(round_value, int)
+        or isinstance(round_value, bool)
+        or round_value < 1
+    ):
+        errors.append("round")
+    if not isinstance(effects, list) or any(
+        not isinstance(e, str) or e not in CONTINUATION_SIDE_EFFECT_FIELDS
+        for e in effects
+    ):
+        errors.append("side_effects")
+    return {
+        "round": round_value,
+        "side_effects": effects,
+        "errors": errors,
+        "continuation_grants": data.get("continuation_grants", {}),
     }
 
 
 def evaluate_continuation_grant(
     message: Dict[str, Any],
-    envelope: Dict[str, Any],
+    envelope: Optional[Dict[str, Any]],
     continuation_enabled: bool,
     audit_dir: Optional[Path] = None,
     receiver: str = "codex",
+    now_utc: Optional[dt.datetime] = None,
 ) -> Dict[str, Any]:
-    grants = envelope.get("continuation_grants") or {}
-    grant = grants.get("approved_thread_continuation")
-    request_present = isinstance(grant, dict)
+    """Resolve every granted invocation through the same bounded authority."""
+    context = _continuation_declaration(message)
+    grants = (envelope or {}).get("continuation_grants") or context[
+        "continuation_grants"
+    ]
+    request = (
+        grants.get("approved_thread_continuation") if isinstance(grants, dict) else None
+    )
+    request_present = isinstance(request, dict)
+    requires_grant = message.get("type") in REVIEW_LIFECYCLE_TYPES
+    # Generic declarations may add an effect only through the human grant;
+    # absent/disabled recognition cannot erase malformed or uncovered intent.
+    requires_grant = requires_grant or bool(context["errors"]) or any(
+        (envelope or {}).get(effect) is not True for effect in context["side_effects"]
+    )
     result: Dict[str, Any] = {
         "present": request_present,
         "request_present": request_present,
@@ -2174,450 +2302,87 @@ def evaluate_continuation_grant(
         "scope": None,
         "source_audit": None,
         "source_message_id": None,
+        "effective_round": None,
+        "exceeded_fields": [],
     }
 
+    def reject(state: str, code: str) -> Dict[str, Any]:
+        result.update(decision=state, reason_codes=[code])
+        return result
+
+    if message.get("type") not in CONTINUATION_GRANTABLE_TYPES:
+        return reject("context_only", "continuation_grant_type_not_granted")
     if not continuation_enabled:
-        if request_present:
-            result["decision"] = "ignored_disabled"
-            result["reason_codes"] = ["continuation_grant_ignored_disabled"]
+        if request_present or requires_grant:
+            return reject("ignored_disabled", "continuation_grant_ignored_disabled")
         return result
-
-    has_thread = bool(message.get("parent_message_id") or message.get("conversation_id"))
-    if not has_thread:
-        if request_present:
-            result["decision"] = "invalid"
-            result["reason_codes"] = ["continuation_grant_missing_thread"]
+    if not (message.get("parent_message_id") or message.get("conversation_id")):
+        if request_present or requires_grant:
+            return reject("invalid", "continuation_grant_missing_thread")
         return result
-
     if request_present:
-        requested_scope, error = _grant_scope(grant)
+        requested_scope, error = normalize_continuation_scope(request.get("scope"))
         if error:
-            result["decision"] = "invalid"
-            result["reason_codes"] = [error]
-            return result
+            return reject("invalid", error)
         result["requested_scope"] = requested_scope
-
-    prior = _prior_thread_grant(message, audit_dir, receiver)
-    if prior is not None:
-        result.update(prior)
-        result["present"] = True
-        result["standing_grant_found"] = True
+    prior, invoked = _prior_thread_grant(message, audit_dir, receiver, now_utc)
+    if prior is None:
+        if request_present or requires_grant:
+            return reject("missing_approval", "continuation_grant_missing_approval")
         return result
-
-    if request_present:
-        result["decision"] = "missing_approval"
-        result["reason_codes"] = ["continuation_grant_missing_approval"]
+    result.update(prior)
+    result.update(present=True, standing_grant_found=True)
+    if prior["decision"] != "accepted":
+        return result
+    scope = prior["scope"]
+    if message.get("type") not in scope["allowed_types"]:
+        result["exceeded_fields"] = ["allowed_types"]
+        return reject(
+            "context_only"
+            if message.get("type") == "review_addressed"
+            else "type_not_granted",
+            "continuation_grant_type_not_granted",
+        )
+    if context["errors"]:
+        result["exceeded_fields"] = [f"declared.{f}" for f in context["errors"]]
+        return reject("scope_exceeded", "continuation_grant_scope_exceeded")
+    exceeded = [e for e in context["side_effects"] if scope.get(e) is not True]
+    if exceeded:
+        result["exceeded_fields"] = exceeded
+        return reject("scope_exceeded", "continuation_grant_scope_exceeded")
+    result["effective_round"] = max(
+        context["round"],
+        1 + sum(a.get("message_type") in scope["allowed_types"] for a in invoked),
+    )
+    if result["effective_round"] > scope["max_round"]:
+        return reject("round_exceeded", "continuation_grant_round_exceeded")
+    expires = _parse_utc_z(scope["expires_at_utc"])
+    if (
+        _parse_utc_z(str(message.get("created_at_utc") or "")) > expires
+        or _aware_utc(now_utc) > expires
+    ):
+        return reject("expired", "continuation_grant_expired")
     return result
 
 
-_FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-
-
-def _aware_utc(value: Optional[dt.datetime]) -> dt.datetime:
-    """Normalize an optional caller-supplied clock to timezone-aware UTC.
-
-    Mirrors ``message_expired``: a missing clock reads the real time, a
-    naive one is taken as already-UTC, and an aware one is converted — so
-    every comparison in the review path happens on one timeline.
-    """
-    now = value if value is not None else dt.datetime.now(dt.timezone.utc)
-    if now.tzinfo is None:
-        return now.replace(tzinfo=dt.timezone.utc)
-    return now.astimezone(dt.timezone.utc)
-
-
-def _parse_utc_z(text: str) -> dt.datetime:
-    return dt.datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(
-        tzinfo=dt.timezone.utc
-    )
-
-
-def _extract_review_context(message: Dict[str, Any]) -> Dict[str, Any]:
-    """Parse the review-loop declaration out of a lifecycle message body.
-
-    Review bodies are YAML mappings by schema (``pr:``, ``branch:``,
-    ``diff_summary:`` …). Declarations a grant match consumes are collected
-    here; anything unreadable lands in ``errors`` so scope matching fails
-    closed instead of guessing.
-    """
-    body = str(message.get("body") or "")
-    try:
-        parsed = yaml.safe_load(body)
-    except yaml.YAMLError:
-        parsed = None
-    data = parsed if isinstance(parsed, dict) else {}
-
-    context: Dict[str, Any] = {
-        "repository": None,
-        "pr_number": None,
-        "round": None,
-        "declared_head": None,
-        "side_effects": list(DEFAULT_REVIEW_SIDE_EFFECTS),
-        "grant_claim_present": "continuation_grants" in data,
-        "errors": [],
-    }
-
-    repo = data.get("repo")
-    if isinstance(repo, str) and REPO_SLUG_RE.fullmatch(repo.strip()):
-        context["repository"] = repo.strip().lower()
-    elif repo is not None:
-        context["errors"].append("repo")
-
-    pr_value = data.get("pr", message.get("related_pr"))
-    if isinstance(pr_value, bool):
-        context["errors"].append("pr")
-    elif isinstance(pr_value, int) and pr_value >= 1:
-        context["pr_number"] = pr_value
-    elif isinstance(pr_value, str) and pr_value.strip().isdigit():
-        context["pr_number"] = int(pr_value.strip())
-    elif pr_value not in (None, ""):
-        context["errors"].append("pr")
-
-    round_value = data.get("round", 1)
-    if isinstance(round_value, int) and not isinstance(round_value, bool) and round_value >= 1:
-        context["round"] = round_value
-    else:
-        context["errors"].append("round")
-
-    declared_head = data.get("declared_head")
-    if isinstance(declared_head, str) and declared_head.strip():
-        context["declared_head"] = declared_head.strip()
-    elif declared_head not in (None, ""):
-        context["errors"].append("declared_head")
-
-    side_effects = data.get("side_effects")
-    if side_effects is not None:
-        if isinstance(side_effects, list) and all(
-            isinstance(item, str) and item in REVIEW_SIDE_EFFECT_FIELDS
-            for item in side_effects
-        ):
-            context["side_effects"] = sorted(set(side_effects))
-        else:
-            context["errors"].append("side_effects")
-
-    return context
-
-
-def _review_head_check(
-    declared_head: Optional[str],
-    actuals: Optional[Dict[str, Any]],
-) -> Tuple[Dict[str, Any], bool]:
-    """Compare the sender-declared head against the observed live head.
-
-    The declared value is never trusted: equality is exact full-string
-    comparison of complete SHAs, so a declared value sharing a prefix with
-    the live head is still a mismatch. A mismatch (or a missing
-    declaration) is recorded and the live head stays authoritative — the
-    round still runs, because the guard is that the reviewer validates the
-    live ref, not that the sender declared it correctly.
-    """
-    review_observed = (actuals or {}).get("review")
-    live_head = None
-    if isinstance(review_observed, dict):
-        value = review_observed.get("live_head")
-        if isinstance(value, str) and value.strip():
-            live_head = value.strip().lower()
-
-    declared = declared_head.lower() if isinstance(declared_head, str) else None
-    if declared is None:
-        status = "undeclared" if live_head else "unverified"
-    elif live_head is None:
-        status = "unverified"
-    elif declared == live_head and _FULL_SHA_RE.fullmatch(declared):
-        status = "match"
-    else:
-        status = "mismatch"
-    return {
-        "declared_head": declared_head,
-        "live_head": live_head,
-        "status": status,
-    }, status == "mismatch"
-
-
-def _audit_consumed_round(audit: Dict[str, Any]) -> bool:
-    """True when this audit records a reviewer invocation that actually ran.
-
-    Only executed rounds charge the grant's round budget: an auto-admitted
-    continuation, or a pause whose recorded human outcome authorized the
-    manual round. A declined or never-answered request started nothing —
-    charging it would let dead asks exhaust ``max_round`` and defeat the
-    promised re-grant path.
-    """
-    if audit.get("decision") == "auto_accepted":
-        return True
-    result = audit.get("result")
-    outcome = result.get("human_outcome") if isinstance(result, dict) else None
-    return (
-        isinstance(outcome, dict)
-        and outcome.get("recorded") is True
-        and str(outcome.get("decision") or "") in {"approved", "modified"}
-    )
-
-
-def _prior_review_grant(
-    message: Dict[str, Any],
-    audit_dir: Optional[Path],
-    receiver: str,
-    now_utc: Optional[dt.datetime] = None,
-) -> Tuple[Optional[Dict[str, Any]], int]:
-    """Locate the governing review-loop grant for this thread.
-
-    Returns ``(grant_state, prior_round_audits)``. Authorization and
-    revocation are arbitrated on different clocks: an approval can govern
-    only requests created after it (authority is never retroactive), while
-    a denial takes effect the moment it is recorded — a denial decided
-    before *evaluation* revokes queued work even when the request predates
-    it. On a tie or a newer denial, the denial wins. ``prior_round_audits``
-    counts this receiver's earlier round-consuming audit records in the
-    thread — invocations that actually ran: an ``auto_accepted``
-    continuation round, or a pause whose recorded human outcome authorized
-    the manual round. Declined, unanswered, and context-only records
-    consume nothing. This is the receiver-side floor for the effective
-    round, so a sender cannot under-declare the round number to stay
-    inside ``max_round`` — while a denied or never-answered request can
-    never burn budget a later re-grant was promised to have.
-    """
-    if audit_dir is None or not audit_dir.is_dir():
-        return None, 0
-
-    approvals: List[Tuple[str, str, Dict[str, Any]]] = []
-    denials: List[Tuple[str, str, Dict[str, Any]]] = []
-    prior_round_audits = 0
-    current_message_id = str(message.get("id") or "")
-    message_created_at = _parse_utc_z(str(message.get("created_at_utc") or ""))
-    now = _aware_utc(now_utc)
-    for audit_path in audit_dir.glob("*.yaml"):
-        try:
-            audit = yaml.safe_load(audit_path.read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError):
-            continue
-        if not isinstance(audit, dict):
-            continue
-        if audit.get("schema_version") != AUTONOMY_AUDIT_SCHEMA_VERSION:
-            continue
-        if audit.get("receiver") != receiver:
-            continue
-        if audit.get("message_id") == current_message_id:
-            continue
-        if not _audit_thread_matches(message, audit):
-            continue
-        audit_type = str(audit.get("message_type") or "")
-        if (
-            audit_type in REVIEW_CONTINUATION_GRANTABLE_TYPES
-            and _audit_consumed_round(audit)
-        ):
-            prior_round_audits += 1
-
-        result = audit.get("result")
-        outcome = result.get("human_outcome") if isinstance(result, dict) else None
-        grant = outcome.get("grant") if isinstance(outcome, dict) else None
-        if not isinstance(outcome, dict) or outcome.get("recorded") is not True:
-            continue
-        if not isinstance(grant, dict):
-            continue
-        if str(grant.get("decision") or "") not in {"approved", "modified", "denied"}:
-            continue
-        decided_at = str(outcome.get("decided_at_utc") or "")
-        try:
-            decision_time = _parse_utc_z(decided_at)
-        except ValueError:
-            continue
-        is_denial = str(grant.get("decision")) == "denied" or str(
-            outcome.get("decision") or ""
-        ) not in {"approved", "modified"}
-        if is_denial:
-            if decision_time <= now:
-                denials.append((decided_at, audit_path.name, audit))
-        elif decision_time <= message_created_at:
-            approvals.append((decided_at, audit_path.name, audit))
-
-    governing = sorted(approvals)[-1] if approvals else None
-    latest_denial = sorted(denials)[-1] if denials else None
-    if latest_denial is not None and (
-        governing is None or latest_denial[0] >= governing[0]
-    ):
-        _decided_at, audit_name, audit = latest_denial
-        return {
-            "source_audit": audit_name,
-            "source_message_id": audit.get("message_id"),
-            "state": "revoked",
-            "scope": None,
-        }, prior_round_audits
-    if governing is None:
-        return None, prior_round_audits
-
-    _decided_at, audit_name, audit = governing
-    outcome = audit["result"]["human_outcome"]
-    grant = outcome["grant"]
-    source = {
-        "source_audit": audit_name,
-        "source_message_id": audit.get("message_id"),
-    }
-    granted_scope = grant.get("granted_scope")
-    review_block = (
-        granted_scope.get("review_loop") if isinstance(granted_scope, dict) else None
-    )
-    if review_block is None:
-        # A standing task-continuation grant with no review_loop block
-        # carries no review authority — the explicit-confirmation default
-        # applies, it is not a drift.
-        return {**source, "state": "absent", "scope": None}, prior_round_audits
-    scope, error = normalize_review_loop_scope(review_block)
-    if error:
-        return {**source, "state": "invalid", "scope": None}, prior_round_audits
-    return {**source, "state": "accepted", "scope": scope}, prior_round_audits
-
-
-# Maps the review_continuation block decision to its pinned pause reason.
-_REVIEW_PAUSE_CODES = {
-    "confirmation_required": "review_continuation_confirmation_required",
-    "context_only": "review_continuation_context_only",
-    "ignored_disabled": "review_continuation_ignored_disabled",
-    "missing_approval": "review_continuation_missing_approval",
-    "revoked": "review_continuation_revoked",
-    "invalid": "review_loop_invalid",
-    "scope_exceeded": "review_continuation_scope_exceeded",
-    "round_exceeded": "review_continuation_round_exceeded",
-    "expired": "review_continuation_expired",
-}
-
-
-def evaluate_review_continuation(
-    message: Dict[str, Any],
-    continuation_enabled: bool,
-    audit_dir: Optional[Path] = None,
-    receiver: str = "codex",
-    actuals: Optional[Dict[str, Any]] = None,
-    now_utc: Optional[dt.datetime] = None,
+def continuation_scope_envelope(
+    message: Dict[str, Any], grant: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """Evaluate a review-lifecycle message against standing review grants.
-
-    The verdict authorizes *running* one reviewer round, never its outcome:
-    the reviewer still fetches and validates the live PR head, runs the
-    quality gate, and independently chooses feedback or LGTM. Check order
-    is pinned (type → repo → PR → declared context → side effects → round →
-    wall clock) with early-out on the first failure, mirroring the task
-    gates. Lexical hard-stop scanning deliberately does not run here: a
-    granted reviewer invocation executes a pinned workflow whose side
-    effects are bounded by ``permitted_side_effects``, and review bodies
-    quote diffs and commands by design.
-    """
-    msg_type = str(message.get("type") or "")
-    context = _extract_review_context(message)
-    head_check, head_mismatch = _review_head_check(
-        context["declared_head"], actuals
+    """Give a granted profileless invocation ordinary checkpoint bounds."""
+    scope = grant["scope"]
+    envelope = default_scope_envelope(message)
+    envelope.update(
+        estimated_minutes=scope["max_actual_minutes"],
+        expected_files_touched=scope["max_actual_files_touched"],
     )
-    block: Dict[str, Any] = {
-        "enabled": continuation_enabled,
-        "kind": "approved_thread_continuation",
-        "surface": "review_loop",
-        "decision": "confirmation_required",
-        "grant_found": False,
-        "requested": {
-            "message_type": msg_type,
-            "repository": context["repository"],
-            "pr_number": context["pr_number"],
-            "round": context["round"],
-            "side_effects": context["side_effects"],
-            "declared_head": context["declared_head"],
-        },
-        "scope": None,
-        "effective_round": None,
-        "exceeded_fields": [],
-        "head_check": head_check,
-        "source_audit": None,
-        "source_message_id": None,
-    }
-    if head_mismatch:
-        block["head_mismatch"] = True
-
-    if msg_type in {"review_feedback", "review_lgtm"}:
-        # Reviewer-output types carry results, never work to start.
-        block["decision"] = "context_only"
-        return block
-
-    if not continuation_enabled:
-        block["decision"] = "ignored_disabled"
-        return block
-
-    has_thread = bool(
-        message.get("parent_message_id") or message.get("conversation_id")
+    requested = _continuation_declaration(message)["side_effects"]
+    for effect in CONTINUATION_SIDE_EFFECT_FIELDS:
+        envelope[effect] = effect in requested
+    envelope["external_side_effects"] = any(
+        envelope[e] for e in (*COVERABLE_CONTINUATION_FIELDS, "submits_github_review")
     )
-    if not has_thread:
-        return block
-
-    prior, prior_round_audits = _prior_review_grant(
-        message, audit_dir, receiver, now_utc=now_utc
-    )
-    if prior is None:
-        if context["grant_claim_present"]:
-            # A sender-declared grant claim is a request, never proof.
-            block["decision"] = "missing_approval"
-        return block
-
-    block["source_audit"] = prior["source_audit"]
-    block["source_message_id"] = prior["source_message_id"]
-    if prior["state"] == "revoked":
-        block["decision"] = "revoked"
-        return block
-    if prior["state"] == "absent":
-        if context["grant_claim_present"]:
-            block["decision"] = "missing_approval"
-        return block
-    if prior["state"] == "invalid":
-        block["decision"] = "invalid"
-        return block
-
-    scope = prior["scope"]
-    block["grant_found"] = True
-    block["scope"] = scope
-
-    if msg_type not in scope["allowed_types"]:
-        # review_addressed stays context-only unless the grant explicitly
-        # lists it (the manual-continuation shape); an unlisted
-        # review_request is outside the granted scope.
-        block["decision"] = (
-            "context_only" if msg_type == "review_addressed" else "scope_exceeded"
-        )
-        if msg_type != "review_addressed":
-            block["exceeded_fields"].append("allowed_types")
-        return block
-
-    exceeded: List[str] = []
-    if context["repository"] != scope["repository"]:
-        exceeded.append("repository")
-    if context["pr_number"] != scope["pr_number"]:
-        exceeded.append("pr_number")
-    exceeded.extend(f"declared.{field}" for field in context["errors"])
-    permitted = scope["permitted_side_effects"]
-    for effect in context["side_effects"]:
-        if permitted.get(effect) is not True:
-            exceeded.append(f"permitted_side_effects.{effect}")
-    if exceeded:
-        block["decision"] = "scope_exceeded"
-        block["exceeded_fields"] = exceeded
-        return block
-
-    declared_round = context["round"] or 1
-    effective_round = max(declared_round, 1 + prior_round_audits)
-    block["effective_round"] = effective_round
-    if effective_round > scope["max_round"]:
-        block["decision"] = "round_exceeded"
-        return block
-
-    # The grant must be live when the work would RUN, not merely when the
-    # sender stamped the request: created_at_utc is sender-controlled, so
-    # expiry is checked against evaluation time as well. Either clock past
-    # the bound expires the grant.
-    message_created_at = _parse_utc_z(str(message.get("created_at_utc") or ""))
-    now = _aware_utc(now_utc)
-    expires_at = _parse_utc_z(scope["expires_at_utc"])
-    if message_created_at > expires_at or now > expires_at:
-        block["decision"] = "expired"
-        return block
-
-    block["decision"] = "accepted"
-    return block
+    envelope["sends_oacp_reply_only"] = not envelope["external_side_effects"]
+    return envelope
 
 
 def continuation_scope_breaches(
@@ -2805,8 +2570,12 @@ def _actual_side_effects(actuals: Dict[str, Any]) -> Dict[str, bool]:
     side_effects = actuals.get("side_effects_actual") or {}
     if not isinstance(side_effects, dict):
         raise ValueError("actuals.side_effects_actual must be a mapping")
+    if set(side_effects) - set(CONTINUATION_SIDE_EFFECT_FIELDS):
+        raise ValueError("actuals.side_effects_actual contains an unknown effect")
     normalized: Dict[str, bool] = {}
-    for key in COVERABLE_CONTINUATION_FIELDS:
+    for key in CONTINUATION_SIDE_EFFECT_FIELDS:
+        if key not in COVERABLE_CONTINUATION_FIELDS and key not in side_effects:
+            continue
         value = side_effects.get(key, False)
         if not isinstance(value, bool):
             raise ValueError(f"actuals.side_effects_actual.{key} must be boolean")
@@ -2874,7 +2643,7 @@ def _declared_intent_fields(actuals: Dict[str, Any]) -> List[str]:
             "actuals.declared_intent_fields must be a list of "
             "task_profile field paths"
         )
-    valid_keys = LEGACY_PROFILE_BOOL_FIELDS + COVERABLE_CONTINUATION_FIELDS
+    valid_keys = LEGACY_PROFILE_BOOL_FIELDS + CONTINUATION_SIDE_EFFECT_FIELDS
     fields: List[str] = []
     for item in value:
         prefix, _, key = item.partition(".")
@@ -2904,7 +2673,7 @@ def normalize_reauthorization_scope(
     if not isinstance(scope, dict):
         return None, "reauthorization scope must be a mapping"
     valid_keys = {"max_actual_minutes", "max_actual_files_touched"} | set(
-        COVERABLE_CONTINUATION_FIELDS
+        CONTINUATION_SIDE_EFFECT_FIELDS
     )
     unknown = sorted(set(scope) - valid_keys)
     if unknown:
@@ -2917,7 +2686,9 @@ def normalize_reauthorization_scope(
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             return None, f"reauthorization scope {key} must be a non-negative integer"
         normalized[key] = value
-    for key in COVERABLE_CONTINUATION_FIELDS:
+    for key in CONTINUATION_SIDE_EFFECT_FIELDS:
+        if key not in COVERABLE_CONTINUATION_FIELDS and key not in scope:
+            continue
         value = scope.get(key, False)
         if not isinstance(value, bool):
             return None, f"reauthorization scope {key} must be boolean"
@@ -3085,7 +2856,7 @@ def _reauth_boolean_grants(
     """Boundary actions an answer's scope grants on one channel."""
     if not isinstance(scope, dict):
         return frozenset()
-    granted = {key for key in COVERABLE_CONTINUATION_FIELDS if scope.get(key) is True}
+    granted = {key for key in CONTINUATION_SIDE_EFFECT_FIELDS if scope.get(key) is True}
     if channel == "receiver_human":
         return frozenset(granted)
     if channel != "sender_reply":
@@ -3124,8 +2895,9 @@ def _reauth_effective_scope(
         if budget is not None:
             effective[scope_key] = budget
     grants = _reauth_boolean_grants(channel, scope, policy, envelope)
-    for key in COVERABLE_CONTINUATION_FIELDS:
-        effective[key] = key in grants
+    for key in CONTINUATION_SIDE_EFFECT_FIELDS:
+        if key in COVERABLE_CONTINUATION_FIELDS or key in scope:
+            effective[key] = key in grants
     return effective
 
 
@@ -3498,7 +3270,12 @@ def _base_result(
         "predicted_risk_materialized": bool(
             checkpoint.get("predicted_risk_materialized", False)
         ),
-        "completed_at_utc": checkpoint.get("completed_at_utc"),
+        # A live admission carries no completion stamp: `completed_at_utc` is
+        # the finalizer's terminal write, never copied from checkpoint actuals
+        # at birth (a stamped record reads as closed).
+        "completed_at_utc": (
+            None if final_state == "pending" else checkpoint.get("completed_at_utc")
+        ),
         # Runtime adapters (envelope hooks) upgrade this to "hooks" after a
         # successful `oacp envelope compile`; "none" means pickup-gate-only
         # enforcement. Degradation must never be silent.
@@ -3628,7 +3405,6 @@ def evaluate_autonomy(
         checkpoint: Optional[Dict[str, Any]] = None,
         breached: Optional[List[str]] = None,
         co_occurring: Optional[List[str]] = None,
-        review_continuation: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         grant = grant_result or {"present": False, "enabled": False}
         resolved_checkpoint = checkpoint or evaluate_threshold_checkpoint(
@@ -3646,8 +3422,6 @@ def evaluate_autonomy(
             "continuation_grant": grant,
             "result": _base_result("paused", completion_kind, resolved_checkpoint),
         }
-        if review_continuation is not None:
-            decision["review_continuation"] = review_continuation
         if matched_pattern is not None:
             decision["matched_pattern"] = matched_pattern
         if validation_errors is not None:
@@ -3676,7 +3450,7 @@ def evaluate_autonomy(
     if mode == "always_pause":
         return paused(mode, ["mode_always_pause"])
 
-    message_errors = validate_message_dict(message)
+    message_errors = validate_message_dict(message, advisories=logged_notes)
     if message_errors:
         return paused(
             mode,
@@ -3691,51 +3465,52 @@ def evaluate_autonomy(
         return paused(mode, ["message_replayed"])
 
     if msg_type in REVIEW_LIFECYCLE_TYPES:
-        # Review-loop lifecycle admission: the four task gates do not run —
-        # these messages carry no task profile, and a granted reviewer
-        # invocation executes a pinned workflow bounded by the grant's
-        # permitted_side_effects, not by sender prose. Auto-continue
-        # requires a standing human-approved grant in this sender/thread
-        # chain; everything else keeps the explicit-confirmation default.
-        review_block = evaluate_review_continuation(
+        # Lifecycle bodies quote arbitrary diffs. Their invocation authority
+        # is resolved generically; task lexical/risk gates remain below.
+        grant_result = evaluate_continuation_grant(
             message,
+            None,
             bool(policy["continuation_grants_enabled"]),
             audit_dir=audit_dir,
             receiver=receiver,
-            actuals=actuals,
             now_utc=now_utc,
         )
-        if review_block["decision"] != "accepted":
+        if grant_result["decision"] != "accepted":
+            return paused(mode, grant_result["reason_codes"], grant_result=grant_result)
+        envelope = continuation_scope_envelope(message, grant_result)
+        envelope_source = "continuation_grant"
+        checkpoint = evaluate_threshold_checkpoint(
+            envelope, grant_result, actuals, policy=policy
+        )
+        if (
+            checkpoint["breached"]
+            and checkpoint["action"] != "resumed_after_reauthorization"
+        ):
             return paused(
                 mode,
-                [_REVIEW_PAUSE_CODES[review_block["decision"]]],
-                review_continuation=review_block,
+                ["threshold_checkpoint_breached"],
+                "checkpoint_paused",
+                envelope=envelope,
+                grant_result=grant_result,
+                checkpoint=checkpoint,
             )
-        reason_codes = [
-            "message_valid",
-            "message_not_expired",
-            "message_hash_recorded",
-            "review_continuation_accepted",
-        ]
-        if review_block.get("head_mismatch"):
-            # Recorded, never blocking: the live head is authoritative and
-            # the reviewer must resolve the declared value against it
-            # before any terminal verdict.
-            reason_codes.append("review_continuation_head_mismatch")
-        review_checkpoint = evaluate_threshold_checkpoint(
-            None, {"present": False, "enabled": False}, None, policy=policy
+        return finish(
+            {
+                "decision": "auto_accepted",
+                "mode": mode,
+                "reason_codes": [
+                    "message_valid",
+                    "message_not_expired",
+                    "message_hash_recorded",
+                    "continuation_grant_accepted",
+                    "workspace_check_required",
+                ],
+                "scope_envelope": envelope,
+                "logged_notes": logged_notes,
+                "continuation_grant": grant_result,
+                "result": _base_result("pending", "auto_accepted", checkpoint),
+            }
         )
-        decision = {
-            "decision": "auto_accepted",
-            "mode": mode,
-            "reason_codes": reason_codes,
-            "scope_envelope": None,
-            "logged_notes": logged_notes,
-            "continuation_grant": {"present": False, "enabled": False},
-            "review_continuation": review_block,
-            "result": _base_result("done", "auto_accepted", review_checkpoint),
-        }
-        return finish(decision)
 
     allow_without_profile = msg_type in policy["allow_without_task_profile"]
 
@@ -3780,6 +3555,7 @@ def evaluate_autonomy(
             bool(policy["continuation_grants_enabled"]),
             audit_dir=audit_dir,
             receiver=receiver,
+            now_utc=now_utc,
         )
 
     # Every envelope-derived admission axis is evaluated here, before any
@@ -3869,6 +3645,7 @@ def evaluate_autonomy(
             body,
             logged_notes,
             contextual_labels=frozenset({"install dependency"}),
+            declared_labels=_declared_capability_labels(profile, envelope),
         )
     if matched:
         return paused(
@@ -4045,7 +3822,7 @@ def evaluate_autonomy(
         "scope_envelope": envelope,
         "logged_notes": logged_notes,
         "continuation_grant": grant_result,
-        "result": _base_result("done", "auto_accepted", checkpoint),
+        "result": _base_result("pending", "auto_accepted", checkpoint),
     })
 
 

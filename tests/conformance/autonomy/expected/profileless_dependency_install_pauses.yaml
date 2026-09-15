@@ -1,0 +1,12 @@
+case: profileless_dependency_install_pauses
+config: configs/auto_review_standard.yaml
+message: messages/profileless_dependency_install.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - risk_obvious_no_profile
+  logged_notes: []
+  result:
+    final_state: paused
+    completion_kind: admission_paused

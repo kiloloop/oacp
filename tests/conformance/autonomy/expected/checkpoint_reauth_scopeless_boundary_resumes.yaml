@@ -16,7 +16,7 @@ expected:
     - workspace_check_required
     - checkpoint_reauthorized
   result:
-    final_state: done
+    final_state: pending
     completion_kind: auto_accepted
     predicted_risk_materialized: false
     threshold_checkpoint:

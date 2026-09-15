@@ -1,0 +1,184 @@
+message_type: handoff
+mode: 'off'
+expected:
+  well_formed:
+    validation_errors: []
+    advisory: false
+    decision: auto_accepted
+    reason: null
+  malformed_skill_body:
+    validation_errors: []
+    advisory: true
+    decision: auto_accepted
+    reason: null
+  absent_skill_fields:
+    validation_errors: []
+    advisory: true
+    decision: auto_accepted
+    reason: null
+  missing_required:
+    validation_errors:
+    - 'missing required field: subject'
+    advisory: false
+    decision: paused
+    reason: message_invalid
+  nested_required:
+    validation_errors:
+    - field 'subject' must be a scalar string, not nested YAML
+    advisory: false
+    decision: paused
+    reason: message_invalid
+  missing_body:
+    validation_errors:
+    - 'missing required field: body'
+    advisory: false
+    decision: paused
+    reason: message_invalid
+  empty_body:
+    validation_errors:
+    - field 'body' must be non-empty
+    advisory: false
+    decision: paused
+    reason: message_invalid
+  nested_body:
+    validation_errors:
+    - field 'body' must be a scalar string, not nested YAML
+    advisory: false
+    decision: paused
+    reason: message_invalid
+  oversized_body:
+    validation_errors:
+    - field 'body' is too long (max 20000 chars)
+    advisory: true
+    decision: paused
+    reason: message_invalid
+  valid_optional:
+    validation_errors: []
+    advisory: false
+    decision: auto_accepted
+    reason: null
+  nested_optional:
+    validation_errors:
+    - field 'related_packet' must be a scalar value
+    advisory: false
+    decision: paused
+    reason: message_invalid
+  unknown_optional:
+    validation_errors:
+    - 'unknown field(s): unknown_field'
+    advisory: false
+    decision: paused
+    reason: message_invalid
+  wrong_type_telemetry:
+    validation_errors:
+    - 'review telemetry fields are allowed only for: review_addressed, review_feedback,
+      review_lgtm'
+    advisory: false
+    decision: paused
+    reason: message_invalid
+  bad_telemetry:
+    validation_errors:
+    - 'review telemetry fields are allowed only for: review_addressed, review_feedback,
+      review_lgtm'
+    - field 'input_tokens' must be a non-negative integer
+    advisory: false
+    decision: paused
+    reason: message_invalid
+  valid_thread:
+    validation_errors: []
+    advisory: false
+    decision: auto_accepted
+    reason: null
+  malformed_thread:
+    validation_errors:
+    - field 'conversation_id' must match pattern conv-<YYYYMMDD>-<agent>-<seq>
+    advisory: false
+    decision: paused
+    reason: message_invalid
+  long_parent:
+    validation_errors:
+    - field 'parent_message_id' is too long (max 200 chars)
+    advisory: false
+    decision: paused
+    reason: message_invalid
+  future_expiry:
+    validation_errors: []
+    advisory: false
+    decision: auto_accepted
+    reason: null
+  expired:
+    validation_errors: []
+    advisory: false
+    decision: paused
+    reason: message_expired
+  bad_expiry:
+    validation_errors:
+    - 'field ''expires_at'' must be UTC RFC3339 seconds format: YYYY-MM-DDTHH:MM:SSZ'
+    advisory: false
+    decision: paused
+    reason: message_invalid
+  bad_calendar_expiry:
+    validation_errors:
+    - field 'expires_at' is not a valid UTC timestamp
+    advisory: false
+    decision: paused
+    reason: message_invalid
+  valid_profile:
+    validation_errors: []
+    advisory: false
+    decision: auto_accepted
+    reason: null
+  bad_profile:
+    validation_errors: []
+    advisory: false
+    decision: paused
+    reason: task_profile_unparsable
+  bad_grant_shape:
+    validation_errors: []
+    advisory: false
+    decision: paused
+    reason: task_profile_unparsable
+  missing_required_profile:
+    validation_errors: []
+    advisory: false
+    decision: paused
+    reason: task_profile_missing
+  unsigned:
+    validation_errors: []
+    advisory: false
+    decision: auto_accepted
+    reason: null
+  broken_auth:
+    validation_errors: []
+    advisory: false
+    decision: paused
+    reason: message_invalid
+    auth_error: structure
+  nonfinal_auth:
+    validation_errors: []
+    advisory: false
+    decision: auto_accepted
+    reason: null
+    auth_error: framing
+  skill_and_expiry_invalid:
+    validation_errors:
+    - 'field ''expires_at'' must be UTC RFC3339 seconds format: YYYY-MM-DDTHH:MM:SSZ'
+    advisory: true
+    decision: paused
+    reason: message_invalid
+  skill_and_profile_invalid:
+    validation_errors: []
+    advisory: true
+    decision: paused
+    reason: task_profile_unparsable
+  skill_and_auth_invalid:
+    validation_errors: []
+    advisory: true
+    decision: paused
+    reason: message_invalid
+    auth_error: structure
+  always_pause_skill_invalid:
+    validation_errors: []
+    advisory: true
+    decision: paused
+    reason: mode_always_pause

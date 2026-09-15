@@ -52,12 +52,40 @@ def _evaluate(message, config=None):
     return evaluate_autonomy(message, config)
 
 
-@pytest.mark.parametrize("classification", ["designed", "unplanned", "mixed", "undeclared"])
+@pytest.mark.parametrize(
+    "classification",
+    ["designed", "unplanned", "mixed", "undeclared", "declared_capability"],
+)
 def test_classification_conformance(classification):
     case = _load(FIXTURES / "expected" / f"pause_classification_{classification}.yaml")
     result = _evaluate(_load(FIXTURES / case["message"]), _load(FIXTURES / case["config"]))
     for key, expected in case["expected"].items():
         assert result[key] == expected
+
+
+def test_declared_capability_demotion_is_a_designed_pause():
+    """A demoted head's granular pause is the pause the sender can declare;
+    the same wording without the declaration is a hard stop no annotation
+    can name away."""
+    annotation = "  expected_pauses: [dependency_changes_pause]\n"
+    prose = "Install the dependency the parser needs."
+    declared = _message(annotation, prose=prose)
+    declared["body"] = declared["body"].replace(
+        "touches_dependencies: false", "touches_dependencies: true"
+    )
+    result = _evaluate(declared)
+    assert result["reason_codes"] == ["dependency_changes_pause"]
+    assert result["pause_classification"] == "designed"
+    assert result["unplanned_pause_codes"] == []
+    assert result["logged_notes"] == [
+        {"code": "lexical_advisory_declared", "matched_pattern": "install dependency"}
+    ]
+
+    undeclared = _evaluate(_message(annotation, prose=prose))
+    assert undeclared["reason_codes"] == ["hard_stop_external_side_effect"]
+    assert undeclared["pause_classification"] == "unplanned"
+    assert undeclared["unplanned_pause_codes"] == ["hard_stop_external_side_effect"]
+    assert undeclared["logged_notes"] == []
 
 
 def test_only_fired_reasons_classify_and_approval_is_still_required():

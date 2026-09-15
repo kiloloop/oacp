@@ -1,0 +1,19 @@
+schema_version: 2
+spec_version: "0.5.1"
+created_at_utc: '2026-05-26T11:30:05Z'
+receiver: codex
+sender: alice
+message_id: msg-20260526113000-alice-addr1
+message_type: review_addressed
+conversation_id: conv-20260526-widget-088
+decision: auto_accepted
+mode: auto_review
+reason_codes:
+- message_valid
+- message_not_expired
+- message_hash_recorded
+- continuation_grant_accepted
+result:
+  final_state: pending
+  completion_kind: auto_accepted
+  work_started_at_utc: '2026-05-26T11:31:00Z'

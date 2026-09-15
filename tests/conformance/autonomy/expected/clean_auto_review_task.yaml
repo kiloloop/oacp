@@ -16,7 +16,7 @@ expected:
   breached: []
   co_occurring_reason_codes: []
   result:
-    final_state: done
+    final_state: pending
     completion_kind: auto_accepted
   task_profile:
     estimated_minutes: 20

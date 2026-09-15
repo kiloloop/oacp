@@ -27,6 +27,9 @@ from finalize_autonomy_record import validate_audit_record  # noqa: E402
 
 
 SCOPE = {
+    "allowed_types": ["task_request"],
+    "max_round": 3,
+    "expires_at_utc": "2026-07-20T00:00:00Z",
     "max_actual_minutes": 30,
     "max_actual_files_touched": 3,
     "creates_or_updates_pr": True,
@@ -34,7 +37,11 @@ SCOPE = {
     "commits_changes": False,
 }
 # What SCOPE normalizes to: absent granular fields default to False.
-NORMALIZED_SCOPE = {**SCOPE, "merges_pr": False, "files_issues": False}
+NORMALIZED_SCOPE = {
+    **SCOPE, "merges_pr": False, "files_issues": False,
+    "writes_findings_packet": False, "sends_oacp_reply": False,
+    "submits_github_review": False,
+}
 
 
 def _audit(*, requested_grant: bool = False) -> Dict[str, Any]:
@@ -260,36 +267,62 @@ def test_modified_grant_requires_explicit_scope() -> None:
         )
 
 
-def test_review_only_grant_scope_records_with_zero_task_budgets() -> None:
-    # A review-loop grant recorded at a review_request confirmation pause:
-    # no task budget keys, so the grant carries no task-continuation
-    # authority, and the review_loop block survives normalization.
-    review_scope = {
-        "review_loop": {
-            "repository": "example-org/widget",
-            "pr_number": 88,
-            "allowed_types": ["review_request"],
-            "max_round": 3,
-            "expires_at_utc": "2026-07-20T00:00:00Z",
-            "permitted_side_effects": {
-                "writes_findings_packet": True,
-                "sends_oacp_reply": True,
-            },
-        }
+def test_generic_review_scope_round_trips_flat_bounds() -> None:
+    scope = {
+        "allowed_types": ["review_addressed", "review_request"],
+        "max_round": 3,
+        "expires_at_utc": "2026-07-20T00:00:00Z",
+        "max_actual_minutes": 30,
+        "max_actual_files_touched": 3,
+        "writes_findings_packet": True,
+        "sends_oacp_reply": True,
+        "submits_github_review": True,
     }
     updated = record_human_outcome(
         _audit(),
         decision="approved",
         grant_decision="approved",
-        granted_scope=review_scope,
+        granted_scope=scope,
         decided_at_utc="2026-07-11T01:01:00Z",
     )
-
     granted = updated["result"]["human_outcome"]["grant"]["granted_scope"]
-    assert granted["max_actual_minutes"] == 0
-    assert granted["max_actual_files_touched"] == 0
-    assert granted["review_loop"]["pr_number"] == 88
-    assert granted["review_loop"]["allowed_types"] == ["review_request"]
+    for key, value in scope.items():
+        assert granted[key] == value
+    assert "review_loop" not in granted
+
+
+@pytest.mark.parametrize("missing", ["allowed_types", "max_round", "expires_at_utc"])
+def test_generic_grant_approval_requires_every_bound(missing: str) -> None:
+    scope = dict(SCOPE)
+    del scope[missing]
+    with pytest.raises(ValueError, match="continuation_grant_missing_scope"):
+        record_human_outcome(
+            _audit(),
+            decision="approved",
+            grant_decision="approved",
+            granted_scope=scope,
+            decided_at_utc="2026-07-11T01:01:00Z",
+        )
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        {"max_actual_minutes": 30, "max_actual_files_touched": 3},
+        {**SCOPE, "review_loop": {"allowed_types": ["review_request"], "max_round": 3}},
+    ],
+)
+def test_legacy_scope_cannot_be_reapproved_without_migration(
+    scope: Dict[str, Any],
+) -> None:
+    with pytest.raises(ValueError, match="continuation_grant_missing_scope"):
+        record_human_outcome(
+            _audit(),
+            decision="approved",
+            grant_decision="approved",
+            granted_scope=scope,
+            decided_at_utc="2026-07-11T01:01:00Z",
+        )
 
 
 def test_grant_request_requires_explicit_grant_decision() -> None:
@@ -962,7 +995,7 @@ def test_cli_checkpoint_clear_reports_disposition(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "evidence",
     [
-        {"final_state": "done"},
+        {"final_state": "done", "completed_at_utc": "2026-08-01T02:25:00Z"},
         {"final_state": "error"},
         {"final_state": "superseded"},
         {"final_state": "cancelled"},
@@ -991,6 +1024,25 @@ def test_closed_record_refuses_every_outcome_write(
             decided_at_utc="2026-08-01T02:26:00Z",
             actor="bob",
         )
+
+
+def test_legacy_done_without_completion_stamp_is_still_live() -> None:
+    """A pre-0.5.2 receipt hand-finalized `done` with no completion stamp is
+    unfinalized history, not a closed record: the outcome write proceeds so
+    the record can still be finalized properly once."""
+    audit = _cleared_admission_checkpoint_audit()
+    del audit["result"]["human_outcome"]
+    audit["result"]["final_state"] = "done"
+    audit["result"]["completed_at_utc"] = None
+
+    updated = record_human_outcome(
+        audit,
+        decision="approved",
+        decided_at_utc="2026-08-01T02:26:00Z",
+        actor="bob",
+    )
+
+    assert updated["result"]["human_outcome"]["recorded"] is True
 
 
 def test_cli_clear_on_terminal_conformance_fixture_leaves_bytes_unchanged(

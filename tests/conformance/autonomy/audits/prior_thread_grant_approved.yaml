@@ -1,3 +1,7 @@
+# Grant-source fixture: a paused admission with a recorded human outcome,
+# kept in the pre-0.5.2 receipt shape (`done` without a completion stamp)
+# so grant resolution is exercised against the legacy corpus it will meet.
+# Grant resolution reads the outcome and thread, never the run state.
 schema_version: 2
 spec_version: "0.3.5"
 created_at_utc: "2026-05-26T04:10:05Z"
@@ -14,6 +18,9 @@ task_profile:
   continuation_grants:
     approved_thread_continuation:
       scope:
+        allowed_types: [task_request]
+        max_round: 10
+        expires_at_utc: "2099-01-01T00:00:00Z"
         max_actual_minutes: 30
         max_actual_files_touched: 3
         creates_or_updates_pr: true
@@ -35,12 +42,18 @@ result:
       request_present: true
       request_error: null
       requested_scope:
+        allowed_types: [task_request]
+        max_round: 10
+        expires_at_utc: "2099-01-01T00:00:00Z"
         max_actual_minutes: 30
         max_actual_files_touched: 3
         creates_or_updates_pr: true
         comments_on_github: true
         commits_changes: true
       granted_scope:
+        allowed_types: [task_request]
+        max_round: 10
+        expires_at_utc: "2099-01-01T00:00:00Z"
         max_actual_minutes: 30
         max_actual_files_touched: 3
         creates_or_updates_pr: true

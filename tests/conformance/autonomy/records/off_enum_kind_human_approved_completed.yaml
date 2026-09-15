@@ -1,3 +1,6 @@
+# Carries two legacy shapes at once: an off-enum completion_kind (the pinned
+# error) and the pre-0.5.2 auto-accepted birth — `done` with no completion
+# stamp — which surfaces as the advisory `legacy_born_done_unfinalized`.
 schema_version: 2
 spec_version: "0.4.3"
 created_at_utc: "2026-08-01T01:00:00Z"

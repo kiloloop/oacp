@@ -30,21 +30,18 @@ These fixtures may also include:
 
 - `now:` — the evaluation time (`YYYY-MM-DDTHH:MM:SSZ`) passed to the
   evaluator as `now_utc`. Required on any fixture whose decision depends
-  on the clock (review-grant expiry, revoke-before-processing); fixtures
+  on the clock (thread-grant expiry, revoke-before-processing); fixtures
   without it evaluate at the real current time
 - `actuals:` pointing at checkpoint input under `actuals/`
 - `actuals.reauthorization` for checkpoint re-authorization arbitration:
   channel answers (`receiver_human` / `sender_reply` / `gh_comment`) judged
   against the pause being re-evaluated (same-channel, cross-channel,
   conflicting, reuse, and boundary-action cases)
-- `actuals.review.live_head` for review-loop head checks: the live PR head
-  the runtime observed, compared against the request's `declared_head`
 - `audits:` pointing at prior same-thread audit records under `audits/`
 - `expected.logged_notes` for demoted side-effect verb matches
-- `expected.continuation_grant` for default-off and enabled grant behavior
-- `expected.review_continuation` for review-loop continuation decisions
-  (accepted, missing-approval, disabled, drifted, revoked, later-round,
-  and the head-mismatch / prefix-collision recording cases)
+- `expected.continuation_grant` for generic thread-grant decisions, including
+  explicit message types, receiver-floored rounds, both-clock expiry,
+  revocation before processing, and flat side-effect drift
 - `expected.result.threshold_checkpoint` for envelope drift decisions
 - `expected.breached` for the pinned top-level breach list
 - `expected.task_profile` for full declared-profile capture
@@ -67,9 +64,23 @@ the evaluator must now produce; the runner is
 content-sensitivity hard stop of one window plus a control, pinning which
 records demote to a `lexical_advisory_reply_only` note and which keep the
 hard stop.
+Its `declared_capability` section is the three-head regression corpus for the
+declared-capability demotion: the dependency-install, credential-rotation, and
+default-branch-push labels (plus the sensitive-scope tokens) replayed under
+declared-true, declared-false, contradictory, and merge-declaring profiles,
+pinning which records demote to a `lexical_advisory_declared` note with the
+flag's own admission pause governing and which keep the hard stop.
 
 The `records/` subdirectory pins a second contract class: audit-record
 integrity findings (off-enum vocabulary, duplicate live evaluations,
 paused-terminal shapes) validated by `scripts/finalize_autonomy_record.py`
 and run by `tests/test_audit_record_conformance.py` — see
 `records/README.md`.
+
+
+The `thread_grants/corpus.yaml` table pins the finite generic scope grammar:
+required type, round, expiry, time and file bounds; every grantable type; excluded
+output types; malformed bounds; and rejection of legacy nested scopes. The
+executable matrix is in `tests/test_autonomy_gate.py`. The `thread_grants`
+section of `ledger_replay/corpus.yaml` replays admission decisions against prior
+human outcomes and started invocation receipts using a fixed evaluation clock.

@@ -234,13 +234,13 @@ uv tool install .
 | `oacp inbox` | List pending inbox messages |
 | `oacp watch` | Emit inbox delta events for Monitor-friendly polling |
 | `oacp retention` | Parked: engine archived outside the kernel; advisory shim until 0.5.3 |
-| `oacp memory` | Run agent-memory (sync, archive, restore); shim until 0.5.2 |
+| `oacp memory` | Run agent-memory (sync, archive, restore); shim until 0.5.3 |
 | `oacp session-init` | Verify Codex startup inputs and emit SessionStart context |
 | `oacp setup` | Generate runtime-specific config files in a repo |
 | `oacp send` | Send a protocol-compliant inbox message |
 | `oacp key` | Generate and inspect message-signing keys |
 | `oacp trust` | Import, inspect, and revoke trust-root entries (catalog + pins) |
-| `oacp org-memory` | Run agent-memory org (init); shim until 0.5.2 |
+| `oacp org-memory` | Run agent-memory org (init); shim until 0.5.3 |
 | `oacp write-event` | Write an event to org-memory/events/ |
 | `oacp autonomy-outcome` | Record a human approval/decline in an autonomy audit |
 | `oacp autonomy-finalize` | Record checkpoints and terminal states in an autonomy audit |
@@ -261,7 +261,7 @@ uv tool install .
 
 **`oacp doctor`**: `--fix` (auto-fix safe issues), `--json`, `-o/--output`
 
-**`oacp memory`** / **`oacp org-memory`**: exec shims for [agent-memory](https://github.com/kiloloop/agent-memory) (`pip install agent-memory-cli`): argv passes through, `--oacp-dir` becomes `--home`, `oacp memory init` runs `agent-memory enable`. Kept through 0.5.1, removed in 0.5.2; call `agent-memory` directly.
+**`oacp memory`** / **`oacp org-memory`**: exec shims for [agent-memory](https://github.com/kiloloop/agent-memory) (`pip install agent-memory-cli`): argv passes through, `--oacp-dir` becomes `--home`, `oacp memory init` runs `agent-memory enable`. Kept through 0.5.2, removed in 0.5.3; call `agent-memory` directly.
 
 </details>
 

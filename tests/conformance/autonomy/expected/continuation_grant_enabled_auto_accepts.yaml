@@ -22,7 +22,7 @@ expected:
     standing_grant_found: true
     source_message_id: msg-20260526041000-iris-parent
   result:
-    final_state: done
+    final_state: pending
     predicted_risk_materialized: false
     threshold_checkpoint:
       evaluated: true

@@ -1,0 +1,20 @@
+case: contradictory_dependency_install_hard_stops
+config: configs/auto_review_standard.yaml
+message: messages/contradictory_dependency_install.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - hard_stop_external_side_effect
+  matched_pattern: "install dependency"
+  logged_notes: []
+  co_occurring_reason_codes:
+    - declaration_error
+    - dependency_changes_pause
+    - external_side_effects_not_pr_artifact
+  result:
+    final_state: paused
+    completion_kind: admission_paused
+  task_profile:
+    touches_dependencies: true
+    creates_or_updates_pr: true

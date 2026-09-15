@@ -28,13 +28,13 @@ Commands:
   inbox          List pending inbox messages
   watch          Emit inbox delta events for Monitor-friendly polling
   retention      Parked: engine archived outside the kernel; advisory shim until 0.5.3
-  memory         Run agent-memory (sync, archive, restore); shim until 0.5.2
+  memory         Run agent-memory (sync, archive, restore); shim until 0.5.3
   session-init   Verify Codex startup inputs and emit SessionStart context
   setup          Generate runtime-specific config files in a repo
   send           Send a protocol-compliant inbox message
   key            Generate and inspect message-signing keys
   trust          Import, inspect, and revoke trust-root entries (catalog + pins)
-  org-memory     Run agent-memory org (init); shim until 0.5.2
+  org-memory     Run agent-memory org (init); shim until 0.5.3
   write-event    Write an event to org-memory/events/
   autonomy-outcome  Record a human approval/decline in an autonomy audit
   autonomy-finalize  Record checkpoints and terminal states in an autonomy audit
@@ -125,7 +125,7 @@ def _run_script(script_name: str, argv: Sequence[str]) -> int:
 # passes through, `--oacp-dir X` becomes `--home X`, and `oacp memory init`
 # maps to `agent-memory enable` (the tool's own `init` scaffolds a home
 # without git; `enable` is what the kernel's `init` did). The kernel bundles
-# no fallback engine. This shim lasts through 0.5.1 and is removed in 0.5.2.
+# no fallback engine. This shim lasts through 0.5.2 and is removed in 0.5.3.
 MEMORY_TOOL = "agent-memory"
 MEMORY_TOOL_DISTRIBUTION = "agent-memory-cli"
 DELEGATED_COMMANDS: Dict[str, Sequence[str]] = {
@@ -141,7 +141,7 @@ _HOME_FLAG, _LEGACY_HOME_FLAG = "--home", "--oacp-dir"
 # the delegated verbs; the exec translates no output, so the verb's
 # `published:` / `idempotent: <path>` line stands where the script printed
 # `OK: <path>`, and its dry-run preview lands on stderr. This shim lasts
-# through 0.5.1 and is removed in 0.5.2.
+# through 0.5.2 and is removed in 0.5.3.
 SHIMMED_COMMANDS: Dict[str, Sequence[str]] = {"write-event": ("event", "write")}
 VERB_PROBE_TIMEOUT_SECONDS = 10
 

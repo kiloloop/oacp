@@ -1,0 +1,91 @@
+schema_version: 2
+spec_version: 0.5.1
+created_at_utc: '2026-08-01T01:00:00Z'
+receiver: claude
+sender: alice
+message_id: msg-20260801010000-alice-0033
+message_sha256: c0ffee
+decision: paused
+mode: auto_review
+reason_codes:
+- expected_files_touched_exceeds_threshold
+scope_envelope:
+  estimated_minutes: 45
+  expected_files_touched: 5
+  risk_tier: P1
+  target_repo: acme/widgets
+  destructive_ops: false
+  external_side_effects: true
+  touches_auth_config_or_secrets: false
+  touches_dependencies: false
+  public_visibility: false
+  creates_or_updates_pr: true
+  comments_on_github: false
+  commits_changes: true
+  merges_pr: false
+  files_issues: false
+  sends_oacp_reply_only: false
+  continuation_grants: {}
+continuation_grant:
+  decision: not_present
+  scope: null
+result:
+  final_state: done
+  completion_kind: checkpoint_paused
+  actual_minutes: 40
+  actual_files_touched: 9
+  predicted_risk_materialized: true
+  completed_at_utc: '2026-08-01T02:00:00Z'
+  envelope_enforcement: none
+  human_outcome:
+    recorded: true
+    actor: alice
+    decision: approved
+    decided_at_utc: '2026-08-01T01:10:00Z'
+    decision_latency_seconds: 600
+    pause_reason_codes:
+    - expected_files_touched_exceeds_threshold
+    grant:
+      decision: not_requested
+  threshold_checkpoint:
+    evaluated: true
+    actual_minutes: 40
+    actual_files_touched: 9
+    side_effects_actual:
+      merges_pr: false
+      comments_on_github: false
+      commits_changes: false
+      files_issues: false
+      creates_or_updates_pr: false
+    breached: true
+    breached_fields:
+    - actual_files_touched
+    declaration_errors: []
+    breach_basis: realized
+    breach_sub_basis: null
+    paused_at_utc: '2026-08-01T02:00:00Z'
+    action: resumed_after_reauthorization
+    predicted_risk_materialized: true
+    completed_at_utc: '2026-08-01T02:00:00Z'
+    reauthorization:
+      presented: true
+      channel: receiver_human
+      decision: approved
+      decided_at_utc: '2026-08-01T02:05:00Z'
+      actor: alice
+      source_message_id: null
+      requested_scope: null
+      scope: null
+      disposition: resumed
+      cleared_paused_at_utc: '2026-08-01T02:05:00Z'
+      advisory: []
+    terminal_time: true
+  work_started_at_utc: '2026-08-01T01:20:00Z'
+  finalizer:
+    name: oacp autonomy-finalize
+    schema_version: 1
+  reply_message_id: null
+  artifacts: []
+conversation_id: null
+parent_message_id: null
+evaluation_id: eval-0000000000000033

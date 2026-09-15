@@ -14,7 +14,11 @@
 #
 # Runner: tests/test_autonomy_ledger_replay.py. A conforming evaluator records
 # every expected axis in `admission_axes` and surfaces every non-primary one
-# through `co_occurring_reason_codes`, with the verdict unchanged.
+# through `co_occurring_reason_codes`, with the verdict unchanged — except
+# ledger-07 and ledger-22, whose recorded lexical hard stops demote under the
+# declared-capability rule (the flag they declared true now governs); their
+# entries below pin the post-rule verdict, and the `declared_capability`
+# section replays the move.
 policy:
   max_estimated_minutes: 45
   max_expected_files_touched: 5
@@ -196,9 +200,8 @@ cases:
     merges_pr: true
     files_issues: false
     sends_oacp_reply_only: false
-  expected_matched_pattern: config
   expected_reason_codes:
-  - hard_stop_sensitive_scope
+  - auth_config_or_secrets_pause
   expected_axes:
   - expected_files_touched_exceeds_threshold
   - auth_config_or_secrets_pause
@@ -619,9 +622,8 @@ cases:
     merges_pr: true
     files_issues: true
     sends_oacp_reply_only: false
-  expected_matched_pattern: install dependency
   expected_reason_codes:
-  - hard_stop_external_side_effect
+  - dependency_changes_pause
   expected_axes:
   - estimated_minutes_exceeds_threshold
   - expected_files_touched_exceeds_threshold
@@ -911,3 +913,246 @@ content_sensitivity:
     - hard_stop_content_sensitivity
     expected_axes:
     - external_side_effects_not_pr_artifact
+# Three-head regression corpus for the declared-capability demotion: the
+# dependency-install, credential-rotation, and default-branch-push labels, plus
+# the sensitive-scope tokens, replayed under declared-true, declared-false, and
+# merge-declaring profiles. cat2-01 and cat2-02 reproduce ledger-22 and
+# ledger-07 above; the remaining cases are synthetic controls. A case with
+# `expected_notes` demotes to a `lexical_advisory_declared` note and the flag's
+# own admission pause; a case without keeps the recorded hard stop.
+declared_capability:
+  cases:
+  - case: cat2-01
+    body_line: Install the dependency.
+    task_profile:
+      estimated_minutes: 60
+      risk_tier: P2
+      expected_files_touched: 20
+      destructive_ops: false
+      external_side_effects: true
+      touches_auth_config_or_secrets: false
+      touches_dependencies: true
+      public_visibility: false
+      target_repo: ''
+      creates_or_updates_pr: true
+      comments_on_github: false
+      commits_changes: false
+      merges_pr: true
+      files_issues: true
+      sends_oacp_reply_only: false
+    recorded_reason_codes:
+    - hard_stop_external_side_effect
+    expected_reason_codes:
+    - dependency_changes_pause
+    expected_notes:
+    - code: lexical_advisory_declared
+      matched_pattern: install dependency
+    expected_axes:
+    - estimated_minutes_exceeds_threshold
+    - expected_files_touched_exceeds_threshold
+    - dependency_changes_pause
+    - merges_pr_pause
+    - external_side_effects_not_pr_artifact
+  - case: cat2-02
+    body_line: Edit config.yaml.
+    task_profile:
+      estimated_minutes: 35
+      risk_tier: P2
+      expected_files_touched: 8
+      destructive_ops: false
+      external_side_effects: true
+      touches_auth_config_or_secrets: true
+      touches_dependencies: false
+      public_visibility: false
+      target_repo: example-org/private-repo
+      creates_or_updates_pr: true
+      comments_on_github: false
+      commits_changes: true
+      merges_pr: true
+      files_issues: false
+      sends_oacp_reply_only: false
+    recorded_reason_codes:
+    - hard_stop_sensitive_scope
+    expected_reason_codes:
+    - auth_config_or_secrets_pause
+    expected_notes:
+    - code: lexical_advisory_declared
+      matched_pattern: config
+    expected_axes:
+    - expected_files_touched_exceeds_threshold
+    - auth_config_or_secrets_pause
+    - merges_pr_pause
+  - case: cat2-03
+    body_line: Rotate credentials for the staging bot.
+    task_profile:
+      estimated_minutes: 30
+      risk_tier: P2
+      expected_files_touched: 3
+      destructive_ops: false
+      external_side_effects: true
+      touches_auth_config_or_secrets: true
+      touches_dependencies: false
+      public_visibility: false
+      target_repo: example-org/private-repo
+      creates_or_updates_pr: true
+      comments_on_github: false
+      commits_changes: true
+      merges_pr: false
+      files_issues: false
+      sends_oacp_reply_only: false
+    recorded_reason_codes:
+    - hard_stop_external_side_effect
+    expected_reason_codes:
+    - auth_config_or_secrets_pause
+    expected_notes:
+    - code: lexical_advisory_declared
+      matched_pattern: rotate credentials
+    - code: lexical_advisory_declared
+      matched_pattern: credentials
+    expected_axes:
+    - auth_config_or_secrets_pause
+  - case: cat2-control-undeclared
+    body_line: Install the dependency.
+    task_profile:
+      estimated_minutes: 60
+      risk_tier: P2
+      expected_files_touched: 20
+      destructive_ops: false
+      external_side_effects: true
+      touches_auth_config_or_secrets: false
+      touches_dependencies: false
+      public_visibility: false
+      target_repo: ''
+      creates_or_updates_pr: true
+      comments_on_github: false
+      commits_changes: false
+      merges_pr: true
+      files_issues: true
+      sends_oacp_reply_only: false
+    recorded_reason_codes:
+    - hard_stop_external_side_effect
+    expected_matched_pattern: install dependency
+    expected_reason_codes:
+    - hard_stop_external_side_effect
+    expected_axes:
+    - estimated_minutes_exceeds_threshold
+    - expected_files_touched_exceeds_threshold
+    - merges_pr_pause
+    - external_side_effects_not_pr_artifact
+  - case: cat2-control-contradictory
+    body_line: Rotate credentials for the staging bot.
+    task_profile:
+      estimated_minutes: 30
+      risk_tier: P2
+      expected_files_touched: 3
+      destructive_ops: false
+      external_side_effects: false
+      touches_auth_config_or_secrets: true
+      touches_dependencies: false
+      public_visibility: false
+      creates_or_updates_pr: true
+    recorded_reason_codes:
+    - hard_stop_external_side_effect
+    expected_matched_pattern: rotate credentials
+    expected_reason_codes:
+    - hard_stop_external_side_effect
+    expected_axes:
+    - auth_config_or_secrets_pause
+    - declaration_error
+    - external_side_effects_not_pr_artifact
+  - case: cat2-control-push
+    body_line: Push to main after the review.
+    task_profile:
+      estimated_minutes: 30
+      risk_tier: P2
+      expected_files_touched: 3
+      destructive_ops: false
+      external_side_effects: true
+      touches_auth_config_or_secrets: false
+      touches_dependencies: false
+      public_visibility: false
+      target_repo: example-org/private-repo
+      creates_or_updates_pr: true
+      comments_on_github: false
+      commits_changes: true
+      merges_pr: true
+      files_issues: false
+      sends_oacp_reply_only: false
+    recorded_reason_codes:
+    - hard_stop_external_side_effect
+    expected_matched_pattern: push to main
+    expected_reason_codes:
+    - hard_stop_external_side_effect
+    expected_axes:
+    - merges_pr_pause
+
+# Generic thread grants replay the formerly separate review admission lane.
+# Prior receipts supply human authority; message declarations never supply it.
+thread_grants:
+  cases:
+  - case: review-trigger-migrated
+    expected_decision: auto_accepted
+    expected_reason_codes:
+    - message_valid
+    - message_not_expired
+    - message_hash_recorded
+    - continuation_grant_accepted
+    - workspace_check_required
+    expected_grant_decision: accepted
+    expected_effective_round: 2
+  - case: review-output-context-only
+    message_type: review_lgtm
+    expected_decision: paused
+    expected_reason_codes:
+    - continuation_grant_type_not_granted
+    expected_grant_decision: context_only
+  - case: recognition-disabled
+    enabled: false
+    expected_decision: paused
+    expected_reason_codes:
+    - continuation_grant_ignored_disabled
+    expected_grant_decision: ignored_disabled
+  - case: missing-human-approval
+    omit_approval: true
+    expected_decision: paused
+    expected_reason_codes:
+    - continuation_grant_missing_approval
+    expected_grant_decision: missing_approval
+  - case: expiry-after-message
+    now: '2026-07-01T00:00:00Z'
+    expected_decision: paused
+    expected_reason_codes:
+    - continuation_grant_expired
+    expected_grant_decision: expired
+  - case: denial-before-processing
+    prior_audits:
+    - audits/prior_generic_grant_denied_postmessage.yaml
+    expected_decision: paused
+    expected_reason_codes:
+    - continuation_grant_revoked
+    expected_grant_decision: revoked
+  - case: mixed-invocation-round-floor
+    scope:
+      allowed_types:
+      - review_request
+      - review_addressed
+      max_round: 2
+    body:
+      round: 1
+    prior_audits:
+    - audits/prior_thread_invocation.yaml
+    expected_decision: paused
+    expected_reason_codes:
+    - continuation_grant_round_exceeded
+    expected_grant_decision: round_exceeded
+    expected_effective_round: 3
+  - case: flat-effect-drift
+    body:
+      side_effects:
+      - writes_findings_packet
+      - sends_oacp_reply
+      - submits_github_review
+    expected_decision: paused
+    expected_reason_codes:
+    - continuation_grant_scope_exceeded
+    expected_grant_decision: scope_exceeded

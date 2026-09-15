@@ -1,0 +1,44 @@
+schema_version: 2
+spec_version: "0.5.1"
+created_at_utc: '2026-05-26T09:00:05Z'
+receiver: codex
+sender: alice
+message_id: msg-20260526090000-alice-parent
+message_type: review_request
+conversation_id: conv-20260526-widget-088
+decision: paused
+mode: auto_review
+reason_codes:
+- continuation_grant_missing_approval
+result:
+  final_state: done
+  completion_kind: admission_paused
+  human_outcome:
+    recorded: true
+    actor: human
+    decision: approved
+    decided_at_utc: '2026-05-26T09:05:00Z'
+    decision_latency_seconds: 295
+    pause_reason_codes:
+    - continuation_grant_missing_approval
+    grant:
+      decision: approved
+      request_present: false
+      request_error: null
+      requested_scope: null
+      granted_scope:
+        allowed_types:
+        - review_request
+        max_round: 3
+        expires_at_utc: '2026-06-30T00:00:00Z'
+        max_actual_minutes: 30
+        max_actual_files_touched: 3
+        creates_or_updates_pr: false
+        comments_on_github: false
+        commits_changes: false
+        merges_pr: false
+        files_issues: false
+        writes_findings_packet: true
+        sends_oacp_reply: true
+        submits_github_review: false
+  work_started_at_utc: '2026-05-26T09:06:00Z'

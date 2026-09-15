@@ -75,7 +75,7 @@ body: |
 | `pr` | Yes | Pull request number |
 | `branch` | Yes | Branch name under review |
 | `diff_summary` | Yes | Brief summary of the changes |
-| `repo` | No* | Repository slug (`owner/repo`). *Required when the request relies on a continuation grant — scope matching fails closed without it |
+| `repo` | No* | Repository slug (`owner/repo`). *Required on granted rounds; the review workflow validates it against the approved thread's repository and PR before work |
 | `round` | No* | 1-based review round of this request (default `1`). *Declare explicitly on granted follow-up rounds; the receiver floors it against its own audit trail |
 | `declared_head` | No | Full commit SHA the author believes is the PR head. Advisory only — the reviewer never trusts it (see Exact-Head Validation) |
 | `side_effects` | No | Review side effects this round needs beyond the defaults (`writes_findings_packet`, `sends_oacp_reply`); entries from `comments_on_github`, `submits_github_review` |
@@ -248,29 +248,50 @@ context, never evidence:
 
 By default every reviewer invocation requires explicit human confirmation
 per round. A human may grant a bounded, revocable
-`approved_thread_continuation` with a `review_loop` scope for one PR
-review thread; a fresh in-scope same-thread `review_request` then
-auto-invokes the reviewer. The grant authorizes running the round — never
-its verdict, and never trust in the declared head. Scope shape,
-arbitration order, revocation, and audit recording are specified in
-`autonomy.md` → "Review-loop continuation"; grant recognition is enabled
+`approved_thread_continuation` for the approved review thread, with
+`review_request` in its flat scope's `allowed_types`. A fresh in-scope
+same-thread request then auto-invokes the reviewer. List `review_addressed`
+explicitly only when it should start a manual continuation; reviewer-output
+types cannot start work. The grant authorizes running the round, never its
+verdict or trust in a declared head. Scope shape, arbitration, revocation,
+and audit recording use the generic
+[Continuation Grants](autonomy.md#continuation-grants) contract.
+Grant recognition is enabled
 by receiver config (`autonomy.continuation_grants.enabled`), which by
 itself never creates standing authority.
+
+The review workflow **MUST** establish the repository and PR from the
+approved thread and validate each request against that identity before
+side effects. The generic gate does not parse `repo`, `pr`, or
+`declared_head`, and does not compare head SHAs. The review skill performs
+and records the [Exact-Head Validation](#exact-head-validation) checks,
+including missing or mismatched declared heads. An unrelated PR cannot
+inherit review authority merely by reusing the thread identifier.
 
 All guards in this protocol are unchanged under a grant: stateless
 one-round invocations, exact-head validation, head-drift invalidation,
 round limits, and budget controls. For rounds beyond the protocol default
 below, a valid in-scope continuation grant counts as recorded current
-human direction; without one, the escalation gate applies unchanged.
+human direction; without one, the escalation gate applies unchanged. The
+generic `max_round` floor counts the receiver's actual invocations of all
+types listed by the governing grant, including task invocations in a mixed
+grant. It cannot be reset by a lower declared review round or a new grant.
 
-The grant's `permitted_side_effects` binds the invocation, not just its
-admission: the dispatcher passes the accepted permitted set to the
+The flat scope's effect booleans bind the invocation, not just its
+admission: the dispatcher passes the accepted scope to the
 reviewer as its bound, and the reviewer **MUST NOT** perform an outward
 action whose entry is `false` — GitHub status comments and GitHub review
 submission are skipped (and recorded as withheld in the OACP reply) when
-not permitted; findings packets and signed OACP replies are the baseline
-a grant is expected to permit. A round that cannot complete without a
-forbidden effect pauses instead of performing it.
+not permitted. `comments_on_github` and `submits_github_review` are separate
+permissions; `writes_findings_packet` and `sends_oacp_reply` are the baseline
+effects a review grant is expected to permit. A round that cannot complete
+without a forbidden effect pauses instead of performing it. Time, file,
+and effect limits remain enforceable through the accepted invocation's
+concrete scope envelope, checkpoint actuals, and terminal finalization.
+
+Legacy nested review scopes require fresh human approval of a complete flat
+scope; historical audit evidence is preserved. See the
+[migration contract](autonomy.md#migration-from-legacy-scopes).
 
 ### Round Limits
 

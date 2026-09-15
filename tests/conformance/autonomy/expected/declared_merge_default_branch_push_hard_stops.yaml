@@ -1,0 +1,17 @@
+case: declared_merge_default_branch_push_hard_stops
+config: configs/auto_review_standard.yaml
+message: messages/declared_merge_default_branch_push.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - hard_stop_external_side_effect
+  matched_pattern: "push to main"
+  logged_notes: []
+  co_occurring_reason_codes:
+    - merges_pr_pause
+  result:
+    final_state: paused
+    completion_kind: admission_paused
+  task_profile:
+    merges_pr: true

@@ -1,0 +1,15 @@
+case: thread_grant_missing_approval_pauses
+config: configs/auto_review_continuation_enabled.yaml
+message: messages/thread_grant_unapproved.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+  - continuation_grant_missing_approval
+  result:
+    final_state: paused
+    completion_kind: admission_paused
+  continuation_grant:
+    decision: missing_approval
+    standing_grant_found: false
+now: '2026-05-26T12:30:00Z'

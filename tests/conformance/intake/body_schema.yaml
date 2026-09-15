@@ -1,0 +1,142 @@
+# Envelope/body validation cases; signed at execution with scratch keys.
+valid_bodies:
+  handoff: |
+    source_agent: carol
+    target_agent: dave
+    intent: Continue analysis
+    artifacts_to_review:
+      - sample.txt
+    definition_of_done:
+      - Report findings
+    context_bundle:
+      files_touched:
+        - sample.txt
+      decisions_made:
+        - Continue analysis
+      blockers_hit:
+        - none
+      suggested_next_steps:
+        - Read sample.txt
+  handoff_complete: |
+    issue: "42"
+    pr: "43"
+    branch: topic/sample
+    tests_run: pytest
+    next_owner: dave
+cases:
+  well_formed: {}
+  malformed_skill_body:
+    body: Continue analysis
+  absent_skill_fields:
+    body: '{}'
+  missing_required:
+    remove:
+    - subject
+  nested_required:
+    set:
+      subject:
+        nested: value
+  missing_body:
+    remove:
+    - body
+  empty_body:
+    body: ''
+  nested_body:
+    set:
+      body:
+        nested: value
+  oversized_body:
+    repeat_body: 20001
+  valid_optional:
+    set:
+      related_packet: sample
+      related_pr: '43'
+      context_keys: sample
+      channel: analysis
+      autonomy_hint: auto_proceed
+  nested_optional:
+    set:
+      related_packet:
+      - sample
+  unknown_optional:
+    set:
+      unknown_field: value
+  wrong_type_telemetry:
+    set:
+      model: sample-model
+  bad_telemetry:
+    set:
+      input_tokens: '-1'
+  valid_thread:
+    set:
+      conversation_id: conv-20260914-carol-000001
+      parent_message_id: msg-parent
+  malformed_thread:
+    set:
+      conversation_id: bad-thread
+  long_parent:
+    set:
+      parent_message_id: ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+  future_expiry:
+    set:
+      expires_at: '2099-01-01T00:00:00Z'
+  expired:
+    set:
+      expires_at: '2000-01-01T00:00:00Z'
+  bad_expiry:
+    set:
+      expires_at: not-a-date
+  bad_calendar_expiry:
+    set:
+      expires_at: '2099-02-30T00:00:00Z'
+  valid_profile:
+    append_body: |
+      task_profile:
+        estimated_minutes: 5
+        expected_files_touched: 1
+        risk_tier: P2
+        destructive_ops: false
+        external_side_effects: false
+        touches_auth_config_or_secrets: false
+        touches_dependencies: false
+        public_visibility: false
+        sends_oacp_reply_only: true
+        continuation_grants: {}
+  bad_profile:
+    append_body: |
+      task_profile: [
+  bad_grant_shape:
+    append_body: |
+      task_profile:
+        estimated_minutes: 5
+        expected_files_touched: 1
+        risk_tier: P2
+        destructive_ops: false
+        external_side_effects: false
+        touches_auth_config_or_secrets: false
+        touches_dependencies: false
+        public_visibility: false
+        sends_oacp_reply_only: true
+        continuation_grants: []
+  missing_required_profile:
+    require_profile: true
+  unsigned:
+    signing: absent
+  broken_auth:
+    signing: malformed
+  nonfinal_auth:
+    signing: nonfinal
+  skill_and_expiry_invalid:
+    body: Continue analysis
+    set:
+      expires_at: bad
+  skill_and_profile_invalid:
+    body: |
+      Continue analysis
+      task_profile: [
+  skill_and_auth_invalid:
+    body: Continue analysis
+    signing: malformed
+  always_pause_skill_invalid:
+    body: Continue analysis
+    always_pause: true

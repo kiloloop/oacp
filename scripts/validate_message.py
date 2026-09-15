@@ -258,7 +258,14 @@ def _is_nonnegative_number(value: Any) -> bool:
     return math.isfinite(number) and number >= 0
 
 
-def validate_message_dict(data: Dict[str, Any]) -> List[str]:
+def validate_message_dict(
+    data: Dict[str, Any], *, advisories: Optional[List[Dict[str, str]]] = None
+) -> List[str]:
+    """Return envelope errors; optionally collect non-rejecting body findings.
+
+    The error-list API is preserved for existing callers. Skill body checks
+    remain advisory for 0.5.2 and leave this call path in 0.5.3.
+    """
     errors: List[str] = []
 
     unknown = sorted(set(data.keys()) - ALLOWED_FIELDS)
@@ -397,12 +404,20 @@ def validate_message_dict(data: Dict[str, Any]) -> List[str]:
     if body and len(body) > 20000:
         errors.append("field 'body' is too long (max 20000 chars)")
 
-    if msg_type == "handoff" and body:
-        for err in validate_handoff_packet_text(body):
-            errors.append(f"handoff body: {err}")
-    if msg_type == "handoff_complete" and body:
-        for err in validate_handoff_complete_text(body):
-            errors.append(f"handoff_complete body: {err}")
+    body_checks = {
+        "handoff": validate_handoff_packet_text,
+        "handoff_complete": validate_handoff_complete_text,
+    }
+    if msg_type in body_checks and body:
+        # A skill-owned schema cannot reject a universal envelope. Keep its
+        # diagnostics for one advisory wave before removing these checks.
+        for detail in body_checks[msg_type](body):
+            if advisories is not None:
+                advisories.append({
+                    "code": "skill_owned_body_schema",
+                    "severity": "advisory",
+                    "detail": f"{msg_type} body: {detail}",
+                })
 
     # Signed-message auth trailer: strict structural validation (framing +
     # locked JOSE profile), no crypto — verification is receiver-side.
@@ -414,7 +429,9 @@ def validate_message_dict(data: Dict[str, Any]) -> List[str]:
     return errors
 
 
-def validate_message_file(path: Path) -> List[str]:
+def validate_message_file(
+    path: Path, *, advisories: Optional[List[Dict[str, str]]] = None
+) -> List[str]:
     if not path.is_file():
         return [f"message file does not exist: {path}"]
     try:
@@ -431,7 +448,7 @@ def validate_message_file(path: Path) -> List[str]:
     except MessageValidationError as exc:
         return [str(exc)]
 
-    errors = validate_message_dict(data)
+    errors = validate_message_dict(data, advisories=advisories)
 
     # Raw-position rule for signed messages, checked against the exact
     # on-disk bytes: the auth trailer must be the final physical line,
@@ -458,7 +475,13 @@ def main() -> int:
     args = parser.parse_args()
 
     path = Path(args.message_file)
-    errors = validate_message_file(path)
+    advisories: List[Dict[str, str]] = []
+    errors = validate_message_file(path, advisories=advisories)
+    for finding in advisories:
+        print(
+            f"ADVISORY: {finding['code']}: {finding['detail']}",
+            file=sys.stderr,
+        )
     if errors:
         for err in errors:
             print(f"ERROR: {err}", file=sys.stderr)
