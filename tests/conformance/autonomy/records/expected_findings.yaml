@@ -28,12 +28,16 @@ off_enum_final_state_completed.yaml:
 - off_enum_final_state
 off_enum_kind_completed_after_human_approval.yaml:
 - off_enum_completion_kind
+- legacy_born_done_unfinalized
 off_enum_kind_executed.yaml:
 - off_enum_completion_kind
+- legacy_born_done_unfinalized
 off_enum_kind_human_approved_completed.yaml:
 - off_enum_completion_kind
+- legacy_born_done_unfinalized
 off_enum_kind_review_round_delivered.yaml:
 - off_enum_completion_kind
+- legacy_born_done_unfinalized
 superseded_legacy_kind_repaired.yaml: []
 superseded_legacy_successor_live.yaml: []
 superseded_successor_live.yaml: []
@@ -55,3 +59,14 @@ two_clock_adjustments.yaml: []
 pause_and_clock_adjustment.yaml: []
 invalid_live_clock_adjustment.yaml:
 - invalid_clock_adjustments
+legacy_born_done_unfinalized.yaml:
+- legacy_born_done_unfinalized
+two_cleared_pauses.yaml: []
+invalid_pause_intervals.yaml:
+- invalid_pause_intervals
+two_pauses_first_answer_human_outcome.yaml: []
+declined_checkpoint_marked_done.yaml:
+- terminal_paused_without_outcome
+terminal_time_pause_cleared.yaml: []
+terminal_time_pause_after_completion.yaml:
+- actual_minutes_inconsistent

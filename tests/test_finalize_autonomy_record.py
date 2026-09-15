@@ -17,6 +17,7 @@ from finalize_autonomy_record import (  # noqa: E402
     CANONICAL_CHECKPOINT_AXES,
     DuplicateKeyError,
     FINALIZER_PROVENANCE,
+    FINDING_SEVERITIES,
     _predecessor_evaluation_id,
     apply_checkpoint,
     finalize_audit_record,
@@ -25,7 +26,11 @@ from finalize_autonomy_record import (  # noqa: E402
     sweep_audit_dir,
     validate_audit_record,
 )
-from autonomy_gate import evaluate_threshold_checkpoint  # noqa: E402
+from autonomy_gate import (  # noqa: E402
+    continuation_scope_envelope,
+    evaluate_threshold_checkpoint,
+    normalize_continuation_scope,
+)
 from oacp_doctor import check_autonomy  # noqa: E402
 
 
@@ -102,6 +107,191 @@ def _write(tmp_path: Path, record: Dict[str, Any], name: str = "20260801T010000Z
     path = tmp_path / name
     path.write_text(yaml.safe_dump(record, sort_keys=False), encoding="utf-8")
     return path
+
+
+def _generic_invocation_record() -> Dict[str, Any]:
+    scope, error = normalize_continuation_scope(
+        {
+            "allowed_types": ["review_request"],
+            "max_round": 3,
+            "expires_at_utc": "2026-09-01T00:00:00Z",
+            "max_actual_minutes": 30,
+            "max_actual_files_touched": 3,
+            "writes_findings_packet": True,
+            "sends_oacp_reply": True,
+        }
+    )
+    assert error is None
+    grant = {"decision": "accepted", "scope": scope}
+    envelope = continuation_scope_envelope(
+        {"type": "review_request", "priority": "P1", "body": "round: 1"},
+        grant,
+    )
+    record = _record(
+        decision="auto_accepted",
+        completion_kind="auto_accepted",
+        final_state="pending",
+        envelope=envelope,
+    )
+    record.update(
+        message_type="review_request",
+        scope_envelope_source="continuation_grant",
+        continuation_grant=grant,
+    )
+    return record
+
+
+def test_generic_invocation_finalizes_with_granted_effects(tmp_path: Path) -> None:
+    record = _generic_invocation_record()
+    updated, paused = finalize_audit_record(
+        _write(tmp_path, record),
+        record,
+        final_state="done",
+        actuals={
+            "work_started_at_utc": "2026-08-01T01:00:00Z",
+            "actual_minutes": 10,
+            "actual_files_touched": 1,
+            "side_effects_actual": {
+                "writes_findings_packet": True,
+                "sends_oacp_reply": True,
+            },
+        },
+        reply_message_id="msg-20260801011000-claude-0001",
+        now_utc="2026-08-01T01:10:00Z",
+    )
+    assert not paused
+    assert updated["result"]["final_state"] == "done"
+    assert updated["result"]["threshold_checkpoint"]["action"] == "continued_with_grant"
+    assert not [f for f in validate_audit_record(updated) if f["severity"] == "error"]
+
+
+@pytest.mark.parametrize(
+    "actuals, breached",
+    [
+        ({"actual_minutes": 31, "actual_files_touched": 1}, "actual_minutes"),
+        ({"actual_minutes": 1, "actual_files_touched": 4}, "actual_files_touched"),
+        (
+            {
+                "actual_minutes": 1,
+                "actual_files_touched": 1,
+                "side_effects_actual": {"submits_github_review": True},
+            },
+            "side_effects_actual.submits_github_review",
+        ),
+    ],
+)
+def test_generic_invocation_cannot_finalize_past_grant(
+    tmp_path: Path,
+    actuals: Dict[str, Any],
+    breached: str,
+) -> None:
+    record = _generic_invocation_record()
+    actuals["work_started_at_utc"] = "2026-08-01T01:00:00Z"
+    updated, paused = finalize_audit_record(
+        _write(tmp_path, record),
+        record,
+        final_state="done",
+        actuals=actuals,
+        reply_message_id="msg-20260801013100-claude-0001",
+        now_utc="2026-08-01T01:31:00Z",
+    )
+    assert paused
+    assert updated["result"]["final_state"] == "paused"
+    assert breached in updated["result"]["threshold_checkpoint"]["breached_fields"]
+
+
+@pytest.mark.parametrize(
+    "scope_delta",
+    [
+        {"allowed_types": ["review_lgtm"]},
+        {"max_round": True},
+        {"expires_at_utc": "not-a-date"},
+        {"submits_github_review": "true"},
+        {"review_loop": {}},
+    ],
+)
+def test_generic_scope_grammar_is_checked_by_durable_validator(
+    scope_delta: Dict[str, Any],
+) -> None:
+    record = _generic_invocation_record()
+    record["continuation_grant"]["scope"].update(scope_delta)
+    assert "decision_kind_incoherent" in {
+        f["code"] for f in validate_audit_record(record)
+    }
+    record = _record(human_outcome=_human_outcome())
+    scope = _generic_invocation_record()["continuation_grant"]["scope"]
+    scope.update(scope_delta)
+    record["result"]["human_outcome"]["grant"] = {
+        "decision": "approved",
+        "granted_scope": scope,
+    }
+    assert "invalid_human_outcome" in {f["code"] for f in validate_audit_record(record)}
+
+
+def test_unknown_actual_effect_is_not_silently_dropped() -> None:
+    with pytest.raises(ValueError, match="unknown effect"):
+        evaluate_threshold_checkpoint(
+            ENVELOPE,
+            {},
+            {
+                "actual_minutes": 1,
+                "actual_files_touched": 1,
+                "side_effects_actual": {"submits_github_reveiw": True},
+            },
+        )
+
+
+@pytest.mark.parametrize("source", ["continuation_grant", "task_profile", None])
+@pytest.mark.parametrize("mutation", ["empty", "effect", "minutes", "files", "risk", "type"])
+def test_generic_receipt_cannot_launder_envelope_authority(
+    tmp_path: Path, source: Optional[str], mutation: str,
+) -> None:
+    record = _generic_invocation_record()
+    record["scope_envelope_source"] = source
+    if mutation == "empty":
+        record["scope_envelope"] = {}
+    elif mutation == "effect":
+        record["scope_envelope"]["submits_github_review"] = True
+    elif mutation == "minutes":
+        record["scope_envelope"]["estimated_minutes"] = 31
+    elif mutation == "files":
+        record["scope_envelope"]["expected_files_touched"] = 4
+    elif mutation == "risk":
+        record["scope_envelope"]["touches_dependencies"] = True
+    else:
+        record["continuation_grant"]["scope"]["allowed_types"] = ["review_lgtm"]
+    assert "decision_kind_incoherent" in {f["code"] for f in validate_audit_record(record)}
+    with pytest.raises((ValueError, KeyError)):
+        finalize_audit_record(
+            _write(tmp_path, record), record, final_state="done",
+            actuals={"work_started_at_utc": "2026-08-01T01:00:00Z",
+                     "actual_minutes": 1, "actual_files_touched": 1,
+                     "side_effects_actual": {"submits_github_review": mutation == "effect"}},
+            reply_message_id="msg-20260801010100-claude-0001", now_utc="2026-08-01T01:01:00Z",
+        )
+
+
+@pytest.mark.parametrize("effect", ["writes_findings_packet", "sends_oacp_reply", "submits_github_review"])
+def test_generic_new_effect_can_pause_before_execution(effect: str) -> None:
+    record = _generic_invocation_record()
+    record["scope_envelope"][effect] = False
+    record["continuation_grant"]["scope"][effect] = False
+    actuals = {"work_started_at_utc": "2026-08-01T01:00:00Z", "actual_minutes": 1,
+               "actual_files_touched": 0, "declared_intent_fields": [f"task_profile.{effect}"],
+               "paused_at_utc": "2026-08-01T01:01:00Z"}
+    updated, paused = apply_checkpoint(record, actuals, now_utc="2026-08-01T01:01:00Z")
+    assert paused
+    checkpoint = updated["result"]["threshold_checkpoint"]
+    assert checkpoint["breach_basis"] == "declared_intent"
+    assert not any(checkpoint["side_effects_actual"].values())
+    assert not [f for f in validate_audit_record(updated) if f["severity"] == "error"]
+    actuals["reauthorization"] = {"receiver_human": {
+        "decision": "modified", "actor": "alice", "decided_at_utc": "2026-08-01T01:02:00Z",
+        "scope": {effect: True},
+    }}
+    resumed, paused = apply_checkpoint(updated, actuals, now_utc="2026-08-01T01:02:00Z")
+    assert not paused
+    assert resumed["result"]["threshold_checkpoint"]["action"] == "resumed_after_reauthorization"
 
 
 # ── strict loading ────────────────────────────────────────────────────────
@@ -245,6 +435,109 @@ def test_pending_final_state_is_valid_live_state() -> None:
     assert validate_audit_record(record) == []
 
 
+def test_legacy_born_done_record_stays_valid_and_open(tmp_path: Path) -> None:
+    """A `done` receipt with no completion stamp is the pre-0.5.2 auto-accepted
+    birth: still valid, still open, and finalizable exactly once."""
+    from finalize_autonomy_record import _is_closed
+
+    record = _record(decision="auto_accepted", completion_kind="auto_accepted", final_state="done")
+    assert [f["code"] for f in validate_audit_record(record)] == ["legacy_born_done_unfinalized"]
+    assert _is_closed(record) is False
+
+    path = _write(tmp_path, record)
+    updated, paused = finalize_audit_record(
+        path,
+        record,
+        final_state="done",
+        actuals={
+            "actual_minutes": 20,
+            "actual_files_touched": 3,
+            "work_started_at_utc": "2026-08-01T01:40:00Z",
+            "completed_at_utc": "2026-08-01T02:00:00Z",
+            "side_effects_actual": {"creates_or_updates_pr": True, "commits_changes": True},
+        },
+    )
+    assert paused is False
+    assert updated["result"]["final_state"] == "done"
+    assert updated["result"]["completed_at_utc"] == "2026-08-01T02:00:00Z"
+    assert _is_closed(updated) is True
+    assert validate_audit_record(updated) == []
+    with pytest.raises(ValueError, match="already closed"):
+        finalize_audit_record(
+            path, updated, final_state="done",
+            actuals={"actual_minutes": 20, "actual_files_touched": 3},
+        )
+
+
+def test_validator_flags_legacy_born_done_unfinalized() -> None:
+    # The exact pre-0.5.2 birth: auto-accepted, `done`, no completion stamp.
+    record = _record(decision="auto_accepted", completion_kind="auto_accepted", final_state="done")
+    findings = validate_audit_record(record)
+    assert [(f["code"], f["severity"]) for f in findings] == [
+        ("legacy_born_done_unfinalized", "advisory"),
+    ]
+    assert FINDING_SEVERITIES["legacy_born_done_unfinalized"] == "advisory"
+
+
+def test_legacy_born_done_advisory_is_silent_on_pending_and_finalized() -> None:
+    # Neither the 0.5.2 birth nor a finalized receipt is legacy history.
+    pending = _record(decision="auto_accepted", completion_kind="auto_accepted", final_state="pending")
+    assert validate_audit_record(pending) == []
+    finalized = _record(decision="auto_accepted", completion_kind="auto_accepted", final_state="done")
+    finalized["result"].update({
+        "actual_minutes": 20,
+        "actual_files_touched": 3,
+        "work_started_at_utc": "2026-08-01T01:40:00Z",
+        "completed_at_utc": "2026-08-01T02:00:00Z",
+    })
+    assert validate_audit_record(finalized) == []
+    paused_done = _record(final_state="done", human_outcome=_human_outcome())
+    assert "legacy_born_done_unfinalized" not in {f["code"] for f in validate_audit_record(paused_done)}
+
+
+def test_validator_flags_legacy_terminal_without_actuals() -> None:
+    record = _record(human_outcome=_human_outcome())
+    record["result"].update({
+        "final_state": "done",
+        "work_started_at_utc": "2026-08-01T01:40:00Z",
+        "completed_at_utc": "2026-08-01T02:00:00Z",
+    })
+
+    findings = validate_audit_record(record)
+
+    assert [(f["code"], f["severity"]) for f in findings] == [
+        ("terminal_missing_actuals", "advisory"),
+        ("terminal_missing_actuals", "advisory"),
+    ]
+    assert all("legacy receipt" in f["detail"] for f in findings)
+
+
+def test_validator_rejects_canonical_receipt_without_actuals() -> None:
+    record = _record(human_outcome=_human_outcome())
+    record["result"].update({
+        "final_state": "done",
+        "work_started_at_utc": "2026-08-01T01:40:00Z",
+        "completed_at_utc": "2026-08-01T02:00:00Z",
+        "finalizer": dict(FINALIZER_PROVENANCE),
+    })
+
+    findings = validate_audit_record(record)
+
+    assert [(f["code"], f["severity"]) for f in findings] == [
+        ("canonical_writer_missing_actuals", "error"),
+        ("canonical_writer_missing_actuals", "error"),
+    ]
+    assert all("canonical finalizer" in f["detail"] for f in findings)
+
+
+def test_missing_actuals_severities_are_pinned() -> None:
+    # In-flight work is `pending`, so a completed receipt without actuals is
+    # unambiguous: historical when unmarked, an integrity error when the
+    # canonical finalizer claims it.
+    assert FINDING_SEVERITIES["terminal_missing_actuals"] == "advisory"
+    assert FINDING_SEVERITIES["canonical_writer_missing_actuals"] == "error"
+
+
 def test_terminal_with_paused_checkpoint_action_flagged() -> None:
     record = _record(
         decision="auto_accepted",
@@ -383,7 +676,7 @@ def test_sweep_reports_duplicate_yaml_key(tmp_path: Path) -> None:
 
 
 def test_checkpoint_within_envelope_keeps_run_state() -> None:
-    record = _record(decision="auto_accepted", completion_kind="auto_accepted", final_state="done")
+    record = _record(decision="auto_accepted", completion_kind="auto_accepted", final_state="pending")
     updated, paused = apply_checkpoint(
         record,
         {
@@ -393,12 +686,13 @@ def test_checkpoint_within_envelope_keeps_run_state() -> None:
         },
     )
     assert paused is False
+    assert updated["result"]["final_state"] == "pending"
     assert updated["result"]["completion_kind"] == "auto_accepted"
     assert updated["result"]["threshold_checkpoint"]["action"] == "within_declared_envelope"
 
 
 def test_checkpoint_breach_writes_paused_shape() -> None:
-    record = _record(decision="auto_accepted", completion_kind="auto_accepted", final_state="done")
+    record = _record(decision="auto_accepted", completion_kind="auto_accepted", final_state="pending")
     updated, paused = apply_checkpoint(
         record,
         {
@@ -889,7 +1183,7 @@ def test_validator_reports_inconsistent_work_clock() -> None:
 
 
 def test_cli_checkpoint_breach_exits_4(tmp_path: Path) -> None:
-    record = _record(decision="auto_accepted", completion_kind="auto_accepted", final_state="done")
+    record = _record(decision="auto_accepted", completion_kind="auto_accepted", final_state="pending")
     path = _write(tmp_path, record)
     rc = main([
         str(path),
@@ -2105,7 +2399,7 @@ def test_exclusions_use_union_and_round_only_once(intervals, minutes):
 def test_scalar_and_adjustment_overlap_count_once():
     from finalize_autonomy_record import _active_minutes, _with_clock_adjustments
     record = _clock_record()
-    record["result"]["threshold_checkpoint"] = {"paused_at_utc": "2026-08-01T01:30:00Z", "reauthorization": {"cleared_paused_at_utc": "2026-08-01T01:40:00Z"}}
+    record["result"]["threshold_checkpoint"] = {"paused_at_utc": "2026-08-01T01:30:00Z", "reauthorization": {"disposition": "resumed", "cleared_paused_at_utc": "2026-08-01T01:40:00Z"}}
     record = _with_clock_adjustments(record, _clock_actuals([_adjustment()]))
     assert _active_minutes(record, "2026-08-01T01:00:00Z", "2026-08-01T02:00:00Z") == 45
     record["result"]["threshold_checkpoint"].pop("paused_at_utc")
@@ -2240,3 +2534,482 @@ def test_cli_refuses_cancellation_flags_for_done_without_write(tmp_path):
     original = path.read_bytes()
     assert main([str(path), "--final-state", "done", "--cancelled-by", "human"]) == 2
     assert path.read_bytes() == original
+
+
+# ── pause intervals: every answered pause keeps excluding its interval ────
+
+
+def _approval(decided_at: str) -> Dict[str, Any]:
+    return {"receiver_human": {"decision": "approved", "decided_at_utc": decided_at, "actor": "alice"}}
+
+
+def test_second_checkpoint_retires_answered_pause_and_clock_excludes_both(tmp_path):
+    from finalize_autonomy_record import _active_minutes
+    record = _clock_record()  # work started 01:00, envelope 45 min / 5 files
+    first, paused = apply_checkpoint(
+        record,
+        {"actual_minutes": 50, "actual_files_touched": 1, "paused_at_utc": "2026-08-01T01:50:00Z",
+         "reauthorization": _approval("2026-08-01T01:55:00Z")},
+        now_utc="2026-08-01T01:55:00Z",
+    )
+    assert not paused and "pause_intervals" not in first["result"]
+    assert first["result"]["threshold_checkpoint"]["reauthorization"]["cleared_paused_at_utc"] == "2026-08-01T01:55:00Z"
+
+    second, paused = apply_checkpoint(
+        first,
+        {"actual_minutes": 75, "actual_files_touched": 9, "paused_at_utc": "2026-08-01T02:20:00Z"},
+        now_utc="2026-08-01T02:20:00Z",
+    )
+    assert paused
+    assert second["result"]["pause_intervals"] == [{
+        "paused_at_utc": "2026-08-01T01:50:00Z",
+        "cleared_paused_at_utc": "2026-08-01T01:55:00Z",
+        "breached_fields": ["actual_minutes"],
+        "channel": "receiver_human",
+        "decided_at_utc": "2026-08-01T01:55:00Z",
+        "recorded_at_utc": "2026-08-01T02:20:00Z",
+    }]
+    assert second["result"]["threshold_checkpoint"]["paused_at_utc"] == "2026-08-01T02:20:00Z"
+
+    third, paused = apply_checkpoint(
+        second,
+        {"actual_minutes": 75, "actual_files_touched": 9, "paused_at_utc": "2026-08-01T02:20:00Z",
+         "reauthorization": _approval("2026-08-01T02:30:00Z")},
+        now_utc="2026-08-01T02:30:00Z",
+    )
+    assert not paused
+    assert third["result"]["pause_intervals"] == second["result"]["pause_intervals"]
+
+    done, paused = finalize_audit_record(
+        tmp_path / "a.yaml", third, final_state="done",
+        actuals={"actual_minutes": 75, "actual_files_touched": 9, "completed_at_utc": "2026-08-01T02:30:00Z"},
+    )
+    assert not paused and done["result"]["actual_minutes"] == 75
+    assert _active_minutes(done, "2026-08-01T01:00:00Z", "2026-08-01T02:30:00Z") == 75
+    assert validate_audit_record(done) == []
+    done["result"]["actual_minutes"] = 80  # the first pause counted as active
+    assert "actual_minutes_inconsistent" in {f["code"] for f in validate_audit_record(done)}
+
+
+def test_retirement_is_idempotent_and_leaves_unanswered_pause_current():
+    from finalize_autonomy_record import _retire_answered_pause
+    result = {"threshold_checkpoint": {
+        "breached": True, "paused_at_utc": "2026-08-01T01:50:00Z", "breached_fields": ["actual_minutes"],
+        "reauthorization": {"disposition": "resumed", "channel": "receiver_human", "decided_at_utc": "2026-08-01T01:55:00Z",
+                            "cleared_paused_at_utc": "2026-08-01T01:55:00Z"},
+    }}
+    _retire_answered_pause(result, "2026-08-01T02:00:00Z")
+    _retire_answered_pause(result, "2026-08-01T02:05:00Z")
+    assert len(result["pause_intervals"]) == 1
+    assert result["pause_intervals"][0]["recorded_at_utc"] == "2026-08-01T02:00:00Z"
+    unanswered = {"threshold_checkpoint": {
+        "breached": True, "paused_at_utc": "2026-08-01T02:20:00Z", "breached_fields": ["actual_files_touched"],
+        "reauthorization": {"cleared_paused_at_utc": None},
+    }}
+    _retire_answered_pause(unanswered, "2026-08-01T02:25:00Z")
+    assert "pause_intervals" not in unanswered
+
+
+def test_cli_two_pause_lifecycle_derives_clock_from_both_intervals(tmp_path):
+    from record_autonomy_outcome import main as outcome_main
+    path = _write(tmp_path, _record(envelope=dict(ENVELOPE, estimated_minutes=30)))
+    assert outcome_main([str(path), "--decision", "approved", "--decided-at", "2026-08-01T01:02:00Z", "--actor", "alice"]) == 0
+
+    def checkpoint(name, actuals, measured_at):
+        actuals_path = tmp_path / name
+        actuals_path.write_text(yaml.safe_dump(actuals, sort_keys=False), encoding="utf-8")
+        return main([str(path), "--checkpoint", "--actuals", str(actuals_path), "--completed-at", measured_at])
+
+    assert checkpoint("c1.yaml", {"work_started_at_utc": "2026-08-01T01:05:00Z", "actual_files_touched": 1,
+                                  "paused_at_utc": "2026-08-01T01:45:00Z"}, "2026-08-01T01:45:00Z") == 4
+    assert outcome_main([str(path), "--decision", "approved", "--decided-at", "2026-08-01T01:50:00Z", "--actor", "alice"]) == 0
+    assert checkpoint("c2.yaml", {"actual_files_touched": 7, "paused_at_utc": "2026-08-01T02:10:00Z"}, "2026-08-01T02:10:00Z") == 4
+    stored = load_audit_strict(path)
+    assert [e["paused_at_utc"] for e in stored["result"]["pause_intervals"]] == ["2026-08-01T01:45:00Z"]
+    assert stored["result"]["pause_intervals"][0]["recorded_at_utc"] == "2026-08-01T02:10:00Z"
+    assert stored["result"]["threshold_checkpoint"]["actual_minutes"] == 60  # 65 elapsed minus the 5-minute first pause
+    assert outcome_main([str(path), "--decision", "approved", "--decided-at", "2026-08-01T02:15:00Z", "--actor", "alice"]) == 0
+
+    assert main([str(path), "--final-state", "done", "--actual-files-touched", "7", "--completed-at", "2026-08-01T02:15:00Z"]) == 0
+    done = load_audit_strict(path)
+    assert done["result"]["actual_minutes"] == 60  # 70 elapsed minus both 5-minute pauses
+    assert len(done["result"]["pause_intervals"]) == 1
+    assert main([str(path), "--validate"]) == 0
+
+
+def test_union_counts_retired_scalar_and_adjustment_overlap_once():
+    from finalize_autonomy_record import _active_minutes, _with_clock_adjustments
+    record = _clock_record()
+    record["result"]["pause_intervals"] = [{
+        "paused_at_utc": "2026-08-01T01:10:00Z", "cleared_paused_at_utc": "2026-08-01T01:20:00Z",
+        "breached_fields": ["actual_minutes"], "channel": "receiver_human",
+        "decided_at_utc": "2026-08-01T01:20:00Z", "recorded_at_utc": "2026-08-01T01:30:00Z",
+    }]
+    record["result"]["threshold_checkpoint"] = {
+        "paused_at_utc": "2026-08-01T01:15:00Z",
+        "reauthorization": {"disposition": "resumed", "cleared_paused_at_utc": "2026-08-01T01:30:00Z"},
+    }
+    record = _with_clock_adjustments(record, _clock_actuals([_adjustment("2026-08-01T01:25:00Z", "2026-08-01T01:35:00Z")]))
+    assert _active_minutes(record, "2026-08-01T01:00:00Z", "2026-08-01T02:00:00Z") == 35
+
+
+@pytest.mark.parametrize("value", [
+    None, {}, [None], [{}], [{"paused_at_utc": "bad"}],
+    [{"paused_at_utc": "2026-08-01T01:10:00Z", "cleared_paused_at_utc": "2026-08-01T01:05:00Z",
+      "breached_fields": ["actual_minutes"], "channel": "receiver_human",
+      "decided_at_utc": "2026-08-01T01:05:00Z", "recorded_at_utc": "2026-08-01T01:30:00Z"}],
+    [{"paused_at_utc": "2026-08-01T01:10:00Z", "cleared_paused_at_utc": "2026-08-01T01:20:00Z",
+      "breached_fields": [], "channel": "receiver_human",
+      "decided_at_utc": "2026-08-01T01:20:00Z", "recorded_at_utc": "2026-08-01T01:30:00Z"}],
+    [{"paused_at_utc": "2026-08-01T01:10:00Z", "cleared_paused_at_utc": "2026-08-01T01:20:00Z",
+      "breached_fields": ["actual_minutes"], "channel": "gh_comment",
+      "decided_at_utc": "2026-08-01T01:20:00Z", "recorded_at_utc": "2026-08-01T01:30:00Z"}],
+])
+def test_malformed_pause_intervals_fail_live_readback(value):
+    record = _clock_record()
+    record["result"]["pause_intervals"] = value
+    assert "invalid_pause_intervals" in {f["code"] for f in validate_audit_record(record)}
+
+
+def test_retirement_honors_the_first_answer_human_outcome_route():
+    from finalize_autonomy_record import _effective_clear, _retire_answered_pause
+
+    def result(outcome):
+        return {"threshold_checkpoint": {"breached": True, "paused_at_utc": "2026-08-01T01:50:00Z",
+                                         "breached_fields": ["actual_minutes"]},
+                "human_outcome": outcome}
+
+    answered = result(_human_outcome("2026-08-01T01:55:00Z"))
+    assert _effective_clear(answered) == {"cleared_paused_at_utc": "2026-08-01T01:55:00Z",
+                                          "channel": "receiver_human", "decided_at_utc": "2026-08-01T01:55:00Z"}
+    _retire_answered_pause(answered, "2026-08-01T02:20:00Z")
+    assert answered["pause_intervals"] == [{
+        "paused_at_utc": "2026-08-01T01:50:00Z",
+        "cleared_paused_at_utc": "2026-08-01T01:55:00Z",
+        "breached_fields": ["actual_minutes"],
+        "channel": "receiver_human",
+        "decided_at_utc": "2026-08-01T01:55:00Z",
+        "recorded_at_utc": "2026-08-01T02:20:00Z",
+    }]
+    # An admission approval decided before the pause is not its answer, and a
+    # declined answer clears nothing: both leave the pause current.
+    for outcome in (_human_outcome("2026-08-01T01:00:00Z"),
+                    dict(_human_outcome("2026-08-01T01:55:00Z"), decision="declined")):
+        unanswered = result(outcome)
+        assert _effective_clear(unanswered) is None
+        _retire_answered_pause(unanswered, "2026-08-01T02:20:00Z")
+        assert "pause_intervals" not in unanswered
+
+
+def test_active_minutes_reads_the_first_answer_human_outcome_as_the_clear():
+    from finalize_autonomy_record import _active_minutes
+    record = _record(decision="auto_accepted", completion_kind="checkpoint_paused", final_state="done",
+                     human_outcome=_human_outcome("2026-08-01T01:55:00Z"))
+    record["result"]["work_started_at_utc"] = "2026-08-01T01:00:00Z"
+    record["result"]["threshold_checkpoint"] = {
+        "breached": True, "paused_at_utc": "2026-08-01T01:50:00Z", "breached_fields": ["actual_minutes"]}
+    # The derive a later checkpoint runs at 02:20: 80 elapsed minus the answered 5-minute pause.
+    assert _active_minutes(record, "2026-08-01T01:00:00Z", "2026-08-01T02:20:00Z") == 75
+    record["result"]["human_outcome"]["decision"] = "declined"
+    assert _active_minutes(record, "2026-08-01T01:00:00Z", "2026-08-01T02:20:00Z") == 50  # uncleared: active work ends at the pause
+
+
+def test_cli_auto_accepted_two_pause_lifecycle_first_answer_lands_in_human_outcome(tmp_path):
+    """An auto-accepted admission with no prior outcome: the recorder lands the
+    first checkpoint answer in human_outcome and routes the second into
+    reauthorization. Both pauses stay excluded from the derived clock and the
+    first answer keeps its provenance."""
+    from record_autonomy_outcome import main as outcome_main
+    path = _write(tmp_path, _record(decision="auto_accepted", completion_kind="auto_accepted", final_state="pending"))
+
+    def checkpoint(name, actuals, measured_at):
+        actuals_path = tmp_path / name
+        actuals_path.write_text(yaml.safe_dump(actuals, sort_keys=False), encoding="utf-8")
+        return main([str(path), "--checkpoint", "--actuals", str(actuals_path), "--completed-at", measured_at])
+
+    assert checkpoint("c1.yaml", {"work_started_at_utc": "2026-08-01T01:00:00Z", "actual_files_touched": 1,
+                                  "paused_at_utc": "2026-08-01T01:50:00Z"}, "2026-08-01T01:50:00Z") == 4
+    assert outcome_main([str(path), "--decision", "approved", "--decided-at", "2026-08-01T01:55:00Z", "--actor", "alice"]) == 0
+    first = load_audit_strict(path)
+    assert first["result"]["human_outcome"]["decided_at_utc"] == "2026-08-01T01:55:00Z"
+    assert first["result"]["threshold_checkpoint"]["reauthorization"]["cleared_paused_at_utc"] is None
+
+    assert checkpoint("c2.yaml", {"actual_files_touched": 9, "paused_at_utc": "2026-08-01T02:20:00Z"}, "2026-08-01T02:20:00Z") == 4
+    second = load_audit_strict(path)
+    assert second["result"]["pause_intervals"] == [{
+        "paused_at_utc": "2026-08-01T01:50:00Z",
+        "cleared_paused_at_utc": "2026-08-01T01:55:00Z",
+        "breached_fields": ["actual_minutes"],
+        "channel": "receiver_human",
+        "decided_at_utc": "2026-08-01T01:55:00Z",
+        "recorded_at_utc": "2026-08-01T02:20:00Z",
+    }]
+    assert second["result"]["threshold_checkpoint"]["actual_minutes"] == 75  # 80 elapsed minus the 5-minute first pause
+    assert outcome_main([str(path), "--decision", "approved", "--decided-at", "2026-08-01T02:30:00Z", "--actor", "alice"]) == 0
+
+    assert main([str(path), "--final-state", "done", "--actual-files-touched", "9", "--completed-at", "2026-08-01T02:30:00Z"]) == 0
+    done = load_audit_strict(path)
+    assert done["result"]["actual_minutes"] == 75  # 90 elapsed minus both pauses
+    assert done["result"]["human_outcome"]["decided_at_utc"] == "2026-08-01T01:55:00Z"  # first answer preserved
+    assert done["result"]["threshold_checkpoint"]["reauthorization"]["cleared_paused_at_utc"] == "2026-08-01T02:30:00Z"
+    assert main([str(path), "--validate"]) == 0
+    done["result"]["actual_minutes"] = 80  # the first pause counted as active
+    assert "actual_minutes_inconsistent" in {f["code"] for f in validate_audit_record(done)}
+
+
+def test_effective_clear_confers_only_the_governing_answer():
+    from finalize_autonomy_record import _effective_clear
+
+    def result(reauth=None, outcome=None):
+        checkpoint = {"breached": True, "paused_at_utc": "2026-08-01T01:55:00Z", "breached_fields": ["actual_minutes"]}
+        if reauth is not None:
+            checkpoint["reauthorization"] = reauth
+        built = {"threshold_checkpoint": checkpoint}
+        if outcome is not None:
+            built["human_outcome"] = outcome
+        return built
+
+    resumed = {"disposition": "resumed", "decision": "approved", "channel": "receiver_human",
+               "decided_at_utc": "2026-08-01T02:00:00Z", "cleared_paused_at_utc": "2026-08-01T02:00:00Z"}
+    assert _effective_clear(result(resumed))["cleared_paused_at_utc"] == "2026-08-01T02:00:00Z"
+    # A later decline keeps the retained clear timestamp as history, never authority,
+    # and the admission approval that predates the pause is no fallback.
+    declined = dict(resumed, disposition="declined", decision="declined")
+    assert _effective_clear(result(declined, _human_outcome("2026-08-01T01:01:00Z"))) is None
+    # A decline recorded at or after a post-pause human outcome withdraws it; one recorded
+    # before it does not — the later receiver-side ruling governs.
+    answered = _human_outcome("2026-08-01T02:00:00Z")
+    assert _effective_clear(result(declined, answered)) is None
+    earlier = dict(declined, decided_at_utc="2026-08-01T01:58:00Z", cleared_paused_at_utc=None)
+    assert _effective_clear(result(earlier, answered))["cleared_paused_at_utc"] == "2026-08-01T02:00:00Z"
+    unanswered = {"disposition": "unanswered", "decision": None, "decided_at_utc": None, "cleared_paused_at_utc": None}
+    assert _effective_clear(result(unanswered, answered))["channel"] == "receiver_human"
+
+
+def test_cli_decline_over_a_retained_clear_refuses_terminal_done_unchanged(tmp_path):
+    """Approve, then decline, the same checkpoint pause through the recorder:
+    the retained clear timestamp is history, terminal done is refused with
+    the record bytes unchanged, and read-back flags a forged done record."""
+    import copy
+    from finalize_autonomy_record import _checkpoint_resolved
+    from record_autonomy_outcome import main as outcome_main
+    path = _write(tmp_path, _record())
+    assert outcome_main([str(path), "--decision", "approved", "--decided-at", "2026-08-01T01:01:00Z", "--actor", "alice"]) == 0
+    actuals = tmp_path / "c1.yaml"
+    actuals.write_text(yaml.safe_dump({"work_started_at_utc": "2026-08-01T01:05:00Z", "actual_minutes": 50,
+                                       "actual_files_touched": 1, "paused_at_utc": "2026-08-01T01:55:00Z"}), encoding="utf-8")
+    assert main([str(path), "--checkpoint", "--actuals", str(actuals)]) == 4
+    assert outcome_main([str(path), "--decision", "approved", "--decided-at", "2026-08-01T02:00:00Z", "--actor", "alice"]) == 0
+    assert outcome_main([str(path), "--decision", "declined", "--decided-at", "2026-08-01T02:00:00Z", "--actor", "alice"]) == 0
+    declined = load_audit_strict(path)
+    reauth = declined["result"]["threshold_checkpoint"]["reauthorization"]
+    assert reauth["disposition"] == "declined" and reauth["cleared_paused_at_utc"] == "2026-08-01T02:00:00Z"
+    assert not _checkpoint_resolved(declined)
+    before = path.read_bytes()
+    assert main([str(path), "--final-state", "done", "--actual-minutes", "50", "--actual-files-touched", "1",
+                 "--completed-at", "2026-08-01T02:00:00Z"]) == 2
+    assert path.read_bytes() == before
+    forged = copy.deepcopy(declined)
+    forged["result"].update(final_state="done", completed_at_utc="2026-08-01T02:00:00Z", actual_minutes=50)
+    assert "terminal_paused_without_outcome" in {f["code"] for f in validate_audit_record(forged)}
+
+
+def test_cli_decline_after_a_first_answer_human_outcome_withdraws_it(tmp_path):
+    from finalize_autonomy_record import _checkpoint_resolved
+    from record_autonomy_outcome import main as outcome_main
+    path = _write(tmp_path, _record(decision="auto_accepted", completion_kind="auto_accepted", final_state="pending"))
+    actuals = tmp_path / "c1.yaml"
+    actuals.write_text(yaml.safe_dump({"work_started_at_utc": "2026-08-01T01:00:00Z", "actual_files_touched": 1,
+                                       "paused_at_utc": "2026-08-01T01:50:00Z"}), encoding="utf-8")
+    assert main([str(path), "--checkpoint", "--actuals", str(actuals), "--completed-at", "2026-08-01T01:50:00Z"]) == 4
+    assert outcome_main([str(path), "--decision", "approved", "--decided-at", "2026-08-01T01:55:00Z", "--actor", "alice"]) == 0
+    assert _checkpoint_resolved(load_audit_strict(path))
+    assert outcome_main([str(path), "--decision", "declined", "--decided-at", "2026-08-01T01:56:00Z", "--actor", "alice"]) == 0
+    declined = load_audit_strict(path)
+    assert declined["result"]["human_outcome"]["decided_at_utc"] == "2026-08-01T01:55:00Z"  # the first answer stays as history
+    assert declined["result"]["threshold_checkpoint"]["reauthorization"]["disposition"] == "declined"
+    assert not _checkpoint_resolved(declined)
+    before = path.read_bytes()
+    assert main([str(path), "--final-state", "done", "--actual-files-touched", "1", "--completed-at", "2026-08-01T01:56:00Z"]) == 2
+    assert path.read_bytes() == before
+
+
+# ── stamp-once resume and the terminal-time clear ────────────────────────
+
+
+def _unanswered_pause_record() -> Dict[str, Any]:
+    record = _resolved_checkpoint_record()  # started 01:10, paused 02:00, 50 min / 3 files
+    record["result"]["threshold_checkpoint"]["reauthorization"] = {
+        "presented": False, "disposition": "unanswered", "cleared_paused_at_utc": None,
+    }
+    return record
+
+
+def test_resumed_checkpoint_reads_the_recorded_pause_stamp():
+    record = _unanswered_pause_record()
+    resumed, paused = apply_checkpoint(
+        record,
+        {"actual_minutes": 50, "actual_files_touched": 3, "reauthorization": _approval("2026-08-01T02:10:00Z")},
+        now_utc="2026-08-01T02:15:00Z",
+    )
+    assert not paused
+    checkpoint = resumed["result"]["threshold_checkpoint"]
+    assert checkpoint["paused_at_utc"] == "2026-08-01T02:00:00Z"
+    assert checkpoint["reauthorization"]["cleared_paused_at_utc"] == "2026-08-01T02:10:00Z"
+    with pytest.raises(ValueError, match="written once"):
+        apply_checkpoint(
+            record,
+            {"actual_minutes": 50, "actual_files_touched": 3, "paused_at_utc": "2026-08-01T02:15:00Z",
+             "reauthorization": _approval("2026-08-01T02:10:00Z")},
+            now_utc="2026-08-01T02:15:00Z",
+        )
+
+
+def test_cli_resumed_checkpoint_leaves_pause_stamp_byte_identical(tmp_path):
+    path = _write(tmp_path, _unanswered_pause_record())
+    stamp_line = [line for line in path.read_text().splitlines() if line.startswith("    paused_at_utc:")]
+    assert stamp_line == ["    paused_at_utc: '2026-08-01T02:00:00Z'"]
+    actuals = tmp_path / "resume.yaml"
+    actuals.write_text(yaml.safe_dump({
+        "actual_files_touched": 3, "reauthorization": _approval("2026-08-01T02:10:00Z"),
+    }), encoding="utf-8")
+    assert main([str(path), "--checkpoint", "--actuals", str(actuals), "--completed-at", "2026-08-01T02:15:00Z"]) == 0
+    stored = load_audit_strict(path)
+    assert [line for line in path.read_text().splitlines() if line.startswith("    paused_at_utc:")] == stamp_line
+    assert stored["result"]["threshold_checkpoint"]["action"] == "resumed_after_reauthorization"
+    assert stored["result"]["threshold_checkpoint"]["actual_minutes"] == 50  # 65 elapsed minus the 15-minute pause
+
+
+def test_terminal_time_scope_less_clear_is_deterministic(tmp_path):
+    from record_autonomy_outcome import main as outcome_main
+    path = _write(tmp_path, _record(human_outcome=_human_outcome()))
+    assert main([str(path), "--final-state", "done", "--started-at", "2026-08-01T01:40:00Z",
+                 "--actual-files-touched", "9", "--completed-at", "2026-08-01T02:00:00Z"]) == 4
+    stored = load_audit_strict(path)
+    checkpoint = stored["result"]["threshold_checkpoint"]
+    assert checkpoint["terminal_time"] is True
+    assert checkpoint["paused_at_utc"] == checkpoint["completed_at_utc"] == "2026-08-01T02:00:00Z"
+    assert stored["result"]["completed_at_utc"] is None and stored["result"]["final_state"] == "paused"
+
+    # A scope-less human clear, minutes after the pause.
+    assert outcome_main([str(path), "--decision", "approved", "--decided-at", "2026-08-01T02:05:00Z", "--actor", "alice"]) == 0
+    assert load_audit_strict(path)["result"]["threshold_checkpoint"]["reauthorization"]["cleared_paused_at_utc"] == "2026-08-01T02:05:00Z"
+
+    # Rejected paths, refused without mutation: a later completion, and a checkpoint past completion.
+    before = path.read_bytes()
+    assert main([str(path), "--final-state", "done", "--actual-files-touched", "9", "--completed-at", "2026-08-01T02:30:00Z"]) == 2
+    assert main([str(path), "--checkpoint", "--actual-files-touched", "9", "--completed-at", "2026-08-01T02:30:00Z"]) == 2
+    assert path.read_bytes() == before
+
+    # The clear lands however late the terminal write happens: the clock is pinned at the breach.
+    assert main([str(path), "--final-state", "done", "--actual-files-touched", "9"]) == 0
+    done = load_audit_strict(path)
+    assert done["result"]["completed_at_utc"] == "2026-08-01T02:00:00Z"
+    assert done["result"]["actual_minutes"] == 20
+    assert done["result"]["threshold_checkpoint"]["action"] == "resumed_after_reauthorization"
+    assert main([str(path), "--validate"]) == 0
+
+
+def test_terminal_time_pause_carries_across_scoped_resume(tmp_path):
+    path = _write(tmp_path, _record(human_outcome=_human_outcome()))
+    assert main([str(path), "--final-state", "done", "--started-at", "2026-08-01T01:40:00Z",
+                 "--actual-files-touched", "9", "--completed-at", "2026-08-01T02:00:00Z"]) == 4
+    actuals = tmp_path / "scoped.yaml"
+    actuals.write_text(yaml.safe_dump({
+        "actual_files_touched": 9,
+        "reauthorization": {"receiver_human": {"decision": "approved", "decided_at_utc": "2026-08-01T02:20:00Z",
+                                                "actor": "alice", "scope": {"max_actual_files_touched": 9}}},
+    }), encoding="utf-8")
+    assert main([str(path), "--checkpoint", "--actuals", str(actuals)]) == 0
+    resumed = load_audit_strict(path)["result"]["threshold_checkpoint"]
+    assert resumed["terminal_time"] is True
+    assert resumed["paused_at_utc"] == resumed["completed_at_utc"] == "2026-08-01T02:00:00Z"
+    assert resumed["reauthorization"]["cleared_paused_at_utc"] == "2026-08-01T02:20:00Z"
+    assert main([str(path), "--final-state", "done", "--actual-files-touched", "9"]) == 0
+    done = load_audit_strict(path)
+    assert done["result"]["completed_at_utc"] == "2026-08-01T02:00:00Z" and done["result"]["actual_minutes"] == 20
+    assert validate_audit_record(done) == []
+
+
+def test_active_minutes_terminal_time_pause_contributes_nothing_past_completion():
+    from finalize_autonomy_record import _active_minutes
+    record = _clock_record()
+    record["result"]["threshold_checkpoint"] = {
+        "paused_at_utc": "2026-08-01T02:00:00Z", "terminal_time": True,
+        "reauthorization": {"disposition": "resumed", "cleared_paused_at_utc": "2026-08-01T02:30:00Z"},
+    }
+    assert _active_minutes(record, "2026-08-01T01:00:00Z", "2026-08-01T02:00:00Z") == 60
+    record["result"]["threshold_checkpoint"]["paused_at_utc"] = "2026-08-01T02:01:00Z"
+    with pytest.raises(ValueError, match="terminal-time pause must begin"):
+        _active_minutes(record, "2026-08-01T01:00:00Z", "2026-08-01T02:00:00Z")
+    record["result"]["threshold_checkpoint"].pop("terminal_time")
+    with pytest.raises(ValueError, match="must fall within"):
+        _active_minutes(record, "2026-08-01T01:00:00Z", "2026-08-01T02:00:00Z")
+
+
+def test_terminal_time_pause_cleared_through_the_first_answer_human_outcome_route(tmp_path):
+    """An auto-accepted admission with no prior outcome: the terminal-time
+    breach is answered by the recorder's first-answer route (human_outcome),
+    and the frozen clock pins completion exactly as a reauthorization clear
+    does."""
+    from record_autonomy_outcome import main as outcome_main
+    path = _write(tmp_path, _record(decision="auto_accepted", completion_kind="auto_accepted", final_state="pending"))
+    assert main([str(path), "--final-state", "done", "--started-at", "2026-08-01T01:00:00Z",
+                 "--actual-files-touched", "9", "--completed-at", "2026-08-01T02:00:00Z"]) == 4
+    paused = load_audit_strict(path)["result"]["threshold_checkpoint"]
+    assert paused["terminal_time"] is True and paused["paused_at_utc"] == "2026-08-01T02:00:00Z"
+    assert outcome_main([str(path), "--decision", "approved", "--decided-at", "2026-08-01T02:30:00Z", "--actor", "alice"]) == 0
+    answered = load_audit_strict(path)
+    assert answered["result"]["human_outcome"]["decided_at_utc"] == "2026-08-01T02:30:00Z"
+    assert answered["result"]["threshold_checkpoint"]["reauthorization"]["cleared_paused_at_utc"] is None
+    assert main([str(path), "--final-state", "done", "--actual-files-touched", "9"]) == 0
+    done = load_audit_strict(path)
+    assert done["result"]["completed_at_utc"] == "2026-08-01T02:00:00Z" and done["result"]["actual_minutes"] == 60
+    assert done["result"]["threshold_checkpoint"]["action"] == "resumed_after_reauthorization"
+    assert main([str(path), "--validate"]) == 0
+
+
+@pytest.mark.parametrize(
+    "adjustments, minutes",
+    [([], 20), ([_adjustment("2026-08-01T01:45:00Z", "2026-08-01T01:50:00Z")], 15)],
+    ids=["empty-adjustment-history", "five-minute-adjustment"],
+)
+def test_library_terminal_write_after_a_delayed_clear_derives_to_the_pin(tmp_path, adjustments, minutes):
+    """A direct-library caller omits the completion, as documented: the pin
+    must bind the endpoint before the adjustment validation and the derived
+    clock read it, whatever the adjustment history."""
+    import copy
+    from record_autonomy_outcome import main as outcome_main
+    path = tmp_path / "a.yaml"
+    paused, is_paused = finalize_audit_record(
+        path, _record(human_outcome=_human_outcome()), final_state="done",
+        actuals={"work_started_at_utc": "2026-08-01T01:40:00Z", "actual_files_touched": 9,
+                 "completed_at_utc": "2026-08-01T02:00:00Z", "clock_adjustments": adjustments},
+        now_utc="2026-08-01T02:00:00Z",
+    )
+    assert is_paused and paused["result"]["threshold_checkpoint"]["terminal_time"] is True
+    assert paused["result"]["threshold_checkpoint"]["actual_minutes"] == minutes
+    assert "clock_adjustments" in paused["result"]
+    _write(tmp_path, paused, name="a.yaml")
+    assert outcome_main([str(path), "--decision", "approved", "--decided-at", "2026-08-01T02:05:00Z", "--actor", "alice"]) == 0
+    answered = load_audit_strict(path)
+    before = copy.deepcopy(answered)
+
+    # A conflicting completion is refused before anything reads the endpoint; the input is untouched.
+    with pytest.raises(ValueError, match="conflicts with the completion"):
+        finalize_audit_record(
+            path, answered, final_state="done",
+            actuals={"actual_files_touched": 9, "completed_at_utc": "2026-08-01T03:00:00Z"},
+            now_utc="2026-08-01T03:00:00Z",
+        )
+    assert answered == before
+
+    # The terminal write an hour later, completion omitted: the clock derives to the pin, not to now.
+    done, is_paused = finalize_audit_record(
+        path, answered, final_state="done", actuals={"actual_files_touched": 9}, now_utc="2026-08-01T03:00:00Z",
+    )
+    assert not is_paused and answered == before
+    assert done["result"]["completed_at_utc"] == "2026-08-01T02:00:00Z"
+    assert done["result"]["actual_minutes"] == minutes
+    assert done["result"]["threshold_checkpoint"]["action"] == "resumed_after_reauthorization"
+    assert validate_audit_record(done) == []

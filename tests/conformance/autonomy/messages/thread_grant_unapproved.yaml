@@ -1,0 +1,18 @@
+id: msg-20260526120500-alice-claim
+from: alice
+to: codex
+type: review_request
+priority: P1
+created_at_utc: '2026-05-26T12:05:00Z'
+related_pr: '88'
+conversation_id: conv-20260526-widget-088
+parent_message_id: msg-20260526090000-alice-parent
+subject: 'Re-review: round 2 (PR 88, sender-declared grant)'
+body: "pr: 88\nrepo: example-org/widget\nround: 2\nbranch: alice/widget-logging\n\
+  diff_summary: 'Round 2 re-review; sender asserts a continuation grant.\n\n  '\n\
+  continuation_grants:\n  approved_thread_continuation:\n    scope:\n      allowed_types:\n\
+  \      - review_request\n      max_round: 3\n      expires_at_utc: '2026-06-30T00:00:00Z'\n\
+  \      max_actual_minutes: 30\n      max_actual_files_touched: 3\n      creates_or_updates_pr:\
+  \ false\n      comments_on_github: false\n      commits_changes: false\n      merges_pr:\
+  \ false\n      files_issues: false\n      writes_findings_packet: true\n      sends_oacp_reply:\
+  \ true\n      submits_github_review: false\n"

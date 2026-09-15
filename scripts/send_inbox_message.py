@@ -734,7 +734,12 @@ def send_message(
     )
 
     # Validate
-    errors = validate_message_dict(msg)
+    advisories: List[Dict[str, str]] = []
+    errors = validate_message_dict(msg, advisories=advisories)
+    warnings.extend(
+        f"ADVISORY: {finding['code']}: {finding['detail']}"
+        for finding in advisories
+    )
     if errors:
         raise ValueError("; ".join(errors))
 
@@ -816,7 +821,9 @@ def main() -> int:
             "Suggested channels: brainstorm, review, deploy, incident\n"
             "(Channels are free-text — these are hints, not enforced.)\n\n"
             "Handoff body schema (--type handoff):\n"
-            "  The --body must be a structured YAML packet with these required fields:\n"
+            "  The owning workflow expects a structured YAML packet with these fields:\n"
+            "  Schema findings are advisory in 0.5.2; kernel checks leave in 0.5.3.\n"
+            "  The owning skill validates the body before side effects.\n"
             "    source_agent          Originating agent name\n"
             "    target_agent          Receiving agent name (must differ from source)\n"
             "    intent                Description of what is being handed off\n"

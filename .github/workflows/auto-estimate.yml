@@ -2,7 +2,7 @@ name: Auto-estimate
 
 # Label an issue `estimate` and agent-estimate posts an estimate comment
 # on it. Recipe from kiloloop/agent-estimate README ("Auto-estimate on
-# label") — consumes the published Action via the v0 tag.
+# label") — consumes the published Action at an exact release commit.
 
 on:
   issues:
@@ -17,7 +17,7 @@ jobs:
     if: github.event.label.name == 'estimate'
     runs-on: ubuntu-latest
     steps:
-      - uses: kiloloop/agent-estimate@7b30943bac5648cf183f3d050baa6fea5485b8a9 # v0.7.4
+      - uses: kiloloop/agent-estimate@fb2e0f4d1cf2c8a47760c8fc21ca7e03bbadbfb4 # v0.8.0
         with:
           issues: ${{ github.event.issue.number }}
           output-mode: issue-comment

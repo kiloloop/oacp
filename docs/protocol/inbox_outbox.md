@@ -105,18 +105,55 @@ See `docs/protocol/review_loop.md` for the full review loop protocol specificati
 
 Review lifecycle admission: by default each `review_request` requires
 explicit human confirmation at the receiver. When receiver config enables
-continuation grants, a prior human-approved `review_loop` grant may
-auto-continue in-scope same-thread follow-up rounds — see
-`docs/protocol/autonomy.md` → "Review-loop continuation". Reviewer-output
+continuation grants, a prior human-approved generic thread grant that lists
+`review_request` may auto-continue in-scope same-thread follow-up rounds —
+see [Continuation Grants](autonomy.md#continuation-grants). The review
+workflow validates repository/PR identity and the live head before effects;
+the grant gate enforces type, round, expiry, time, file, and effect bounds.
+Reviewer-output
 types (`review_feedback`, `review_lgtm`) are context-only at the receiver
 and never start reviewer work; `review_addressed` is context folded into a
 newer `review_request` unless a grant explicitly lists it.
 
+## Validation boundary
+
+The kernel validates the universal envelope: required and optional fields,
+routing and thread metadata, timestamps/expiry, payload bounds, and the
+strict all-or-none signing trailer. Existing telemetry type and numeric
+constraints also remain envelope errors. Signature verification is a separate
+receiver-side boundary: enforce rejects unverified messages; warn only
+annotates them and grants no authority.
+
+Starting in 0.5.2, `oacp validate` reports malformed `handoff` and
+`handoff_complete` body schemas with `skill_owned_body_schema` advisories
+instead of rejecting the message. Each finding has `code`, `severity:
+advisory`, and `detail`; the CLI prints `ADVISORY: <code>: <detail>` to stderr,
+including with `--quiet`, and exits zero when no envelope errors remain.
+`oacp send` includes the same diagnostics in its warnings; the autonomy gate
+records them in `logged_notes`. Envelope errors still reject even when an
+advisory is also present. Missing, empty, nested, or oversized `body` fields
+remain envelope errors.
+
+The handoff schema checks stay in the validator for this one advisory wave;
+**0.5.3 removes them from the validator's call path**. The owning skill must
+validate its versioned body before side effects and return a typed failure.
+An advisory or successful message validation does not admit work or prove a
+workflow body safe to execute.
+
+The autonomy gate retains its existing parsing and authority checks for the
+body blocks it consumes (`task_profile`, `continuation_grants`). Standalone
+`oacp validate` does not perform those admission checks: for example, a
+malformed task profile still pauses the gate with `task_profile_unparsable`.
+Review-specific body validation belongs to the review workflow.
+
 ## Type-Specific Body Schemas
+
+These are workflow requirements, not kernel envelope requirements. During
+0.5.2 their schema findings are advisory as described above.
 
 ### `type: handoff`
 
-`body` must be a structured YAML packet with required fields:
+The handoff workflow expects a structured YAML `body` with these fields:
 
 - `source_agent`
 - `target_agent`
@@ -132,7 +169,7 @@ Reference template: `templates/handoff_packet.template.yaml`
 
 ### `type: handoff_complete`
 
-`body` must include these required fields:
+The completion workflow expects these fields in `body`:
 
 - `issue`
 - `pr`
@@ -247,6 +284,17 @@ the immediate parent message) records an explicit human-approved or
 human-modified grant scope for the same sender. The current declaration and
 actual checkpoint must both remain inside that prior scope; otherwise the
 receiver re-pauses.
+
+The same flat grant scope also bounds review invocations. It requires
+`allowed_types`, `max_round`, `expires_at_utc`, `max_actual_minutes`, and
+`max_actual_files_touched`, with individual effect booleans. Generic body
+`round` and `side_effects` declarations use that contract; findings packets,
+OACP replies, and formal GitHub review submission have distinct effect
+permissions. These extra effects do not add task-profile fields or expand
+sender checkpoint authority. Legacy scopes require fresh bounded human
+approval; preserve their historical audits. See
+[Continuation Grants](autonomy.md#continuation-grants) for grant resolution,
+execution accounting, and migration.
 
 Paused task approvals, modifications, and declines are recorded with
 `oacp autonomy-outcome <audit.yaml> --decision <approved|modified|declined>`.

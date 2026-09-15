@@ -20,6 +20,7 @@ stop used to mask) and which keep the hard stop unchanged.
 from __future__ import annotations
 
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -203,11 +204,81 @@ def test_content_sensitivity_replay_summary() -> None:
     assert unchanged == ["cat5-04", "cat5-05", "cat5-06", "cat5-control"]
 
 
+_CAT2_CASES = list(
+    enumerate(
+        _CORPUS["declared_capability"]["cases"],
+        start=len(_CASES) + len(_CAT5_CASES) + 1,
+    )
+)
+
+
+@pytest.mark.parametrize(
+    "index, case", _CAT2_CASES, ids=[case["case"] for _index, case in _CAT2_CASES]
+)
+def test_declared_capability_replay_case(index: int, case: Dict[str, Any]) -> None:
+    decision = _evaluate(_CORPUS, case, index)
+
+    # Verdict: the declared flag's own admission pause replaces the lexical
+    # hard stop; every record still pauses.
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == case["expected_reason_codes"]
+    if "expected_matched_pattern" in case:
+        assert decision.get("matched_pattern") == case["expected_matched_pattern"]
+    else:
+        assert "matched_pattern" not in decision
+
+    # The demoted match records as an advisory carrying the term; a hard
+    # stop records no declared advisory.
+    advisories = [
+        note
+        for note in decision["logged_notes"]
+        if note["code"] == "lexical_advisory_declared"
+    ]
+    assert advisories == case.get("expected_notes", [])
+
+    # Ledger completeness is unchanged by the demotion.
+    ledger = decision["admission_axes"]
+    assert ledger["evaluated"] is True
+    assert set(admission_ledger_codes(ledger)) == set(case["expected_axes"])
+    expected_co = set(case["expected_axes"]) - set(decision["reason_codes"])
+    assert set(decision.get("co_occurring_reason_codes") or []) == expected_co
+
+
+def test_declared_capability_replay_summary() -> None:
+    """Corpus-level replay: exactly the declared-true heads demote.
+
+    The dependency-install head under ``touches_dependencies: true``, and the
+    sensitive-scope token and credential-rotation head under
+    ``touches_auth_config_or_secrets: true``, replay as advisories with the
+    flag's admission pause governing; the undeclared, contradictory, and
+    default-branch-push controls keep the recorded hard stop.
+    """
+    demoted: List[str] = []
+    unchanged: List[str] = []
+    for index, case in _CAT2_CASES:
+        decision = _evaluate(_CORPUS, case, index)
+        assert case["recorded_reason_codes"][0].startswith("hard_stop_")
+        if case.get("expected_notes"):
+            assert not any(
+                code.startswith("hard_stop_") for code in decision["reason_codes"]
+            )
+            demoted.append(case["case"])
+        else:
+            assert decision["reason_codes"] == case["recorded_reason_codes"]
+            unchanged.append(case["case"])
+    assert demoted == ["cat2-01", "cat2-02", "cat2-03"]
+    assert unchanged == [
+        "cat2-control-undeclared",
+        "cat2-control-contradictory",
+        "cat2-control-push",
+    ]
+
+
 def test_replayed_lexical_hits_have_complete_structured_provenance() -> None:
     """Every lexical hit carries an exact span and an explicit disposition."""
     total_hits = 0
     cases_with_hits = 0
-    for index, case in _CASES + _CAT5_CASES:
+    for index, case in _CASES + _CAT5_CASES + _CAT2_CASES:
         decision = _evaluate(_CORPUS, case, index)
         body = _message(case, index)["body"]
         hits = decision["matched_patterns"]
@@ -225,5 +296,62 @@ def test_replayed_lexical_hits_have_complete_structured_provenance() -> None:
             assert 0 <= start < end <= len(body)
             assert hit["demotion_basis"]
 
-    assert cases_with_hits == 18
-    assert total_hits == 18
+    assert cases_with_hits == 24
+    assert total_hits == 26
+
+
+_THREAD_GRANT_CASES = _CORPUS["thread_grants"]["cases"]
+
+
+@pytest.mark.parametrize("case", _THREAD_GRANT_CASES, ids=lambda case: case["case"])
+def test_generic_thread_grant_ledger_replay(
+    tmp_path: Path, case: Dict[str, Any]
+) -> None:
+    """Replay complete generic decisions against receipt-backed thread history."""
+    fixture_root = CORPUS_PATH.parent.parent
+    config = yaml.safe_load(
+        (fixture_root / "configs/auto_review_continuation_enabled.yaml").read_text()
+    )
+    config["autonomy"]["continuation_grants"]["enabled"] = case.get("enabled", True)
+    message = yaml.safe_load(
+        (fixture_root / "messages/thread_grant_request.yaml").read_text()
+    )
+    message["type"] = case.get("message_type", message["type"])
+    body = yaml.safe_load(message["body"])
+    body.update(case.get("body", {}))
+    message["body"] = yaml.safe_dump(body, sort_keys=False)
+    if not case.get("omit_approval"):
+        approval = yaml.safe_load(
+            (fixture_root / "audits/prior_generic_grant_approved.yaml").read_text()
+        )
+        approval["result"]["human_outcome"]["grant"]["granted_scope"].update(
+            case.get("scope", {})
+        )
+        (tmp_path / "approval.yaml").write_text(
+            yaml.safe_dump(approval, sort_keys=False)
+        )
+    for prior in case.get("prior_audits", []):
+        (tmp_path / Path(prior).name).write_text((fixture_root / prior).read_text())
+    decision = evaluate_autonomy(
+        message,
+        config,
+        audit_dir=tmp_path,
+        receiver="codex",
+        now_utc=datetime.strptime(
+            case.get("now", "2026-05-26T12:30:00Z"), "%Y-%m-%dT%H:%M:%SZ"
+        ),
+    )
+    assert decision["decision"] == case["expected_decision"]
+    assert decision["reason_codes"] == case["expected_reason_codes"]
+    grant = decision["continuation_grant"]
+    assert grant["decision"] == case["expected_grant_decision"]
+    if "expected_effective_round" in case:
+        assert grant["effective_round"] == case["expected_effective_round"]
+    assert "review_continuation" not in decision
+    assert not any(
+        code.startswith("review_continuation_") for code in decision["reason_codes"]
+    )
+    if decision["decision"] == "auto_accepted":
+        assert decision["scope_envelope_source"] == "continuation_grant"
+        assert decision["scope_envelope"]["estimated_minutes"] == 30
+        assert decision["scope_envelope"]["expected_files_touched"] == 3

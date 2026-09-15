@@ -1,0 +1,25 @@
+case: declared_dependency_install_granular_pauses
+config: configs/auto_review_standard.yaml
+message: messages/declared_dependency_install.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - dependency_changes_pause
+  logged_notes:
+    - matched_pattern: install dependency
+  co_occurring_reason_codes: []
+  admission_axes:
+    evaluated: true
+    thresholds: []
+    declared_risk:
+      - dependency_changes_pause
+    declaration: []
+    side_effects: []
+    continuation_grant: []
+    declaration_errors: []
+  result:
+    final_state: paused
+    completion_kind: admission_paused
+  task_profile:
+    touches_dependencies: true

@@ -26,6 +26,9 @@ body: |
     continuation_grants:
       approved_thread_continuation:
         scope:
+          allowed_types: [task_request]
+          max_round: 10
+          expires_at_utc: "2099-01-01T00:00:00Z"
           max_actual_minutes: 30
           max_actual_files_touched: 3
           creates_or_updates_pr: false

@@ -1,0 +1,17 @@
+case: thread_grant_expired_pauses
+config: configs/auto_review_continuation_enabled.yaml
+message: messages/thread_grant_request.yaml
+now: '2026-07-01T00:00:00Z'
+audits:
+- audits/prior_generic_grant_approved.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+  - continuation_grant_expired
+  result:
+    final_state: paused
+    completion_kind: admission_paused
+  continuation_grant:
+    decision: expired
+    standing_grant_found: true

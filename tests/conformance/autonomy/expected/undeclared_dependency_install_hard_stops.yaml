@@ -1,0 +1,16 @@
+case: undeclared_dependency_install_hard_stops
+config: configs/auto_review_standard.yaml
+message: messages/undeclared_dependency_install.yaml
+expected:
+  decision: paused
+  mode: auto_review
+  reason_codes:
+    - hard_stop_external_side_effect
+  matched_pattern: "install dependency"
+  logged_notes: []
+  co_occurring_reason_codes: []
+  result:
+    final_state: paused
+    completion_kind: admission_paused
+  task_profile:
+    touches_dependencies: false

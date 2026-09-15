@@ -476,7 +476,7 @@ class TestAutonomyConfig(unittest.TestCase):
                     "message_id: msg-demo\n"
                     "decision: auto_accepted\n"
                     "result:\n"
-                    "  final_state: done\n"
+                    "  final_state: pending\n"  # the 0.5.2 birth; the off-enum kind is the defect
                     "  completion_kind: executed\n"
                 ),
             )
@@ -488,6 +488,38 @@ class TestAutonomyConfig(unittest.TestCase):
             )
             self.assertEqual(integrity.severity, Severity.error)
             self.assertIn("integrity errors", integrity.message)
+
+    def test_check_autonomy_audit_sweep_reports_legacy_born_done_as_advisory(self) -> None:
+        # A pre-0.5.2 auto-accepted record born `done` with no completion
+        # stamp is unfinalized history: no integrity error, one advisory row.
+        with tempfile.TemporaryDirectory() as td:
+            project_dir = Path(td)
+            audit_dir = project_dir / "agents" / "codex" / "audit" / "autonomy_decisions"
+            audit_dir.mkdir(parents=True)
+            _write(
+                audit_dir / "20260512T132325Z_msg-demo.yaml",
+                (
+                    "schema_version: 2\n"
+                    "receiver: codex\n"
+                    "message_id: msg-demo\n"
+                    "decision: auto_accepted\n"
+                    "result:\n"
+                    "  final_state: done\n"
+                    "  completion_kind: auto_accepted\n"
+                    "  completed_at_utc: null\n"
+                ),
+            )
+            import yaml
+
+            cat = check_autonomy(project_dir, yaml_loader=yaml.safe_load)
+            integrity = next(
+                r for r in cat.results if "audit-integrity" in r.name
+            )
+            self.assertEqual(integrity.severity, Severity.ok)
+            advisory = next(
+                r for r in cat.results if "advisory findings" in r.message
+            )
+            self.assertIn("msg-demo", advisory.message)
 
     def test_check_autonomy_audit_sweep_flags_duplicate_live_records(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -1,0 +1,13 @@
+id: msg-20260526121000-alice-crosspr
+from: alice
+to: codex
+type: review_request
+priority: P1
+created_at_utc: '2026-05-26T12:10:00Z'
+related_pr: '99'
+conversation_id: conv-20260526-widget-088
+parent_message_id: msg-20260526090000-alice-parent
+subject: Continuation with an additional side effect
+body: "pr: 99\nrepo: example-org/widget\nround: 2\nbranch: alice/widget-follow-up\n\
+  diff_summary: 'Fresh request in the same thread but for a different pull request.\n\
+  \n  '\nside_effects:\n- writes_findings_packet\n- sends_oacp_reply\n- submits_github_review\n"

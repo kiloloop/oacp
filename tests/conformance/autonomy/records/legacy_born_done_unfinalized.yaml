@@ -1,0 +1,31 @@
+# Legacy admission shape: the pre-0.5.2 evaluator wrote auto-accepted records
+# born `final_state: done` with null actuals and no completion stamp. Never
+# finalized and never rewritten — the validator flags it as the advisory
+# `legacy_born_done_unfinalized` and it stays open to exactly one finalization.
+schema_version: 2
+spec_version: "0.4.3"
+created_at_utc: "2026-06-01T01:00:00Z"
+receiver: claude
+sender: alice
+message_id: msg-20260601010000-alice-0007
+message_sha256: "c0ffee"
+decision: auto_accepted
+mode: auto_review
+reason_codes:
+  - message_valid
+  - message_not_expired
+  - message_hash_recorded
+  - task_profile_present
+  - task_type_allowed
+  - risk_threshold_passed
+  - hard_stops_clear
+  - workspace_check_required
+result:
+  final_state: done
+  completion_kind: auto_accepted
+  actual_minutes: null
+  actual_files_touched: null
+  work_started_at_utc: null
+  predicted_risk_materialized: false
+  completed_at_utc: null
+  envelope_enforcement: none

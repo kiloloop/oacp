@@ -1,3 +1,8 @@
+# A complete profile declaring `touches_auth_config_or_secrets: true` routes the
+# auth and secrets tokens to the declared flag's own admission pause, so the
+# next class in evaluation order — pricing, content sensitivity — carries the
+# verdict; the sensitive-scope hard stop itself remains for contradictory
+# profiles (see contradictory_credential_rotation_hard_stops).
 case: hard_stop_sensitive_scope_pauses
 config: configs/auto_review_standard.yaml
 message: messages/hard_stop_sensitive_scope.yaml
@@ -5,5 +10,10 @@ expected:
   decision: paused
   mode: auto_review
   reason_codes:
-    - hard_stop_sensitive_scope
-  matched_pattern: "auth"
+    - hard_stop_content_sensitivity
+  matched_pattern: "pricing"
+  logged_notes:
+    - matched_pattern: auth
+    - matched_pattern: secrets
+  co_occurring_reason_codes:
+    - auth_config_or_secrets_pause

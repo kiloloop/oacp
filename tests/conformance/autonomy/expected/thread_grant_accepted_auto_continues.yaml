@@ -1,0 +1,38 @@
+case: thread_grant_accepted_auto_continues
+config: configs/auto_review_continuation_enabled.yaml
+message: messages/thread_grant_request.yaml
+now: '2026-05-26T12:30:00Z'
+audits:
+- audits/prior_generic_grant_approved.yaml
+expected:
+  decision: auto_accepted
+  mode: auto_review
+  reason_codes:
+  - message_valid
+  - message_not_expired
+  - message_hash_recorded
+  - continuation_grant_accepted
+  - workspace_check_required
+  result:
+    final_state: pending
+    completion_kind: auto_accepted
+    threshold_checkpoint:
+      evaluated: false
+      action: not_evaluated
+  continuation_grant:
+    decision: accepted
+    effective_round: 2
+    source_message_id: msg-20260526090000-alice-parent
+    scope:
+      allowed_types:
+      - review_request
+      max_round: 3
+      max_actual_minutes: 30
+      max_actual_files_touched: 3
+    standing_grant_found: true
+  scope_envelope_source: continuation_grant
+  scope_envelope:
+    estimated_minutes: 30
+    expected_files_touched: 3
+    writes_findings_packet: true
+    sends_oacp_reply: true

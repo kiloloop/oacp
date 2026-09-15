@@ -132,9 +132,13 @@ GIT_PUSH_BULK_FLAGS = {
 # completion step, sanctioned only by a terminal audit record (see
 # _classify_envelope_clear); everything else escalates.
 OACP_ALWAYS_ALLOWED = {"send", "inbox", "validate", "doctor", "watch", "help", ""}
-# `result.final_state` values that mark the task lifecycle over. `paused`
-# is deliberately absent: a checkpoint-paused task keeps its envelope and
-# re-authorizes via the §E flow (recompile with --extend), never via clear.
+# `result.final_state` values that mark the task lifecycle over. `pending`
+# (the admission birth state) and `paused` are deliberately absent: an
+# admitted task keeps its envelope until finalization, and a
+# checkpoint-paused task re-authorizes via the §E flow (recompile with
+# --extend), never via clear. `done` counts only with its `completed_at_utc`
+# stamp — the finalizer always writes both, and a stamp-less `done` is a
+# pre-0.5.2 auto-accepted birth that was never finalized.
 TERMINAL_AUDIT_STATES = {"done", "error", "cancelled"}
 # Receiver-workspace directories that are protocol bookkeeping, not task
 # scope: audit records, inbox claims, outbox copies. Deliberately NOT the
@@ -1006,10 +1010,12 @@ def _classify_envelope_clear(
 
     The clear is allowed exactly when the newest audit record whose CONTENT
     identity (``message_id`` + ``receiver``) matches the active envelope
-    shows a terminal ``result.final_state``: the task lifecycle is over and
-    the enforcement window may close from inside the session. ``pending``
-    and ``paused`` keep the envelope active — a paused task re-authorizes
-    via the §E checkpoint, never via clear.
+    shows a terminal ``result.final_state`` (``done`` only together with its
+    ``completed_at_utc`` stamp): the task lifecycle is over and the
+    enforcement window may close from inside the session. ``pending`` and
+    ``paused`` keep the envelope active — a paused task re-authorizes via
+    the §E checkpoint, never via clear — and a stamp-less ``done`` is a
+    legacy born-done admission that was never finalized, not a completion.
 
     The validation judges the same effective target the CLI will use: the
     clear must be a standalone simple command (compound commands escalate —
@@ -1099,8 +1105,17 @@ def _classify_envelope_clear(
     record = max(matches, key=lambda item: item[0])[1]
     result = record.get("result")
     state = result.get("final_state") if isinstance(result, dict) else None
-    if state in TERMINAL_AUDIT_STATES:
+    completed_at = result.get("completed_at_utc") if isinstance(result, dict) else None
+    if state in TERMINAL_AUDIT_STATES and (state != "done" or completed_at):
         return ALLOW
+    if state == "done":
+        return _deny(
+            f"oacp envelope clear while the audit record for "
+            f"{context.message_id} shows result.final_state 'done' with no "
+            "completed_at_utc — a legacy born-done admission that was never "
+            "finalized, not a completed task; run the terminal finalize "
+            "(oacp autonomy-finalize --final-state done) first"
+        )
     return _deny(
         f"oacp envelope clear while the audit record for "
         f"{context.message_id} shows result.final_state {state!r}; the "

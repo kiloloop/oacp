@@ -1,0 +1,10 @@
+id: msg-20260913100000-alice-profileless_dependency_install
+from: alice
+to: codex
+type: task_request
+priority: P2
+created_at_utc: "2026-09-13T10:00:00Z"
+subject: "Pin the parser dependency"
+body: |
+  ## Task
+  Install the dependency the parser needs and pin it in the lockfile.

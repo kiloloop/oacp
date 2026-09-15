@@ -12,7 +12,7 @@ import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pytest
 import yaml
@@ -109,11 +109,6 @@ def test_autonomy_gate_matches_conformance_fixtures(tmp_path: Path) -> None:
         if "continuation_grant" in expected:
             _assert_subset(expected["continuation_grant"], decision["continuation_grant"])
 
-        if "review_continuation" in expected:
-            _assert_subset(
-                expected["review_continuation"], decision["review_continuation"]
-            )
-
         if "result" in expected:
             _assert_subset(expected["result"], decision["result"])
 
@@ -181,7 +176,7 @@ def test_autonomy_gate_matches_conformance_fixtures(tmp_path: Path) -> None:
 
 
 def test_autonomy_gate_output_uses_canonical_final_states() -> None:
-    allowed = {"done", "paused", "blocked", "superseded", "error", "cancelled"}
+    allowed = {"pending", "done", "paused", "blocked", "superseded", "error", "cancelled"}
     for expected_path in sorted((FIXTURE_ROOT / "expected").glob("*.yaml")):
         fixture = _load_yaml(expected_path)
         config = _load_yaml(FIXTURE_ROOT / fixture["config"])
@@ -192,6 +187,41 @@ def test_autonomy_gate_output_uses_canonical_final_states() -> None:
         assert decision["result"]["final_state"] in allowed
         assert decision["schema_version"] == 2
         assert "human_outcome" in decision["result"]
+
+
+def test_auto_accepted_admission_is_born_pending() -> None:
+    """The evaluator never writes `done`: every auto-accepted birth is
+    `pending` with no completion stamp, and only finalization closes it."""
+    for expected_path in sorted((FIXTURE_ROOT / "expected").glob("*.yaml")):
+        fixture = _load_yaml(expected_path)
+        config = _load_yaml(FIXTURE_ROOT / fixture["config"])
+        message = _load_yaml(FIXTURE_ROOT / fixture["message"])
+        actuals = _load_yaml(FIXTURE_ROOT / fixture["actuals"]) if fixture.get("actuals") else None
+
+        decision = evaluate_autonomy(message, config, actuals=actuals)
+        result = decision["result"]
+        if decision["decision"] == "auto_accepted":
+            assert result["final_state"] == "pending", expected_path.name
+            assert result["completion_kind"] == "auto_accepted", expected_path.name
+            assert result["completed_at_utc"] is None, expected_path.name
+        else:
+            assert result["final_state"] != "done", expected_path.name
+
+
+def test_auto_accepted_birth_ignores_actuals_completion_stamp() -> None:
+    # A checkpoint pass may carry the clock endpoint; it stays inside the
+    # checkpoint block, never promoted to the record's completion evidence.
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml")
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "clean_task.yaml")
+    actuals = _load_yaml(FIXTURE_ROOT / "actuals" / "top_level_side_effect_keys.yaml")
+    assert actuals["completed_at_utc"]
+
+    decision = evaluate_autonomy(message, config, actuals=actuals)
+
+    assert decision["decision"] == "auto_accepted"
+    assert decision["result"]["final_state"] == "pending"
+    assert decision["result"]["completed_at_utc"] is None
+    assert decision["result"]["threshold_checkpoint"]["completed_at_utc"] == actuals["completed_at_utc"]
 
 
 def test_autonomy_gate_records_raw_message_hash_when_path_provided() -> None:
@@ -459,6 +489,199 @@ def _assert_lexical_hit(
         assert set(hit["span"]) == {"start", "end"}
         start, end = hit["span"]["start"], hit["span"]["end"]
         assert 0 <= start < end <= len(body)
+
+
+_DECLARED_CAPABILITY_PROFILE: Dict[str, Any] = {
+    "estimated_minutes": 20,
+    "risk_tier": "P2",
+    "expected_files_touched": 2,
+    "destructive_ops": False,
+    "external_side_effects": False,
+    "touches_auth_config_or_secrets": False,
+    "touches_dependencies": False,
+    "public_visibility": False,
+}
+_PRIVATE_PR_ARTIFACT: Dict[str, Any] = {
+    "external_side_effects": True,
+    "target_repo": "example-org/private-repo",
+    "creates_or_updates_pr": True,
+}
+_INSTALL_TEXT = "Install the dependency the parser needs and pin it in the lockfile."
+_ROTATE_TEXT = "Rotate credentials for the staging bot before the cut."
+_PUSH_TEXT = "Push to main once the review approves."
+
+
+def _declared_capability_decision(
+    task_text: str,
+    **overrides: Any,
+) -> tuple[Dict[str, Any], str]:
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml")
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "clean_task.yaml")
+    profile = {**_DECLARED_CAPABILITY_PROFILE, **overrides}
+    block = "\n".join(
+        f"  {line}" for line in yaml.safe_dump(profile, sort_keys=False).splitlines()
+    )
+    body = f"## Task\n{task_text}\n\ntask_profile:\n{block}\n"
+    message["body"] = body
+    return evaluate_autonomy(message, config), body
+
+
+@pytest.mark.parametrize(
+    ("task_text", "pattern", "field", "reason_code", "notes"),
+    [
+        (
+            _INSTALL_TEXT,
+            "install dependency",
+            "touches_dependencies",
+            "dependency_changes_pause",
+            ["install dependency"],
+        ),
+        (
+            _ROTATE_TEXT,
+            "rotate credentials",
+            "touches_auth_config_or_secrets",
+            "auth_config_or_secrets_pause",
+            ["rotate credentials", "credentials"],
+        ),
+    ],
+)
+def test_declared_capability_routes_the_partnered_head_to_its_granular_pause(
+    task_text: str,
+    pattern: str,
+    field: str,
+    reason_code: str,
+    notes: list[str],
+) -> None:
+    decision, body = _declared_capability_decision(task_text, **{field: True})
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == [reason_code]
+    assert "matched_pattern" not in decision
+    assert [note["matched_pattern"] for note in decision["logged_notes"]] == notes
+    assert {note["code"] for note in decision["logged_notes"]} == {
+        "lexical_advisory_declared"
+    }
+    _assert_lexical_hit(decision, body, pattern, "profile_true")
+
+
+@pytest.mark.parametrize(
+    ("task_text", "pattern", "field"),
+    [
+        (_INSTALL_TEXT, "install dependency", "touches_dependencies"),
+        (_ROTATE_TEXT, "rotate credentials", "touches_auth_config_or_secrets"),
+    ],
+)
+def test_declared_false_keeps_the_partnered_head_hard(
+    task_text: str,
+    pattern: str,
+    field: str,
+) -> None:
+    decision, body = _declared_capability_decision(task_text, **{field: False})
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["hard_stop_external_side_effect"]
+    assert decision["matched_pattern"] == pattern
+    assert decision["logged_notes"] == []
+    _assert_lexical_hit(decision, body, pattern, "non_demotable")
+
+
+@pytest.mark.parametrize(
+    ("task_text", "pattern", "field"),
+    [
+        (_INSTALL_TEXT, "install dependency", "touches_dependencies"),
+        (_ROTATE_TEXT, "rotate credentials", "touches_auth_config_or_secrets"),
+    ],
+)
+def test_contradictory_profile_keeps_the_partnered_head_hard(
+    task_text: str,
+    pattern: str,
+    field: str,
+) -> None:
+    # A PR artifact declared against `external_side_effects: false` is a
+    # declaration error: the gate trusts none of that profile's flags.
+    decision, body = _declared_capability_decision(
+        task_text, **{field: True, "creates_or_updates_pr": True}
+    )
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["hard_stop_external_side_effect"]
+    assert decision["matched_pattern"] == pattern
+    assert "declaration_error" in decision["co_occurring_reason_codes"]
+    assert decision["logged_notes"] == []
+    _assert_lexical_hit(decision, body, pattern, "non_demotable")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {**_PRIVATE_PR_ARTIFACT, "merges_pr": True},
+        {**_PRIVATE_PR_ARTIFACT},
+    ],
+)
+def test_default_branch_push_head_has_no_declarable_partner(
+    overrides: Dict[str, Any],
+) -> None:
+    decision, body = _declared_capability_decision(_PUSH_TEXT, **overrides)
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["hard_stop_external_side_effect"]
+    assert decision["matched_pattern"] == "push to main"
+    assert decision["logged_notes"] == []
+    _assert_lexical_hit(decision, body, "push to main", "non_demotable")
+
+
+def test_declared_capability_negated_occurrence_keeps_its_own_basis() -> None:
+    # Contextual demotion is occurrence-scoped and evaluated first: a negated
+    # occurrence records `negated`, not `profile_true`, and the declared flag
+    # still carries the verdict.
+    decision, body = _declared_capability_decision(
+        "Do not install dependencies for the parser.", touches_dependencies=True
+    )
+
+    assert decision["reason_codes"] == ["dependency_changes_pause"]
+    assert [note["code"] for note in decision["logged_notes"]] == [
+        "lexical_advisory_negated"
+    ]
+    _assert_lexical_hit(decision, body, "install dependency", "negated")
+
+
+@pytest.mark.parametrize(
+    ("task_text", "pattern"),
+    [
+        ("Update the auth helper documentation.", "auth"),
+        ("Update the secret handling docs.", "secrets"),
+        ("Update the credential helper documentation.", "credentials"),
+        ("Update the runtime config files for the local agent.", "config"),
+    ],
+)
+def test_declared_true_sensitive_scope_routes_to_the_granular_pause(
+    task_text: str,
+    pattern: str,
+) -> None:
+    decision, body = _declared_capability_decision(
+        task_text, touches_auth_config_or_secrets=True
+    )
+
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["auth_config_or_secrets_pause"]
+    assert "matched_pattern" not in decision
+    assert decision["logged_notes"] == [
+        {"code": "lexical_advisory_declared", "matched_pattern": pattern}
+    ]
+    _assert_lexical_hit(decision, body, pattern, "profile_true")
+
+
+def test_contradictory_profile_keeps_sensitive_scope_hard() -> None:
+    decision, body = _declared_capability_decision(
+        "Update the auth helper documentation.",
+        touches_auth_config_or_secrets=True,
+        creates_or_updates_pr=True,
+    )
+
+    assert decision["reason_codes"] == ["hard_stop_sensitive_scope"]
+    assert decision["matched_pattern"] == "auth"
+    assert "declaration_error" in decision["co_occurring_reason_codes"]
+    _assert_lexical_hit(decision, body, "auth", "affirmative")
 
 
 def test_lexical_fp_merge_method_reference_fixture() -> None:
@@ -1065,8 +1288,8 @@ def test_latest_same_thread_grant_denial_repauses(tmp_path: Path) -> None:
     )
 
     assert decision["decision"] == "paused"
-    assert decision["reason_codes"][0] == "continuation_grant_denied"
-    assert decision["continuation_grant"]["decision"] == "denied"
+    assert decision["reason_codes"][0] == "continuation_grant_revoked"
+    assert decision["continuation_grant"]["decision"] == "revoked"
 
 
 def test_standing_grant_matches_conversation_beyond_immediate_parent(
@@ -2345,348 +2568,750 @@ def test_reauth_scopeless_human_clears_legacy_risk_boundary() -> None:
     assert reauth["scope"] is None
 
 
-# --- Review-loop continuation grants ---
+# --- Generic thread continuation grants ---
 
 
-# Fixture grants expire 2026-06-30; accept-path tests evaluate at a pinned
-# in-window moment so the real clock can never flip them to expired.
-_REVIEW_NOW = datetime.strptime("2026-05-26T12:30:00Z", "%Y-%m-%dT%H:%M:%SZ")
+_THREAD_NOW = datetime.strptime("2026-05-26T12:30:00Z", "%Y-%m-%dT%H:%M:%SZ")
+_THREAD_TYPES = (
+    "task_request",
+    "question",
+    "brainstorm_request",
+    "brainstorm_followup",
+    "handoff",
+    "review_request",
+    "review_addressed",
+)
 
 
-def _review_config() -> Dict[str, Any]:
+def _thread_config() -> Dict[str, Any]:
     return _load_yaml(
         FIXTURE_ROOT / "configs" / "auto_review_continuation_enabled.yaml"
     )
 
 
-def _review_body(**overrides: Any) -> str:
-    data: Dict[str, Any] = {
-        "pr": 88,
-        "repo": "example-org/widget",
-        "round": 2,
-        "branch": "alice/widget-logging",
-        "diff_summary": "Round 2 re-review.",
+def _thread_scope(**overrides: Any) -> Dict[str, Any]:
+    scope = {
+        "allowed_types": list(_THREAD_TYPES),
+        "max_round": 3,
+        "expires_at_utc": "2026-06-30T00:00:00Z",
+        "max_actual_minutes": 30,
+        "max_actual_files_touched": 3,
+        "writes_findings_packet": True,
+        "sends_oacp_reply": True,
     }
-    data.update(overrides)
-    return yaml.safe_dump(data, sort_keys=False)
+    scope.update(overrides)
+    return scope
 
 
-def _review_message(**overrides: Any) -> Dict[str, Any]:
-    message = _load_yaml(
-        FIXTURE_ROOT / "messages" / "review_continuation_request.yaml"
-    )
+def _thread_message(
+    message_type: str = "review_request", **overrides: Any
+) -> Dict[str, Any]:
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "thread_grant_request.yaml")
+    message["type"] = message_type
+    body: Dict[str, Any] = {"round": 2, "description": "Continue the bounded work."}
+    if message_type not in {
+        "review_request",
+        "review_addressed",
+        "review_feedback",
+        "review_lgtm",
+    }:
+        body["task_profile"] = {
+            "estimated_minutes": 10,
+            "risk_tier": "P2",
+            "expected_files_touched": 1,
+            "destructive_ops": False,
+            "external_side_effects": False,
+            "touches_auth_config_or_secrets": False,
+            "touches_dependencies": False,
+            "public_visibility": False,
+            "sends_oacp_reply_only": True,
+        }
+    if message_type == "handoff":
+        body.update(
+            {
+                "source_agent": "alice",
+                "target_agent": "codex",
+                "intent": "Continue bounded work",
+                "artifacts_to_review": ["notes.txt"],
+                "definition_of_done": ["Write the conclusion"],
+                "context_bundle": {
+                    "files_touched": [
+                        {"path": "notes.txt", "rationale": "Source material"}
+                    ],
+                    "decisions_made": [
+                        {
+                            "decision": "Read the notes",
+                            "alternatives_considered": ["Recreate notes"],
+                        }
+                    ],
+                    "blockers_hit": [
+                        {"blocker": "none", "workarounds_attempted": ["n/a"]}
+                    ],
+                    "suggested_next_steps": ["Complete the conclusion"],
+                },
+            }
+        )
+    if message_type == "handoff":
+
+        class IndentedDumper(yaml.SafeDumper):
+            def increase_indent(
+                self, flow: bool = False, indentless: bool = False
+            ) -> Any:
+                return super().increase_indent(flow, False)
+
+        message["body"] = yaml.dump(body, Dumper=IndentedDumper, sort_keys=False)
+    else:
+        message["body"] = yaml.safe_dump(body, sort_keys=False)
     message.update(overrides)
     return message
 
 
-def _write_review_grant_audit(
-    tmp_path: Path,
-    name: str = "grant.yaml",
-    **mutations: Any,
-) -> Dict[str, Any]:
-    audit = _load_yaml(
-        FIXTURE_ROOT / "audits" / "prior_review_grant_approved.yaml"
-    )
-    scope_mutations = mutations.pop("review_loop", None)
-    audit.update(mutations)
-    if scope_mutations is not None:
-        audit["result"]["human_outcome"]["grant"]["granted_scope"][
-            "review_loop"
-        ].update(scope_mutations)
+def _write_thread_audit(tmp_path: Path, audit: Dict[str, Any], name: str) -> None:
     (tmp_path / name).write_text(
         yaml.safe_dump(audit, sort_keys=False), encoding="utf-8"
     )
+
+
+def _write_thread_grant_audit(
+    tmp_path: Path,
+    name: str = "grant.yaml",
+    *,
+    scope: Optional[Dict[str, Any]] = None,
+    **overrides: Any,
+) -> Dict[str, Any]:
+    audit = _load_yaml(FIXTURE_ROOT / "audits" / "prior_generic_grant_approved.yaml")
+    audit["result"]["human_outcome"]["grant"]["granted_scope"] = (
+        _thread_scope() if scope is None else scope
+    )
+    audit.update(overrides)
+    _write_thread_audit(tmp_path, audit, name)
     return audit
 
 
-def test_review_feedback_is_context_only() -> None:
-    message = _review_message(
-        type="review_feedback",
-        body="findings_packet: packets/findings/example_r1.yaml\nround: 1\nblocking_count: 1\n",
+def _thread_decision(
+    tmp_path: Path,
+    message: Optional[Dict[str, Any]] = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    kwargs.setdefault("now_utc", _THREAD_NOW)
+    return evaluate_autonomy(
+        _thread_message() if message is None else message,
+        _thread_config(),
+        audit_dir=tmp_path,
+        receiver=kwargs.pop("receiver", "codex"),
+        **kwargs,
     )
-    decision = evaluate_autonomy(message, _review_config())
+
+
+@pytest.mark.parametrize("message_type", _THREAD_TYPES)
+def test_thread_grant_explicitly_allows_each_work_type(
+    tmp_path: Path, message_type: str
+) -> None:
+    _write_thread_grant_audit(tmp_path)
+    decision = _thread_decision(tmp_path, _thread_message(message_type))
+    assert decision["decision"] == "auto_accepted"
+    assert decision["continuation_grant"]["decision"] == "accepted"
+    assert decision["continuation_grant"]["effective_round"] == 2
+    assert "review_continuation" not in decision
+
+
+@pytest.mark.parametrize("message_type", ["review_feedback", "review_lgtm"])
+def test_reviewer_outputs_never_start_work(tmp_path: Path, message_type: str) -> None:
+    _write_thread_grant_audit(tmp_path)
+    decision = _thread_decision(tmp_path, _thread_message(message_type))
     assert decision["decision"] == "paused"
-    assert decision["reason_codes"] == ["review_continuation_context_only"]
-    assert decision["review_continuation"]["decision"] == "context_only"
+    assert decision["reason_codes"] == ["continuation_grant_type_not_granted"]
+    assert decision["continuation_grant"]["decision"] == "context_only"
 
 
-def test_review_lgtm_is_context_only(tmp_path: Path) -> None:
-    # Reviewer-output types never start reviewer work, grant or no grant.
-    _write_review_grant_audit(tmp_path)
-    message = _review_message(
-        type="review_lgtm",
-        body="quality_gate_result: pass\nmerge_ready: true\n",
-    )
-    decision = evaluate_autonomy(
-        message, _review_config(), audit_dir=tmp_path, receiver="codex"
-    )
+@pytest.mark.parametrize("message_type", _THREAD_TYPES)
+def test_thread_grant_requires_explicit_type_membership(
+    tmp_path: Path, message_type: str
+) -> None:
+    allowed = [kind for kind in _THREAD_TYPES if kind != message_type]
+    _write_thread_grant_audit(tmp_path, scope=_thread_scope(allowed_types=allowed))
+    decision = _thread_decision(tmp_path, _thread_message(message_type))
     assert decision["decision"] == "paused"
-    assert decision["review_continuation"]["decision"] == "context_only"
+    assert "continuation_grant_type_not_granted" in decision["reason_codes"]
 
 
-def test_review_addressed_context_only_without_explicit_type_grant(
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"from": "bob", "id": "msg-20260526120000-bob-0002"},
+        {
+            "conversation_id": "conv-20260526-other-001",
+            "parent_message_id": "msg-20260526110000-alice-other",
+        },
+    ],
+)
+def test_thread_grant_does_not_cross_sender_or_thread(
+    tmp_path: Path, changes: Dict[str, Any]
+) -> None:
+    _write_thread_grant_audit(tmp_path)
+    decision = _thread_decision(tmp_path, _thread_message(**changes))
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["continuation_grant_missing_approval"]
+
+
+def test_thread_grant_does_not_cross_receivers(tmp_path: Path) -> None:
+    _write_thread_grant_audit(tmp_path)
+    decision = _thread_decision(tmp_path, receiver="claude")
+    assert decision["reason_codes"] == ["continuation_grant_missing_approval"]
+
+
+def test_thread_grant_requires_thread_binding(tmp_path: Path) -> None:
+    _write_thread_grant_audit(tmp_path)
+    message = _thread_message()
+    message.pop("conversation_id")
+    message.pop("parent_message_id")
+    assert _thread_decision(tmp_path, message)["reason_codes"] == [
+        "continuation_grant_missing_thread"
+    ]
+
+
+def test_thread_grant_parent_only_binding_still_works(tmp_path: Path) -> None:
+    _write_thread_grant_audit(tmp_path)
+    message = _thread_message()
+    message.pop("conversation_id")
+    assert _thread_decision(tmp_path, message)["decision"] == "auto_accepted"
+
+
+def test_thread_grant_approval_is_not_retroactive(tmp_path: Path) -> None:
+    _write_thread_grant_audit(tmp_path)
+    message = _thread_message(created_at_utc="2026-05-26T09:04:00Z")
+    assert _thread_decision(tmp_path, message)["reason_codes"] == [
+        "continuation_grant_missing_approval"
+    ]
+
+
+def test_thread_grant_recognition_off_does_not_honor_stored_approval(
     tmp_path: Path,
 ) -> None:
-    _write_review_grant_audit(tmp_path)
-    message = _review_message(
-        type="review_addressed",
-        body=_review_body(commit_sha="a" * 40, changes_summary="fixes"),
-    )
+    _write_thread_grant_audit(tmp_path)
+    config = _thread_config()
+    config["autonomy"]["continuation_grants"]["enabled"] = False
     decision = evaluate_autonomy(
-        message, _review_config(), audit_dir=tmp_path, receiver="codex"
+        _thread_message(),
+        config,
+        audit_dir=tmp_path,
+        receiver="codex",
+        now_utc=_THREAD_NOW,
     )
-    assert decision["decision"] == "paused"
-    assert decision["reason_codes"] == ["review_continuation_context_only"]
+    assert decision["reason_codes"] == ["continuation_grant_ignored_disabled"]
 
 
-def test_review_addressed_auto_continues_when_grant_lists_it(
-    tmp_path: Path,
+def test_thread_grant_sender_claim_is_not_approval(tmp_path: Path) -> None:
+    message = _thread_message(
+        body=yaml.safe_dump(
+            {
+                "round": 2,
+                "continuation_grants": {
+                    "approved_thread_continuation": {"scope": _thread_scope()}
+                },
+            }
+        )
+    )
+    decision = _thread_decision(tmp_path, message)
+    assert decision["reason_codes"] == ["continuation_grant_missing_approval"]
+
+
+def test_review_without_a_grant_requires_approval(tmp_path: Path) -> None:
+    assert _thread_decision(tmp_path)["reason_codes"] == [
+        "continuation_grant_missing_approval"
+    ]
+
+
+def test_ordinary_task_without_grant_keeps_normal_admission(tmp_path: Path) -> None:
+    decision = _thread_decision(tmp_path, _thread_message("task_request"))
+    assert decision["decision"] == "auto_accepted"
+    assert decision["continuation_grant"]["decision"] == "not_present"
+
+
+@pytest.mark.parametrize(
+    "message_time,evaluation_time",
+    [
+        ("2026-06-30T00:00:01Z", "2026-06-29T23:59:59Z"),
+        ("2026-05-26T12:05:00Z", "2026-06-30T00:00:01Z"),
+    ],
+)
+def test_thread_grant_expiry_uses_both_clocks(
+    tmp_path: Path, message_time: str, evaluation_time: str
 ) -> None:
-    _write_review_grant_audit(
+    _write_thread_grant_audit(tmp_path)
+    decision = _thread_decision(
         tmp_path,
-        review_loop={"allowed_types": ["review_request", "review_addressed"]},
+        _thread_message(created_at_utc=message_time),
+        now_utc=datetime.strptime(evaluation_time, "%Y-%m-%dT%H:%M:%SZ"),
     )
-    message = _review_message(
-        type="review_addressed",
-        body=_review_body(commit_sha="a" * 40, changes_summary="fixes"),
+    assert decision["reason_codes"] == ["continuation_grant_expired"]
+
+
+def test_thread_grant_accepts_exact_expiry_boundary(tmp_path: Path) -> None:
+    _write_thread_grant_audit(tmp_path)
+    boundary = "2026-06-30T00:00:00Z"
+    decision = _thread_decision(
+        tmp_path,
+        _thread_message(created_at_utc=boundary),
+        now_utc=datetime.strptime(boundary, "%Y-%m-%dT%H:%M:%SZ"),
     )
+    assert decision["decision"] == "auto_accepted"
+
+
+def test_thread_grant_future_approval_cannot_govern_forward_dated_message(
+    tmp_path: Path,
+) -> None:
+    audit = _write_thread_grant_audit(tmp_path)
+    audit["result"]["human_outcome"]["decided_at_utc"] = "2026-05-26T12:31:00Z"
+    _write_thread_audit(tmp_path, audit, "grant.yaml")
+    message = _thread_message(created_at_utc="2026-05-26T12:32:00Z")
+    assert _thread_decision(tmp_path, message)["reason_codes"] == [
+        "continuation_grant_missing_approval"
+    ]
+
+
+def test_thread_grant_accepts_timezone_aware_clock(tmp_path: Path) -> None:
+    from datetime import timezone
+
+    _write_thread_grant_audit(tmp_path)
+    assert (
+        _thread_decision(tmp_path, now_utc=_THREAD_NOW.replace(tzinfo=timezone.utc))[
+            "decision"
+        ]
+        == "auto_accepted"
+    )
+
+
+@pytest.mark.parametrize(
+    "denied_at,expected",
+    [
+        ("2026-05-26T12:10:00Z", "revoked"),
+        ("2026-05-26T09:05:00Z", "revoked"),
+        ("2026-05-26T12:31:00Z", "accepted"),
+    ],
+)
+def test_thread_grant_denial_arbitrates_on_evaluation_clock(
+    tmp_path: Path, denied_at: str, expected: str
+) -> None:
+    _write_thread_grant_audit(tmp_path)
+    denial = _load_yaml(
+        FIXTURE_ROOT / "audits" / "prior_generic_grant_denied_postmessage.yaml"
+    )
+    denial["result"]["human_outcome"]["decided_at_utc"] = denied_at
+    _write_thread_audit(tmp_path, denial, "denial.yaml")
+    decision = _thread_decision(tmp_path)
+    assert decision["continuation_grant"]["decision"] == expected
+    if expected == "revoked":
+        assert decision["reason_codes"] == ["continuation_grant_revoked"]
+
+
+def test_thread_grant_newer_approval_restores_revoked_authority(tmp_path: Path) -> None:
+    denial = _load_yaml(
+        FIXTURE_ROOT / "audits" / "prior_generic_grant_denied_later.yaml"
+    )
+    denial["result"]["human_outcome"]["decided_at_utc"] = "2026-05-26T08:00:00Z"
+    _write_thread_audit(tmp_path, denial, "denial.yaml")
+    _write_thread_grant_audit(tmp_path)
+    decision = _thread_decision(tmp_path)
+    assert decision["decision"] == "auto_accepted"
+    assert decision["continuation_grant"]["effective_round"] == 2
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"round": 4},
+        {"round": 0},
+        {"round": True},
+        {"round": "2"},
+    ],
+)
+def test_thread_grant_declared_round_cannot_escape_bounds(
+    tmp_path: Path, changes: Dict[str, Any]
+) -> None:
+    _write_thread_grant_audit(tmp_path)
+    decision = _thread_decision(tmp_path, _thread_message(body=yaml.safe_dump(changes)))
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == [
+        "continuation_grant_round_exceeded"
+        if changes["round"] == 4
+        else "continuation_grant_scope_exceeded"
+    ]
+
+
+def test_thread_grant_missing_round_uses_receiver_floor(tmp_path: Path) -> None:
+    _write_thread_grant_audit(tmp_path)
+    decision = _thread_decision(
+        tmp_path, _thread_message(body="description: Continue the work.\n")
+    )
+    assert decision["decision"] == "auto_accepted"
+    assert decision["continuation_grant"]["effective_round"] == 2
+
+
+def test_thread_grant_round_floor_counts_unique_started_mixed_types(
+    tmp_path: Path,
+) -> None:
+    _write_thread_grant_audit(tmp_path)
+    for index, kind in enumerate(["question", "review_addressed"], start=1):
+        audit = _load_yaml(FIXTURE_ROOT / "audits" / "prior_thread_invocation.yaml")
+        audit.update(
+            message_id=f"msg-20260526113000-alice-start{index}", message_type=kind
+        )
+        _write_thread_audit(tmp_path, audit, f"started{index}.yaml")
+        _write_thread_audit(tmp_path, audit, f"duplicate{index}.yaml")
+    decision = _thread_decision(tmp_path, _thread_message(body="round: 1\n"))
+    assert decision["reason_codes"] == ["continuation_grant_round_exceeded"]
+    assert decision["continuation_grant"]["effective_round"] == 4
+
+
+@pytest.mark.parametrize(
+    "ignored",
+    [
+        "approved_unstarted",
+        "auto_accepted_unstarted",
+        "denied",
+        "unanswered",
+        "context_only",
+        "superseded",
+        "future_started",
+        "future_audit",
+        "other_sender",
+        "other_receiver",
+        "other_thread",
+        "output_type",
+    ],
+)
+def test_thread_grant_round_floor_excludes_non_invocations(
+    tmp_path: Path, ignored: str
+) -> None:
+    _write_thread_grant_audit(tmp_path, scope=_thread_scope(max_round=2))
+    extra = _load_yaml(FIXTURE_ROOT / "audits" / "prior_thread_invocation.yaml")
+    extra["message_id"] = "msg-20260526113000-alice-extra"
+    if ignored in {"approved_unstarted", "denied", "unanswered", "context_only"}:
+        extra["decision"] = "paused"
+    if ignored in {
+        "approved_unstarted",
+        "auto_accepted_unstarted",
+        "denied",
+        "unanswered",
+        "context_only",
+    }:
+        extra["result"].pop("work_started_at_utc", None)
+    if ignored in {"approved_unstarted", "denied"}:
+        extra["result"]["human_outcome"] = {
+            "recorded": True,
+            "decision": "approved" if ignored == "approved_unstarted" else "declined",
+            "decided_at_utc": "2026-05-26T11:31:00Z",
+        }
+    elif ignored == "context_only":
+        extra["decision"] = "auto_accepted"
+        extra["message_type"] = "review_addressed"
+        extra["result"]["work_started_at_utc"] = "2026-05-26T11:31:00Z"
+        extra["continuation_grant"] = {"decision": "context_only"}
+    elif ignored == "superseded":
+        extra["result"]["final_state"] = "superseded"
+    elif ignored == "future_started":
+        extra["result"]["work_started_at_utc"] = "2026-05-26T12:31:00Z"
+    elif ignored == "future_audit":
+        extra["created_at_utc"] = "2026-05-26T12:31:00Z"
+    elif ignored == "other_sender":
+        extra["sender"] = "bob"
+    elif ignored == "other_receiver":
+        extra["receiver"] = "claude"
+    elif ignored == "other_thread":
+        extra["conversation_id"] = "conv-20260526-other-001"
+    elif ignored == "output_type":
+        extra["message_type"] = "review_feedback"
+    if ignored == "denied":
+        extra["result"]["actual_minutes"] = 1
+    _write_thread_audit(tmp_path, extra, "extra.yaml")
+    decision = _thread_decision(tmp_path)
+    assert decision["decision"] == "auto_accepted"
+    assert decision["continuation_grant"]["effective_round"] == 2
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        "work_started_at_utc",
+        "actual_minutes",
+        "actual_files_touched",
+        "terminal_completion",
+    ],
+)
+def test_thread_grant_round_floor_accepts_actual_execution_evidence(
+    tmp_path: Path, evidence: str
+) -> None:
+    _write_thread_grant_audit(tmp_path, scope=_thread_scope(max_round=2))
+    extra = _load_yaml(FIXTURE_ROOT / "audits" / "prior_thread_invocation.yaml")
+    extra["result"].pop("work_started_at_utc")
+    if evidence == "work_started_at_utc":
+        extra["result"][evidence] = "2026-05-26T11:31:00Z"
+    elif evidence == "terminal_completion":
+        extra["result"].update(
+            final_state="done", completed_at_utc="2026-05-26T11:45:00Z"
+        )
+    else:
+        extra["result"][evidence] = 1
+    _write_thread_audit(tmp_path, extra, "started.yaml")
+    decision = _thread_decision(tmp_path)
+    assert decision["reason_codes"] == ["continuation_grant_round_exceeded"]
+    assert decision["continuation_grant"]["effective_round"] == 3
+
+
+def test_thread_grant_replayed_message_pauses(tmp_path: Path) -> None:
+    _write_thread_grant_audit(tmp_path)
+    replay = _load_yaml(FIXTURE_ROOT / "audits" / "prior_thread_invocation.yaml")
+    replay["message_id"] = _thread_message()["id"]
+    _write_thread_audit(tmp_path, replay, "replay.yaml")
+    assert _thread_decision(tmp_path)["reason_codes"] == ["message_replayed"]
+
+
+def test_thread_grant_does_not_parse_workflow_subject_or_head(tmp_path: Path) -> None:
+    _write_thread_grant_audit(tmp_path)
+    message = _thread_message(
+        body=yaml.safe_dump(
+            {
+                "round": 2,
+                "repo": "example-org/another",
+                "pr": 999,
+                "declared_head": "a" * 12,
+                "subject": "Changed workflow artifact",
+            }
+        )
+    )
+    decision = _thread_decision(
+        tmp_path,
+        message,
+        actuals={
+            "actual_minutes": 0,
+            "actual_files_touched": 0,
+            "review": {"live_head": "b" * 40},
+        },
+    )
+    assert decision["decision"] == "auto_accepted"
+    assert "head_check" not in decision["continuation_grant"]
+    assert not any("head_mismatch" in code for code in decision["reason_codes"])
+
+
+def test_thread_grant_extra_side_effect_pauses(tmp_path: Path) -> None:
+    _write_thread_grant_audit(tmp_path)
+    message = _thread_message(
+        body=yaml.safe_dump(
+            {
+                "round": 2,
+                "side_effects": [
+                    "writes_findings_packet",
+                    "sends_oacp_reply",
+                    "submits_github_review",
+                ],
+            }
+        )
+    )
+    decision = _thread_decision(tmp_path, message)
+    assert decision["reason_codes"] == ["continuation_grant_scope_exceeded"]
+    assert "submits_github_review" in decision["continuation_grant"]["exceeded_fields"]
+
+
+def test_thread_grant_authorized_review_side_effect_accepts(tmp_path: Path) -> None:
+    _write_thread_grant_audit(tmp_path, scope=_thread_scope(submits_github_review=True))
+    message = _thread_message(
+        body="round: 2\nside_effects: [writes_findings_packet, sends_oacp_reply, submits_github_review]\n"
+    )
+    assert _thread_decision(tmp_path, message)["decision"] == "auto_accepted"
+
+
+def test_review_grant_defaults_still_require_findings_and_reply(tmp_path: Path) -> None:
+    _write_thread_grant_audit(
+        tmp_path, scope=_thread_scope(writes_findings_packet=False)
+    )
+    decision = _thread_decision(tmp_path)
+    assert decision["reason_codes"] == ["continuation_grant_scope_exceeded"]
+    assert "writes_findings_packet" in decision["continuation_grant"]["exceeded_fields"]
+
+
+@pytest.mark.parametrize(
+    "actuals,field",
+    [
+        ({"actual_minutes": 31, "actual_files_touched": 1}, "actual_minutes"),
+        ({"actual_minutes": 1, "actual_files_touched": 4}, "actual_files_touched"),
+        (
+            {
+                "actual_minutes": 1,
+                "actual_files_touched": 1,
+                "side_effects_actual": {"submits_github_review": True},
+            },
+            "side_effects_actual.submits_github_review",
+        ),
+    ],
+)
+def test_grant_derived_review_envelope_enforces_checkpoint_bounds(
+    tmp_path: Path, actuals: Dict[str, Any], field: str
+) -> None:
+    _write_thread_grant_audit(tmp_path)
+    decision = _thread_decision(tmp_path, actuals=actuals)
+    assert decision["decision"] == "paused"
+    checkpoint = decision["result"]["threshold_checkpoint"]
+    assert checkpoint["breached"] is True
+    assert field in checkpoint["breached_fields"]
+
+
+def test_generic_grant_never_bypasses_task_lexical_gate(tmp_path: Path) -> None:
+    _write_thread_grant_audit(tmp_path)
+    message = _thread_message("task_request")
+    body = yaml.safe_load(message["body"])
+    body["description"] = "Run rm -rf on the output directory."
+    message["body"] = yaml.safe_dump(body, sort_keys=False)
+    decision = _thread_decision(tmp_path, message)
+    assert decision["decision"] == "paused"
+    assert "hard_stop_destructive_command" in decision["reason_codes"]
+
+
+def test_grant_derived_review_bound_is_durable(tmp_path: Path) -> None:
+    audit_source = tmp_path / "source"
+    audit_source.mkdir()
+    _write_thread_grant_audit(audit_source)
+    message = _thread_message()
+    decision = _thread_decision(audit_source, message)
+    assert decision["decision"] == "auto_accepted"
+    assert decision["scope_envelope_source"] == "continuation_grant"
+    assert decision["scope_envelope"]["estimated_minutes"] == 30
+    assert decision["scope_envelope"]["expected_files_touched"] == 3
+    path = write_audit_record(
+        tmp_path / "out",
+        decision,
+        config=_thread_config(),
+        message=message,
+        message_path=tmp_path / "message.yaml",
+        policy_path=tmp_path / "policy.yaml",
+        receiver="codex",
+    )
+    written = _load_yaml(path)
+    assert written["continuation_grant"]["decision"] == "accepted"
+    assert written["scope_envelope"] == decision["scope_envelope"]
+    assert "review_continuation" not in written
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "round: 4\nround: 1\n",
+        "round: 4\nside_effects: [submits_github_review\n",
+    ],
+)
+def test_thread_grant_rejects_ambiguous_or_broken_generic_declarations(
+    tmp_path: Path,
+    body: str,
+) -> None:
+    _write_thread_grant_audit(tmp_path)
+    decision = _thread_decision(tmp_path, _thread_message(body=body))
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["continuation_grant_scope_exceeded"]
+
+
+@pytest.mark.parametrize(
+    "enabled,reason",
+    [
+        (True, "continuation_grant_missing_approval"),
+        (False, "continuation_grant_ignored_disabled"),
+    ],
+)
+@pytest.mark.parametrize("malformed", [False, True], ids=["valid-list", "broken-list"])
+def test_profiled_question_cannot_self_authorize_declared_generic_effect(
+    tmp_path: Path,
+    enabled: bool,
+    reason: str,
+    malformed: bool,
+) -> None:
+    message = _thread_message("question")
+    if malformed:
+        message["body"] += "\nside_effects: [submits_github_review\n"
+    else:
+        body = yaml.safe_load(message["body"])
+        body["side_effects"] = ["submits_github_review"]
+        message["body"] = yaml.safe_dump(body, sort_keys=False)
+    config = _thread_config()
+    config["autonomy"]["continuation_grants"]["enabled"] = enabled
     decision = evaluate_autonomy(
         message,
-        _review_config(),
+        config,
         audit_dir=tmp_path,
         receiver="codex",
-        now_utc=_REVIEW_NOW,
+        now_utc=_THREAD_NOW,
     )
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == [reason]
+
+
+@pytest.mark.parametrize("has_standing_grant", [False, True])
+def test_plain_markdown_profiled_task_keeps_normal_grant_matching(
+    tmp_path: Path,
+    has_standing_grant: bool,
+) -> None:
+    if has_standing_grant:
+        _write_thread_grant_audit(tmp_path)
+    message = _thread_message("task_request")
+    profile = yaml.safe_load(message["body"])["task_profile"]
+    profile_text = yaml.safe_dump(profile, sort_keys=False)
+    message["body"] = (
+        "## Task\nRead the module and record a conclusion.\n\n"
+        "task_profile:\n"
+        + "\n".join("  " + line for line in profile_text.splitlines())
+        + "\n"
+    )
+    decision = _thread_decision(tmp_path, message)
     assert decision["decision"] == "auto_accepted"
-    assert decision["review_continuation"]["decision"] == "accepted"
-
-
-def test_review_request_without_thread_requires_confirmation(
-    tmp_path: Path,
-) -> None:
-    _write_review_grant_audit(tmp_path)
-    message = _review_message()
-    message.pop("conversation_id", None)
-    message.pop("parent_message_id", None)
-    decision = evaluate_autonomy(
-        message, _review_config(), audit_dir=tmp_path, receiver="codex"
+    assert decision["continuation_grant"]["decision"] == (
+        "accepted" if has_standing_grant else "not_present"
     )
-    assert decision["decision"] == "paused"
-    assert decision["reason_codes"] == [
-        "review_continuation_confirmation_required"
-    ]
 
 
-def test_review_grant_does_not_cross_senders(tmp_path: Path) -> None:
-    _write_review_grant_audit(tmp_path)
-    message = _review_message(
-        **{"from": "bob", "id": "msg-20260526123000-bob-rr2"}
-    )
-    decision = evaluate_autonomy(
-        message, _review_config(), audit_dir=tmp_path, receiver="codex"
-    )
-    assert decision["decision"] == "paused"
-    assert decision["reason_codes"] == [
-        "review_continuation_confirmation_required"
-    ]
-
-
-def test_review_grant_does_not_cross_receivers(tmp_path: Path) -> None:
-    _write_review_grant_audit(tmp_path)
-    decision = evaluate_autonomy(
-        _review_message(), _review_config(), audit_dir=tmp_path, receiver="claude"
-    )
-    assert decision["decision"] == "paused"
-    assert decision["reason_codes"] == [
-        "review_continuation_confirmation_required"
-    ]
-
-
-def test_review_grant_decided_after_message_cannot_govern(
-    tmp_path: Path,
-) -> None:
-    _write_review_grant_audit(tmp_path)
-    message = _review_message(created_at_utc="2026-05-26T09:04:00Z")
-    decision = evaluate_autonomy(
-        message, _review_config(), audit_dir=tmp_path, receiver="codex"
-    )
-    assert decision["decision"] == "paused"
-    assert decision["reason_codes"] == [
-        "review_continuation_confirmation_required"
-    ]
-
-
-def test_review_grant_expired_pauses(tmp_path: Path) -> None:
-    _write_review_grant_audit(
-        tmp_path, review_loop={"expires_at_utc": "2026-05-26T11:00:00Z"}
-    )
-    decision = evaluate_autonomy(
-        _review_message(), _review_config(), audit_dir=tmp_path, receiver="codex"
-    )
-    assert decision["decision"] == "paused"
-    assert decision["reason_codes"] == ["review_continuation_expired"]
-
-
-def test_review_grant_cross_repo_pauses(tmp_path: Path) -> None:
-    _write_review_grant_audit(tmp_path)
-    message = _review_message(body=_review_body(repo="example-org/other"))
-    decision = evaluate_autonomy(
-        message, _review_config(), audit_dir=tmp_path, receiver="codex"
-    )
-    assert decision["decision"] == "paused"
-    assert decision["reason_codes"] == ["review_continuation_scope_exceeded"]
-    assert decision["review_continuation"]["exceeded_fields"] == ["repository"]
-
-
-def test_review_request_without_repo_declaration_pauses(tmp_path: Path) -> None:
-    # Scope matching fails closed: a request that does not declare its
-    # repository cannot be confirmed in-scope.
-    _write_review_grant_audit(tmp_path)
-    body = _review_body()
-    message = _review_message(
-        body="\n".join(
-            line for line in body.splitlines() if not line.startswith("repo:")
-        )
-    )
-    decision = evaluate_autonomy(
-        message, _review_config(), audit_dir=tmp_path, receiver="codex"
-    )
-    assert decision["decision"] == "paused"
-    assert decision["reason_codes"] == ["review_continuation_scope_exceeded"]
-    assert "repository" in decision["review_continuation"]["exceeded_fields"]
-
-
-def test_review_side_effect_expansion_pauses(tmp_path: Path) -> None:
-    _write_review_grant_audit(tmp_path)
-    message = _review_message(
-        body=_review_body(
-            side_effects=[
-                "writes_findings_packet",
-                "sends_oacp_reply",
-                "submits_github_review",
-            ]
-        )
-    )
-    decision = evaluate_autonomy(
-        message, _review_config(), audit_dir=tmp_path, receiver="codex"
-    )
-    assert decision["decision"] == "paused"
-    assert decision["reason_codes"] == ["review_continuation_scope_exceeded"]
-    assert decision["review_continuation"]["exceeded_fields"] == [
-        "permitted_side_effects.submits_github_review"
-    ]
-
-
-def test_review_round_floor_comes_from_receiver_audit_trail(
-    tmp_path: Path,
-) -> None:
-    # Three earlier review_request audits exist in the thread; a sender
-    # re-declaring "round: 1" cannot reset the count below the receiver's
-    # own floor of 4.
-    _write_review_grant_audit(tmp_path)
-    for index in range(2):
-        _write_review_grant_audit(
-            tmp_path,
-            name=f"round{index}.yaml",
-            message_id=f"msg-20260526100{index}00-alice-r{index}",
-        )
-    message = _review_message(body=_review_body(round=1))
-    decision = evaluate_autonomy(
-        message, _review_config(), audit_dir=tmp_path, receiver="codex"
-    )
-    assert decision["decision"] == "paused"
-    assert decision["reason_codes"] == ["review_continuation_round_exceeded"]
-    assert decision["review_continuation"]["effective_round"] == 4
-
-
-def test_review_grant_invalid_scope_pauses(tmp_path: Path) -> None:
-    _write_review_grant_audit(
-        tmp_path, review_loop={"allowed_types": ["review_lgtm"]}
-    )
-    decision = evaluate_autonomy(
-        _review_message(), _review_config(), audit_dir=tmp_path, receiver="codex"
-    )
-    assert decision["decision"] == "paused"
-    assert decision["reason_codes"] == ["review_loop_invalid"]
-    assert decision["review_continuation"]["decision"] == "invalid"
-
-
-def test_review_task_grant_without_review_scope_keeps_confirmation(
-    tmp_path: Path,
-) -> None:
-    # A standing task-continuation grant carries no review authority.
-    audit = _load_yaml(
-        FIXTURE_ROOT / "audits" / "prior_review_grant_approved.yaml"
-    )
-    del audit["result"]["human_outcome"]["grant"]["granted_scope"]["review_loop"]
-    (tmp_path / "grant.yaml").write_text(
-        yaml.safe_dump(audit, sort_keys=False), encoding="utf-8"
-    )
-    decision = evaluate_autonomy(
-        _review_message(), _review_config(), audit_dir=tmp_path, receiver="codex"
-    )
-    assert decision["decision"] == "paused"
-    assert decision["reason_codes"] == [
-        "review_continuation_confirmation_required"
-    ]
-
-
-def test_review_undeclared_head_is_recorded_not_blocking(tmp_path: Path) -> None:
-    _write_review_grant_audit(tmp_path)
-    decision = evaluate_autonomy(
-        _review_message(),
-        _review_config(),
-        actuals={"review": {"live_head": "b" * 40}},
-        audit_dir=tmp_path,
-        receiver="codex",
-        now_utc=_REVIEW_NOW,
-    )
+def test_thread_round_floor_ignores_future_manual_authorization(tmp_path: Path) -> None:
+    _write_thread_grant_audit(tmp_path, scope=_thread_scope(max_round=2))
+    extra = _load_yaml(FIXTURE_ROOT / "audits" / "prior_thread_invocation.yaml")
+    extra["decision"] = "paused"
+    extra["result"]["human_outcome"] = {
+        "recorded": True,
+        "decision": "approved",
+        "decided_at_utc": "2026-05-26T12:31:00Z",
+    }
+    _write_thread_audit(tmp_path, extra, "future-approval.yaml")
+    decision = _thread_decision(tmp_path)
     assert decision["decision"] == "auto_accepted"
-    assert "review_continuation_head_mismatch" not in decision["reason_codes"]
-    head_check = decision["review_continuation"]["head_check"]
-    assert head_check["status"] == "undeclared"
-    assert head_check["live_head"] == "b" * 40
+    assert decision["continuation_grant"]["effective_round"] == 2
 
 
-def test_review_short_prefix_declaration_is_mismatch(tmp_path: Path) -> None:
-    # A truncated declaration can never satisfy the exact-head guard even
-    # when the live head starts with it.
-    _write_review_grant_audit(tmp_path)
-    live = "c" * 40
-    message = _review_message(body=_review_body(declared_head=live[:12]))
-    decision = evaluate_autonomy(
-        message,
-        _review_config(),
-        actuals={"review": {"live_head": live}},
-        audit_dir=tmp_path,
-        receiver="codex",
-        now_utc=_REVIEW_NOW,
-    )
-    assert decision["decision"] == "auto_accepted"
-    assert "review_continuation_head_mismatch" in decision["reason_codes"]
-    assert decision["review_continuation"]["head_check"]["status"] == "mismatch"
+_GRANT_GRAMMAR = _load_yaml(FIXTURE_ROOT / "thread_grants" / "corpus.yaml")
 
 
-def test_review_replayed_request_pauses(tmp_path: Path) -> None:
-    _write_review_grant_audit(tmp_path)
-    message = _review_message()
-    replay = _load_yaml(
-        FIXTURE_ROOT / "audits" / "prior_review_grant_approved.yaml"
-    )
-    replay["message_id"] = message["id"]
-    replay["decision"] = "auto_accepted"
-    (tmp_path / "replay.yaml").write_text(
-        yaml.safe_dump(replay, sort_keys=False), encoding="utf-8"
-    )
-    decision = evaluate_autonomy(
-        message, _review_config(), audit_dir=tmp_path, receiver="codex"
-    )
-    assert decision["decision"] == "paused"
-    assert decision["reason_codes"] == ["message_replayed"]
+@pytest.mark.parametrize(
+    "case", _GRANT_GRAMMAR["scope_cases"], ids=lambda case: case["case"]
+)
+def test_generic_scope_grammar_matrix(case: Dict[str, Any]) -> None:
+    scope = dict(_GRANT_GRAMMAR["base_scope"])
+    scope.update(case.get("set", {}))
+    for key in case.get("remove", []):
+        scope.pop(key, None)
+    normalized, error = normalize_continuation_scope(scope)
+    if case["valid"]:
+        assert error is None
+        assert normalized["allowed_types"] == sorted(set(scope["allowed_types"]))
+        for key in (
+            "max_round",
+            "expires_at_utc",
+            "max_actual_minutes",
+            "max_actual_files_touched",
+        ):
+            assert normalized[key] == scope[key]
+    else:
+        assert normalized is None
+        assert error == case["error"]
 
 
-def test_review_only_scope_normalizes_with_zero_task_budgets() -> None:
-    scope, error = normalize_continuation_scope(
+@pytest.mark.parametrize(
+    "scope",
+    [
+        {"max_actual_minutes": 30, "max_actual_files_touched": 3},
         {
             "review_loop": {
                 "repository": "example-org/widget",
@@ -2694,278 +3319,18 @@ def test_review_only_scope_normalizes_with_zero_task_budgets() -> None:
                 "allowed_types": ["review_request"],
                 "max_round": 3,
                 "expires_at_utc": "2026-06-30T00:00:00Z",
-                "permitted_side_effects": {
-                    "writes_findings_packet": True,
-                    "sends_oacp_reply": True,
-                },
             }
-        }
-    )
-    assert error is None
-    assert scope["max_actual_minutes"] == 0
-    assert scope["max_actual_files_touched"] == 0
-    assert scope["review_loop"]["repository"] == "example-org/widget"
-    assert scope["review_loop"]["permitted_side_effects"][
-        "submits_github_review"
-    ] is False
-
-
-def test_review_scope_without_review_loop_still_requires_budgets() -> None:
-    scope, error = normalize_continuation_scope({"creates_or_updates_pr": True})
-    assert scope is None
-    assert error == "max_actual_minutes_invalid"
-
-
-def test_review_accepted_audit_record_writes_without_task_envelope(
-    tmp_path: Path,
-) -> None:
-    audit_source = tmp_path / "audits"
-    audit_source.mkdir()
-    _write_review_grant_audit(audit_source)
-    config = _review_config()
-    message = _review_message()
-    decision = evaluate_autonomy(
-        message, config, audit_dir=audit_source, receiver="codex",
-        now_utc=_REVIEW_NOW,
-    )
-    assert decision["decision"] == "auto_accepted"
-    audit_path = write_audit_record(
-        tmp_path / "out",
-        decision,
-        config=config,
-        message=message,
-        message_path=tmp_path / "message.yaml",
-        policy_path=tmp_path / "config.yaml",
-        receiver="codex",
-    )
-    written = yaml.safe_load(audit_path.read_text(encoding="utf-8"))
-    assert written["review_continuation"]["decision"] == "accepted"
-    assert written["scope_envelope"] is None
-
-
-def test_review_grant_expired_at_evaluation_time_pauses(tmp_path: Path) -> None:
-    # Delayed delivery: the request predates expiry, but the grant is dead
-    # by the time the receiver evaluates it. created_at_utc is
-    # sender-controlled and must not be able to dodge expiry.
-    _write_review_grant_audit(tmp_path)
-    decision = evaluate_autonomy(
-        _review_message(),
-        _review_config(),
-        audit_dir=tmp_path,
-        receiver="codex",
-        now_utc=datetime.strptime("2026-07-01T00:00:00Z", "%Y-%m-%dT%H:%M:%SZ"),
-    )
-    assert decision["decision"] == "paused"
-    assert decision["reason_codes"] == ["review_continuation_expired"]
-
-
-def test_review_forward_dated_message_cannot_dodge_expiry(
-    tmp_path: Path,
-) -> None:
-    # Both clocks bound the grant: a message stamped past expiry is expired
-    # even when evaluation time is still inside the window.
-    _write_review_grant_audit(
-        tmp_path, review_loop={"expires_at_utc": "2026-05-26T12:10:00Z"}
-    )
-    message = _review_message(created_at_utc="2026-05-26T12:15:00Z")
-    decision = evaluate_autonomy(
-        message,
-        _review_config(),
-        audit_dir=tmp_path,
-        receiver="codex",
-        now_utc=datetime.strptime("2026-05-26T12:05:00Z", "%Y-%m-%dT%H:%M:%SZ"),
-    )
-    assert decision["decision"] == "paused"
-    assert decision["reason_codes"] == ["review_continuation_expired"]
-
-
-def test_review_denial_before_evaluation_revokes_queued_work(
-    tmp_path: Path,
-) -> None:
-    # Revoke-before-processing: the denial postdates the request but
-    # predates evaluation — queued work must not run on the old approval.
-    _write_review_grant_audit(tmp_path)
-    denial = _load_yaml(
-        FIXTURE_ROOT / "audits" / "prior_review_grant_denied_postmessage.yaml"
-    )
-    (tmp_path / "denial.yaml").write_text(
-        yaml.safe_dump(denial, sort_keys=False), encoding="utf-8"
-    )
-    decision = evaluate_autonomy(
-        _review_message(),
-        _review_config(),
-        audit_dir=tmp_path,
-        receiver="codex",
-        now_utc=datetime.strptime("2026-05-26T12:10:00Z", "%Y-%m-%dT%H:%M:%SZ"),
-    )
-    assert decision["decision"] == "paused"
-    assert decision["reason_codes"] == ["review_continuation_revoked"]
-
-
-def test_review_regrant_after_denial_restores_continuation(
-    tmp_path: Path,
-) -> None:
-    # A denial is not a tombstone: a newer human approval (still predating
-    # the request) re-establishes standing continuation.
-    denial = _load_yaml(
-        FIXTURE_ROOT / "audits" / "prior_review_grant_denied_later.yaml"
-    )
-    denial["result"]["human_outcome"]["decided_at_utc"] = "2026-05-26T08:00:00Z"
-    (tmp_path / "denial.yaml").write_text(
-        yaml.safe_dump(denial, sort_keys=False), encoding="utf-8"
-    )
-    _write_review_grant_audit(tmp_path)  # approval decided 09:05
-    decision = evaluate_autonomy(
-        _review_message(),
-        _review_config(),
-        audit_dir=tmp_path,
-        receiver="codex",
-        now_utc=_REVIEW_NOW,
-    )
-    assert decision["decision"] == "auto_accepted"
-    assert decision["review_continuation"]["decision"] == "accepted"
-
-
-def test_review_addressed_admissions_consume_round_budget(
-    tmp_path: Path,
-) -> None:
-    # Every admitted invocation consumes a round unit — grant-listed
-    # review_addressed rounds included, so they cannot repeat unbounded.
-    _write_review_grant_audit(
-        tmp_path,
-        review_loop={
-            "allowed_types": ["review_request", "review_addressed"],
-            "max_round": 2,
         },
-    )
-    accepted_addr = _load_yaml(
-        FIXTURE_ROOT / "audits" / "prior_review_addressed_accepted.yaml"
-    )
-    (tmp_path / "addr1.yaml").write_text(
-        yaml.safe_dump(accepted_addr, sort_keys=False), encoding="utf-8"
-    )
-    message = _review_message(
-        type="review_addressed",
-        body=_review_body(commit_sha="a" * 40, changes_summary="again"),
-    )
-    decision = evaluate_autonomy(
-        message,
-        _review_config(),
-        audit_dir=tmp_path,
-        receiver="codex",
-        now_utc=_REVIEW_NOW,
-    )
-    assert decision["decision"] == "paused"
-    assert decision["reason_codes"] == ["review_continuation_round_exceeded"]
-    assert decision["review_continuation"]["effective_round"] == 3
-
-
-def test_review_denial_then_regrant_does_not_burn_rounds(tmp_path: Path) -> None:
-    # A declined request never ran a reviewer — it must not charge
-    # max_round, so the newer approval re-establishes the full two-round
-    # grant it promised.
-    denial = _load_yaml(
-        FIXTURE_ROOT / "audits" / "prior_review_grant_denied_later.yaml"
-    )
-    denial["result"]["human_outcome"]["decided_at_utc"] = "2026-05-26T08:00:00Z"
-    (tmp_path / "denial.yaml").write_text(
-        yaml.safe_dump(denial, sort_keys=False), encoding="utf-8"
-    )
-    _write_review_grant_audit(tmp_path, review_loop={"max_round": 2})
-    decision = evaluate_autonomy(
-        _review_message(),
-        _review_config(),
-        audit_dir=tmp_path,
-        receiver="codex",
-        now_utc=_REVIEW_NOW,
-    )
-    assert decision["decision"] == "auto_accepted"
-    assert decision["review_continuation"]["effective_round"] == 2
-
-
-def test_review_unanswered_pause_does_not_burn_rounds(tmp_path: Path) -> None:
-    # A paused review_request with no recorded human outcome started
-    # nothing — it consumes no round budget.
-    _write_review_grant_audit(tmp_path, review_loop={"max_round": 2})
-    unanswered = _load_yaml(
-        FIXTURE_ROOT / "audits" / "prior_review_grant_approved.yaml"
-    )
-    unanswered["message_id"] = "msg-20260526100000-alice-unanswered"
-    del unanswered["result"]["human_outcome"]
-    (tmp_path / "unanswered.yaml").write_text(
-        yaml.safe_dump(unanswered, sort_keys=False), encoding="utf-8"
-    )
-    decision = evaluate_autonomy(
-        _review_message(),
-        _review_config(),
-        audit_dir=tmp_path,
-        receiver="codex",
-        now_utc=_REVIEW_NOW,
-    )
-    assert decision["decision"] == "auto_accepted"
-    assert decision["review_continuation"]["effective_round"] == 2
-
-
-def test_review_aware_utc_now_accepts(tmp_path: Path) -> None:
-    # The clock parameter accepts ordinary timezone-aware UTC datetimes,
-    # matching message_expired.
-    from datetime import timezone
-
-    _write_review_grant_audit(tmp_path)
-    decision = evaluate_autonomy(
-        _review_message(),
-        _review_config(),
-        audit_dir=tmp_path,
-        receiver="codex",
-        now_utc=_REVIEW_NOW.replace(tzinfo=timezone.utc),
-    )
-    assert decision["decision"] == "auto_accepted"
-
-
-def test_review_aware_utc_now_arbitrates_revocation(tmp_path: Path) -> None:
-    from datetime import timezone
-
-    _write_review_grant_audit(tmp_path)
-    denial = _load_yaml(
-        FIXTURE_ROOT / "audits" / "prior_review_grant_denied_postmessage.yaml"
-    )
-    (tmp_path / "denial.yaml").write_text(
-        yaml.safe_dump(denial, sort_keys=False), encoding="utf-8"
-    )
-    decision = evaluate_autonomy(
-        _review_message(),
-        _review_config(),
-        audit_dir=tmp_path,
-        receiver="codex",
-        now_utc=datetime.strptime(
-            "2026-05-26T12:10:00Z", "%Y-%m-%dT%H:%M:%SZ"
-        ).replace(tzinfo=timezone.utc),
-    )
-    assert decision["decision"] == "paused"
-    assert decision["reason_codes"] == ["review_continuation_revoked"]
-
-
-def test_review_context_only_addressed_audits_do_not_consume_rounds(
-    tmp_path: Path,
+    ],
+)
+def test_stored_legacy_scope_needs_fresh_bounded_grant(
+    tmp_path: Path, scope: Dict[str, Any]
 ) -> None:
-    _write_review_grant_audit(tmp_path)
-    context_only = _load_yaml(
-        FIXTURE_ROOT / "audits" / "prior_review_addressed_accepted.yaml"
-    )
-    context_only["decision"] = "paused"
-    context_only["reason_codes"] = ["review_continuation_context_only"]
-    (tmp_path / "ctx.yaml").write_text(
-        yaml.safe_dump(context_only, sort_keys=False), encoding="utf-8"
-    )
-    decision = evaluate_autonomy(
-        _review_message(),
-        _review_config(),
-        audit_dir=tmp_path,
-        receiver="codex",
-        now_utc=_REVIEW_NOW,
-    )
-    assert decision["decision"] == "auto_accepted"
-    assert decision["review_continuation"]["effective_round"] == 2
+    _write_thread_grant_audit(tmp_path, scope=scope)
+    decision = _thread_decision(tmp_path)
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["continuation_grant_missing_scope"]
+    assert decision["continuation_grant"]["decision"] == "invalid"
 
 
 # ── evaluation identity and supersession ─────────────────────────────────
@@ -3690,24 +4055,25 @@ def test_content_sensitivity_profileless_default_envelope_keeps_the_hard_stop() 
                 "Survey the hosted-tier landscape": "Update config.yaml, then survey the hosted-tier landscape",
                 "touches_auth_config_or_secrets: false": "touches_auth_config_or_secrets: true",
             },
-            "hard_stop_sensitive_scope",
-            "config",
+            "auth_config_or_secrets_pause",
+            None,
         ),
     ],
     ids=["destructive_token", "declared_sensitive_scope"],
 )
 def test_content_sensitivity_advisory_survives_earlier_hard_stops(
-    edits: Dict[str, str], reason_code: str, matched_pattern: str
+    edits: Dict[str, str], reason_code: str, matched_pattern: Optional[str]
 ) -> None:
     """The reply-only advisory is evidence, recorded before any Gate-3 early
-    return: an earlier hard stop keeps its verdict and the notes survive."""
+    return: an earlier hard stop — or the declared flag's admission pause that
+    replaces one — keeps its verdict and the notes survive."""
     config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_standard.yaml")
 
     decision = evaluate_autonomy(_reply_only_research_message(**edits), config)
 
     assert decision["decision"] == "paused"
     assert decision["reason_codes"] == [reason_code]
-    assert decision["matched_pattern"] == matched_pattern
+    assert decision.get("matched_pattern") == matched_pattern
     assert [
         note for note in decision["logged_notes"] if note["code"] == "lexical_advisory_reply_only"
     ] == _REPLY_ONLY_NOTES

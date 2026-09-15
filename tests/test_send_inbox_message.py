@@ -585,49 +585,30 @@ next_owner: "claude"
             )
             self.assertEqual(report["type"], "handoff_complete")
 
-    def test_handoff_partial_body_rejected(self):
-        """Partial structured handoff body (missing required fields) must fail."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            hub_dir = Path(tmpdir)
-            partial_body = """\
-source_agent: "codex"
-target_agent: "claude"
-intent: "handoff"
-"""
-            with self.assertRaises(ValueError) as ctx:
-                send_message(
-                    project="test-project",
-                    sender="codex",
-                    recipient="claude",
-                    msg_type="handoff",
-                    subject="Handoff packet",
-                    body=partial_body,
-                    oacp_dir=hub_dir,
-                    dry_run=True,
+    def test_handoff_body_diagnostics_are_advisory(self):
+        """Sending retains body diagnostics without rejecting delivery."""
+        for kind, body, detail in (
+            ("handoff", 'source_agent: "codex"\ntarget_agent: "claude"\n'
+             'intent: "Continue"\n', "artifacts_to_review"),
+            ("handoff", 'source_agent: "_invalid"\ntarget_agent: "claude"\n'
+             'intent: "Continue"\n', "source_agent"),
+            ("handoff_complete", "pr: not-a-number\n", "pr"),
+        ):
+            with self.subTest(kind=kind, body=body), tempfile.TemporaryDirectory() as tmpdir:
+                report = send_message(
+                    project="test-project", sender="codex", recipient="claude",
+                    msg_type=kind, subject="Handoff packet", body=body,
+                    oacp_dir=Path(tmpdir), dry_run=False,
                 )
-            self.assertIn("artifacts_to_review", str(ctx.exception))
-
-    def test_handoff_body_validation_error(self):
-        """Handoff body with invalid agent name pattern should still fail."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            hub_dir = Path(tmpdir)
-            invalid_body = """\
-source_agent: "_invalid"
-target_agent: "claude"
-intent: "handoff"
-"""
-            with self.assertRaises(ValueError) as ctx:
-                send_message(
-                    project="test-project",
-                    sender="codex",
-                    recipient="claude",
-                    msg_type="handoff",
-                    subject="Handoff packet",
-                    body=invalid_body,
-                    oacp_dir=hub_dir,
-                    dry_run=True,
+                self.assertTrue(Path(report["inbox_path"]).is_file())
+                self.assertEqual(
+                    Path(report["inbox_path"]).read_bytes(),
+                    Path(report["outbox_path"]).read_bytes(),
                 )
-            self.assertIn("handoff body", str(ctx.exception))
+                self.assertTrue(any(
+                    "ADVISORY: skill_owned_body_schema:" in warning and detail in warning
+                    for warning in report["warnings"]
+                ))
 
     def test_threading_fields(self):
         with tempfile.TemporaryDirectory() as tmpdir:
