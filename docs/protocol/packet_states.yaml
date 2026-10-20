@@ -114,7 +114,7 @@ transitions:
 # ── Quality Gate ─────────────────────────────────────────────────────────────
 #
 # Evaluated at merge_decision -> merged transition.
-# See scripts/check_quality_gate.py for machine-readable enforcement.
+# The owning review workflow validates these criteria before side effects.
 
 quality_gate:
   merge_ready_when:

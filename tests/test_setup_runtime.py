@@ -62,6 +62,32 @@ class TestSetupRuntime(unittest.TestCase):
             self.assertIn(".claude/settings.json", result["created_files"])
             self.assertEqual(result["retired_files"], [])
 
+    def test_claude_agent_file_frontmatter_is_loadable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir)
+            setup_runtime("claude", repo_dir=repo_dir, project_name="myproj")
+
+            agent_file = repo_dir / ".claude" / "agents" / "myproj.md"
+            frontmatter = yaml.safe_load(
+                agent_file.read_text(encoding="utf-8").split("---\n")[1]
+            )
+            # A null or empty name makes Claude Code skip the agent file.
+            self.assertEqual(frontmatter["name"], "myproj")
+            self.assertIsInstance(frontmatter["description"], str)
+            self.assertTrue(frontmatter["description"].strip())
+
+    def test_claude_agent_template_frontmatter_is_loadable(self) -> None:
+        # The template is also copied by hand, so it must load as shipped.
+        template = setup_runtime_module._load_template(
+            "claude/agents/role_agent.template.md"
+        )
+        self.assertIsNotNone(template)
+        self.assertIn(setup_runtime_module.AGENT_TEMPLATE_NAME_LINE, template)
+        frontmatter = yaml.safe_load(template.split("---\n")[1])
+        for field in ("name", "description"):
+            self.assertIsInstance(frontmatter[field], str)
+            self.assertTrue(frontmatter[field].strip())
+
     def test_claude_envelope_hook_registration_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_dir = Path(tmpdir)

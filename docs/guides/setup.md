@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - `bash` 3.2+ (macOS default) or 4+ (recommended)
-- `python3` 3.9.2+ (for JSON state management, quality gate scripts, and inbox messaging)
+- `python3` 3.9.2+ (for state management, message validation, and inbox messaging)
 - `gh` CLI (optional, for GitHub operations — `gh auth login`)
 - Agent runtime CLI: `claude`, `codex`, `cursor`, or `gemini` (depending on your agents)
 
@@ -33,6 +33,9 @@ pip install -e .
 </details>
 
 ## 2) Initialize project workspace
+
+Initialization is create-only. See [planning, exit codes and migration](workspace-initialization.md)
+before attaching or repairing an existing workspace.
 
 ```bash
 oacp init <project>
@@ -82,16 +85,12 @@ cp templates/claude/agents/role_agent.template.md /path/to/repo/.claude/agents/<
 cp templates/claude/rules/guardrail.template.md /path/to/repo/.claude/rules/guardrails.md
 ```
 
-## 5) Initialize packet files (source checkout only)
+## 5) Prepare workflow artifacts
 
-For the review/findings/merge packet workflow:
-
-```bash
-# From the oacp repo root:
-scripts/init_packet.sh <project> <packet_id> --agent <agent_name>
-```
-
-> **Note:** `init_packet.sh` is not yet exposed as an `oacp` CLI subcommand. It requires a source checkout. See [docs/protocol/review_loop.md](../protocol/review_loop.md) for the review workflow documentation.
+Use the owning review or handoff workflow's artifact formats. OACP no longer
+bundles a packet initializer or review, merge-decision and handoff templates.
+See the [migration notes](command-migration.md#packet-and-handoff-templates)
+and [review workflow documentation](../protocol/review_loop.md).
 
 ## 6) Update existing workspaces (source checkout only)
 

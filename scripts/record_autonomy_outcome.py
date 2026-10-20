@@ -307,7 +307,7 @@ def _clear_checkpoint(
     approval lands as ``resumed``, never an off-vocabulary spelling). A
     recorder-based clear is scope-less by construction — scoped budgets
     and boundary-action grants go through
-    ``oacp autonomy-finalize --checkpoint`` with
+    ``oacp autonomy finalize --checkpoint`` with
     ``reauthorization.receiver_human.scope``.
     """
     if grant_decision != "not_requested" or granted_scope is not None:

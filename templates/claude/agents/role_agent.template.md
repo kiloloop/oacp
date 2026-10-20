@@ -1,5 +1,6 @@
 ---
-name: # CUSTOMIZE: role name (e.g., implementer, qa-reviewer)
+# CUSTOMIZE: name identifies the agent — lowercase letters and hyphens (e.g., implementer, qa-reviewer)
+name: role-name
 description: "# CUSTOMIZE: when to use this agent (e.g., Use this agent to implement features following project standards)"
 tools: Read, Write, Edit, Bash, Glob, Grep
 model: opus
@@ -28,7 +29,7 @@ Your role baseline is defined in the project's role configuration.
    `open_threads.md`, and `known_debt.md` in that order from
    `$OACP_HOME/projects/<project>/memory/`. Retrieve org memory on demand;
    read applicable org rules and decisions before work they govern.
-2. **Check handover baton**: Load previous session state from handover_baton.yaml
+2. **Check for a handoff**: Read the latest handoff (inbox message, last commit message, or checkpoint) for open threads, blockers, and next steps
 3. **Execute task**: Follow the assigned task, adhering to project policy
 4. **Log decisions**: Record non-trivial decisions in decision_log.md
 5. **Update memory**: Write stable outcomes to project_facts.md if needed
@@ -36,7 +37,7 @@ Your role baseline is defined in the project's role configuration.
 ## Post-Run Checklist
 
 - [ ] All changes committed with descriptive messages
-- [ ] Handover baton updated (last commit, open threads, blockers, next steps)
+- [ ] Handoff left in a commit message, inbox message, or checkpoint (last commit, open threads, blockers, next steps)
 - [ ] Review packet created if submitting work for review
 - [ ] No secrets or temporary files committed
 <!-- CUSTOMIZE: Add role-specific checklist items -->

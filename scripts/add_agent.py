@@ -17,20 +17,15 @@ except ImportError:  # pragma: no cover
 
 from _oacp_constants import (
     AGENT_RE,
+    AGENT_SUBDIRS as AGENT_SUBDIRS,
+    validate_project_name as _validate_project_name,
+    workspace_layout,
     CREATABLE_RUNTIMES,
     _template_path,
     _write_if_missing,
     utc_now_iso,
 )
 from agent_profile import load_global_profile, upsert_global_profile
-
-AGENT_SUBDIRS = (
-    "inbox",
-    "inbox/archive",
-    "outbox",
-    "dead_letter",
-    "audit/autonomy_decisions",
-)
 
 CODEX_SUPPORTED_MESSAGE_TYPES = (
     "task_request",
@@ -304,13 +299,6 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     return parser.parse_args(list(argv))
 
 
-def _validate_project_name(name: str) -> None:
-    if name.startswith(".") or "/" in name or "\\" in name:
-        raise ValueError(
-            "project name must not contain path separators or start with '.'"
-        )
-
-
 def add_agent(
     project_name: str,
     agent_name: str,
@@ -344,15 +332,16 @@ def add_agent(
     created_files: List[str] = []
     skipped_files: List[str] = []
 
-    # Create subdirectories with .gitkeep
-    for subdir in AGENT_SUBDIRS:
-        dirpath = agent_dir / subdir
+    # Add only this agent's shared-layout directories and placeholders.
+    for relative_dir, keep in workspace_layout((agent_name,), scope="agent"):
+        dirpath = project_dir / relative_dir
         dirpath.mkdir(parents=True, exist_ok=True)
-        gitkeep = dirpath / ".gitkeep"
-        if _write_if_missing(gitkeep, ""):
-            created_files.append(str(gitkeep.relative_to(project_dir)))
-        else:
-            skipped_files.append(str(gitkeep.relative_to(project_dir)))
+        if keep:
+            gitkeep = dirpath / ".gitkeep"
+            if _write_if_missing(gitkeep, ""):
+                created_files.append(str(gitkeep.relative_to(project_dir)))
+            else:
+                skipped_files.append(str(gitkeep.relative_to(project_dir)))
 
     config_path = agent_dir / "config.yaml"
     if _write_if_missing(config_path, _receiver_config_template()):

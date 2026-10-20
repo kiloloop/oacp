@@ -42,113 +42,26 @@ class TestOacpCli(unittest.TestCase):
 
     @mock.patch("oacp.cli._run_script", return_value=0)
     def test_dispatches_add_agent(self, run_script) -> None:
-        code, stdout, stderr = self._run(["add-agent", "demo", "alice", "--runtime", "claude"])
+        code, stdout, stderr = self._run(["agent", "add", "demo", "alice", "--runtime", "claude"])
         self.assertEqual(code, 0)
         run_script.assert_called_once_with(
             "add_agent.py", ["demo", "alice", "--runtime", "claude"]
         )
 
-    @mock.patch("oacp.cli.os.execvp")
-    @mock.patch("oacp.cli.shutil.which", return_value="/opt/bin/agent-memory")
-    @mock.patch("oacp.cli._run_script", return_value=0)
-    def test_memory_namespace_delegates_to_the_memory_tool(self, run_script, which, execvp) -> None:
-        code, stdout, stderr = self._run(["memory", "archive", "demo", "notes.md", "--oacp-dir", "/tmp/home"])
-        self.assertEqual(code, 0)
-        self.assertEqual(stdout, "")
-        self.assertEqual(stderr, "")
+    @mock.patch("os.execvp")
+    @mock.patch("subprocess.run")
+    @mock.patch("oacp.cli._run_script")
+    def test_removed_commands_fail_without_dispatch_or_exec(self, run_script, run, execvp) -> None:
+        for command in ("memory", "org-memory", "write-event", "retention", "add-agent", "key", "autonomy-outcome", "autonomy-finalize"):
+            for argv in ([command, "--help"], ["help", command], [command, "demo"]):
+                with self.subTest(argv=argv):
+                    code, stdout, stderr = self._run(argv)
+                    self.assertEqual(code, 2)
+                    self.assertEqual(stdout, "")
+                    self.assertIn(f"unknown command '{command}'", stderr)
+                    self.assertNotIn(command, cli.SCRIPT_NAMES)
         run_script.assert_not_called()
-        which.assert_called_once_with("agent-memory")
-        execvp.assert_called_once_with(
-            "/opt/bin/agent-memory",
-            ["agent-memory", "archive", "demo", "notes.md", "--home", "/tmp/home"],
-        )
-
-    @mock.patch("oacp.cli.os.execvp")
-    @mock.patch("oacp.cli.shutil.which", return_value="/opt/bin/agent-memory")
-    @mock.patch("oacp.cli._run_script", return_value=0)
-    def test_org_memory_init_delegates_to_the_org_tier_verb(self, run_script, which, execvp) -> None:
-        code, _stdout, _stderr = self._run(["org-memory", "init"])
-        self.assertEqual(code, 0)
-        run_script.assert_not_called()
-        execvp.assert_called_once_with("/opt/bin/agent-memory", ["agent-memory", "org", "init"])
-
-    @mock.patch("oacp.cli.os.execvp")
-    @mock.patch("oacp.cli.shutil.which", return_value=None)
-    @mock.patch("oacp.cli._run_script", return_value=0)
-    def test_memory_namespace_without_the_tool_exits_127(self, run_script, which, execvp) -> None:
-        code, stdout, stderr = self._run(["memory", "pull"])
-        self.assertEqual(code, 127)
-        self.assertEqual(stdout, "")
-        self.assertEqual(stderr.count("\n"), 1)
-        self.assertIn("agent-memory", stderr)
-        self.assertIn("pip install agent-memory-cli", stderr)
-        run_script.assert_not_called()
-        execvp.assert_not_called()
-
-    @mock.patch("oacp.cli.os.execvp")
-    @mock.patch("oacp.cli.subprocess.run")
-    @mock.patch("oacp.cli.shutil.which", return_value="/opt/bin/agent-memory")
-    @mock.patch("oacp.cli._run_script", return_value=0)
-    def test_write_event_execs_the_event_verb_when_the_tool_serves_it(self, run_script, which, run, execvp) -> None:
-        run.return_value = mock.Mock(returncode=0)
-        argv = [
-            "--agent", "alice", "--project", "demo", "--type", "decision", "--slug", "api-convention",
-            "--body", "Use REST", "--oacp-dir", "/tmp/home", "--json",
-        ]
-        code, stdout, stderr = self._run(["write-event", *argv])
-        self.assertEqual(code, 0)
-        self.assertEqual(stdout, "")
-        self.assertEqual(stderr, "")
-        run_script.assert_not_called()
-        which.assert_called_once_with("agent-memory")
-        self.assertEqual(run.call_args.args[0], ["/opt/bin/agent-memory", "event", "write", "--help"])
-        execvp.assert_called_once_with(
-            "/opt/bin/agent-memory",
-            [
-                "agent-memory", "event", "write",
-                "--agent", "alice", "--project", "demo", "--type", "decision", "--slug", "api-convention",
-                "--body", "Use REST", "--home", "/tmp/home", "--json",
-            ],
-        )
-
-    @mock.patch("oacp.cli.os.execvp")
-    @mock.patch("oacp.cli.subprocess.run")
-    @mock.patch("oacp.cli.shutil.which", return_value=None)
-    @mock.patch("oacp.cli._run_script", return_value=0)
-    def test_write_event_runs_the_script_without_the_tool(self, run_script, which, run, execvp) -> None:
-        argv = ["--agent", "alice", "--project", "demo", "--type", "event", "--slug", "x", "--body", "b"]
-        code, stdout, stderr = self._run(["write-event", *argv])
-        self.assertEqual(code, 0)
-        self.assertEqual(stdout, "")
-        self.assertEqual(stderr, "")
-        run_script.assert_called_once_with("write_event.py", argv)
         run.assert_not_called()
-        execvp.assert_not_called()
-
-    @mock.patch("oacp.cli.os.execvp")
-    @mock.patch("oacp.cli.subprocess.run")
-    @mock.patch("oacp.cli.shutil.which", return_value="/opt/bin/agent-memory")
-    @mock.patch("oacp.cli._run_script", return_value=0)
-    def test_write_event_runs_the_script_when_the_tool_predates_the_verb(self, run_script, which, run, execvp) -> None:
-        run.return_value = mock.Mock(returncode=2)  # argparse: invalid choice 'event'
-        argv = ["--agent", "alice", "--project", "demo", "--type", "event", "--slug", "x", "--body", "b"]
-        code, stdout, stderr = self._run(["write-event", *argv])
-        self.assertEqual(code, 0)
-        self.assertEqual(stdout, "")
-        self.assertEqual(stderr, "")
-        run_script.assert_called_once_with("write_event.py", argv)
-        execvp.assert_not_called()
-
-    @mock.patch("oacp.cli.os.execvp")
-    @mock.patch("oacp.cli.subprocess.run", side_effect=OSError("exec format error"))
-    @mock.patch("oacp.cli.shutil.which", return_value="/opt/bin/agent-memory")
-    @mock.patch("oacp.cli._run_script", return_value=0)
-    def test_write_event_runs_the_script_when_the_probe_fails(self, run_script, which, run, execvp) -> None:
-        argv = ["--agent", "alice", "--project", "demo", "--type", "rule", "--slug", "x", "--body", "b"]
-        code, _stdout, stderr = self._run(["write-event", *argv])
-        self.assertEqual(code, 0)
-        self.assertEqual(stderr, "")
-        run_script.assert_called_once_with("write_event.py", argv)
         execvp.assert_not_called()
 
     @mock.patch("oacp.cli._run_script", return_value=0)
@@ -197,7 +110,7 @@ class TestOacpCli(unittest.TestCase):
     @mock.patch("oacp.cli._run_script", return_value=0)
     def test_dispatches_autonomy_outcome(self, run_script) -> None:
         code, stdout, stderr = self._run([
-            "autonomy-outcome",
+            "autonomy", "outcome",
             "/tmp/audit.yaml",
             "--decision",
             "approved",
@@ -235,18 +148,6 @@ class TestOacpCli(unittest.TestCase):
         self.assertEqual(stderr, "")
         run_script.assert_called_once_with("send_inbox_message.py", ["--help"])
 
-    @mock.patch("oacp.cli._run_script", return_value=0)
-    def test_retention_is_parked(self, run_script) -> None:
-        code, stdout, stderr = self._run(["retention", "demo", "--dry-run"])
-        self.assertEqual(code, 2)
-        self.assertEqual(stdout, "")
-        self.assertIn("parked", stderr)
-        self.assertIn("shared/archive/oacp-retention/retention.py", stderr)
-        self.assertIn("Nothing was pruned", stderr)
-        run_script.assert_not_called()
-        self.assertNotIn("retention", cli.SCRIPT_NAMES)
-        self.assertIn("retention", cli.HELP_TEXT)
-
     def test_unknown_command(self) -> None:
         code, stdout, stderr = self._run(["unknown"])
         self.assertEqual(code, 2)
@@ -256,17 +157,37 @@ class TestOacpCli(unittest.TestCase):
     def test_help_text_includes_new_commands(self) -> None:
         code, stdout, stderr = self._run(["--help"])
         self.assertEqual(code, 0)
-        self.assertIn("add-agent", stdout)
+        self.assertIn("agent", stdout)
         self.assertIn("inbox", stdout)
         self.assertIn("watch", stdout)
-        self.assertIn("memory", stdout)
         self.assertIn("setup", stdout)
-        self.assertIn("autonomy-outcome", stdout)
+        self.assertIn("autonomy", stdout)
         self.assertIn("envelope", stdout)
         self.assertIn("key", stdout)
         self.assertIn("verify", stdout)
         self.assertIn("trust", stdout)
-        self.assertEqual(cli.SCRIPT_NAMES["trust"], "trust_cli.py")
+
+    @mock.patch("oacp.cli._run_script", return_value=7)
+    def test_remaining_commands_keep_their_dispatch(self, run_script) -> None:
+        expected = {
+            "init": "init_project_workspace.py",
+            "inbox": "oacp_inbox.py",
+            "watch": "oacp_watch.py",
+            "session-init": "codex_session_init.py",
+            "setup": "setup_runtime.py",
+            "send": "send_inbox_message.py",
+            "envelope": "envelope_compiler.py",
+            "doctor": "oacp_doctor.py",
+            "validate": "validate_message.py",
+            "verify": "message_verify.py",
+        }
+        self.assertEqual(cli.SCRIPT_NAMES, expected)
+        for command, script in expected.items():
+            with self.subTest(command=command):
+                run_script.reset_mock()
+                code, stdout, stderr = self._run([command, "--help"])
+                self.assertEqual((code, stdout, stderr), (7, "", ""))
+                run_script.assert_called_once_with(script, ["--help"])
 
     def test_run_script_restores_sys_path_after_nested_mutation(self) -> None:
         script_path = "/tmp/send_inbox_message.py"

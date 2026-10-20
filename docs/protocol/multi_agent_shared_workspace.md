@@ -28,11 +28,12 @@ A single agent may hold multiple roles. Multiple agents may share the Implemente
 3. Merge Decision (`merges/<packet_id>.md`)
 4. Checkpoint(s) (`checkpoints/<date>_<topic>_<state>.md`) — optional, for mid-flight handoffs
 
-Templates are in `templates/`.
+The owning workflow supplies review and merge-decision formats. The findings
+template remains in `templates/`.
 
 ## Workflow
 
-1. Implementer initializes packet files (`scripts/init_packet.sh`).
+1. Implementer prepares packet files with the owning workflow's tooling.
 2. Implementer fills Review Packet with scope, risk map, tests run, rollback notes.
 3. QA returns one batched Findings Packet for the round.
 4. Implementer addresses findings in one batch and publishes Merge Decision.

@@ -25,10 +25,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-try:
-    import yaml
-except ImportError:  # pragma: no cover
-    yaml = None  # type: ignore[assignment]
+from oacp_inbox import sanitize_text
+from _oacp_yaml import YAMLMappingError, load_yaml_mapping
 
 
 STATE_VERSION = 1
@@ -82,19 +80,17 @@ def _resolve_oacp_home(explicit: Optional[str] = None) -> Path:
 
 
 def _parse_yaml_mapping_bytes(raw: bytes, path: Path) -> Dict[str, Any]:
-    text = raw.decode("utf-8")
-    if yaml is not None:
-        loaded = yaml.load(text, Loader=yaml.BaseLoader)
-    else:
+    def fallback(text: str) -> Dict[str, Any]:
         from validate_message import _parse_simple_yaml
+        return _parse_simple_yaml(text)
 
-        loaded = _parse_simple_yaml(text)
-
-    if loaded is None:
-        return {}
-    if not isinstance(loaded, dict):
-        raise ValueError(f"top-level YAML must be a mapping: {path}")
-    return loaded
+    try:
+        return load_yaml_mapping(
+            raw.decode("utf-8"), string_scalars=True, allow_empty=True,
+            fallback=fallback,
+        )
+    except YAMLMappingError as exc:
+        raise ValueError(f"top-level YAML must be a mapping: {path}") from exc
 
 
 def _message_metadata(
@@ -174,17 +170,22 @@ def _emit_event(event: Dict[str, Any], *, json_output: bool) -> None:
     if json_output:
         print(json.dumps(event, sort_keys=True))
     else:
-        subject = event.get("subject", "")
+        def field(value: Any, *, filename: bool = False) -> str:
+            text = sanitize_text(value)
+            pattern = r"[A-Za-z0-9._-]+\.yaml" if filename else r"[A-Za-z0-9._-]+"
+            return text if re.fullmatch(pattern, text) else json.dumps(text)
+
+        subject = sanitize_text(event.get("subject", ""))
         print(
             " ".join(
                 str(part)
                 for part in (
-                    event["event"].upper(),
-                    f"project={event.get('project')}",
-                    f"agent={event.get('agent')}",
-                    f"file={event.get('file', '-')}",
-                    f"type={event.get('type', '-')}",
-                    f"priority={event.get('priority', '-')}",
+                    sanitize_text(event["event"].upper()),
+                    f"project={field(event.get('project'))}",
+                    f"agent={field(event.get('agent'))}",
+                    f"file={field(event.get('file', '-'), filename=True)}",
+                    f"type={field(event.get('type', '-'))}",
+                    f"priority={field(event.get('priority', '-'))}",
                     subject,
                 )
                 if part
@@ -194,7 +195,7 @@ def _emit_event(event: Dict[str, Any], *, json_output: bool) -> None:
 
 def _emit_error(event: Dict[str, Any], *, json_output: bool) -> None:
     location = event.get("path") or event.get("file") or "(unknown)"
-    print(f"ERROR: {location}: {event['error']}", file=sys.stderr)
+    print(f"ERROR: {sanitize_text(location)}: {sanitize_text(event['error'])}", file=sys.stderr)
     if json_output:
         print(json.dumps(event, sort_keys=True))
 

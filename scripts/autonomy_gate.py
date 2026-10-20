@@ -4,8 +4,8 @@
 """Receiver autonomy gate evaluator.
 
 Evaluates an inbox message plus receiver config against the OACP auto-review
-scope-envelope contract. The module is intentionally separate from
-``check_quality_gate.py``, which evaluates review findings packets.
+scope-envelope contract. Review findings and other workflow-specific body
+policies are validated by the owning workflow.
 """
 
 from __future__ import annotations
@@ -48,6 +48,12 @@ RUNTIME_MODEL_ENV_VAR = "OACP_RUNTIME_MODEL"
 # a separate `model_context` field so per-model grouping never divides one
 # model across suffix variants.
 _MODEL_CONTEXT_SUFFIX_RE = re.compile(r"^(?P<base>[^\[\]]+)\[(?P<context>[^\[\]]+)\]$")
+# The effort-level signal a session exports beside the model: the level its
+# requests actually carry, never a configured preference. One pinned
+# vocabulary across runtimes, lowest to highest; a token outside it is
+# recorded as an explicit unknown that keeps the raw text.
+RUNTIME_EFFORT_ENV_VAR = "OACP_RUNTIME_EFFORT"
+RUNTIME_EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 NUMERIC_THRESHOLD_KEYS = ("max_estimated_minutes", "max_expected_files_touched")
 POLICY_THRESHOLD_KEYS = (
     "destructive_ops",
@@ -528,12 +534,35 @@ def normalize_runtime_model(value: Any) -> Tuple[Optional[str], Optional[str]]:
     return text.lower() or None, context
 
 
+def normalize_runtime_effort(value: Any) -> Optional[str]:
+    """Return the pinned effort level for a raw value, or ``None``.
+
+    Case variants fold to lowercase; anything outside
+    ``RUNTIME_EFFORT_LEVELS`` — including empty input — is ``None``, which
+    the writer records as an explicit unknown that keeps the raw text.
+    """
+    text = str(value if value is not None else "").strip().lower()
+    return text if text in RUNTIME_EFFORT_LEVELS else None
+
+
+def _runtime_signal(
+    supplied: Any, env_map: Mapping[str, str], variable: str
+) -> Tuple[Any, Optional[str]]:
+    """Caller-first, then the named session variable: ``(raw, source)``."""
+    if str(supplied if supplied is not None else "").strip():
+        return supplied, "caller"
+    raw = env_map.get(variable)
+    if str(raw if raw is not None else "").strip():
+        return raw, f"env:{variable}"
+    return None, None
+
+
 def resolve_runtime_block(
     supplied: Any,
     receiver: str,
     env: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, Any]:
-    """Resolve the audit record's ``runtime`` block at the writer.
+    """Resolve an audit record's ``runtime`` block at the writer.
 
     The serving model resolves caller-first (an explicit ``runtime.model``
     already on the decision), then from the ``OACP_RUNTIME_MODEL``
@@ -546,22 +575,25 @@ def resolve_runtime_block(
     deliberately never consulted: a request can be served by a different
     model, and filling from it would reintroduce the confound this field
     exists to remove.
+
+    The effort level resolves the same way (``runtime.effort``, then
+    ``OACP_RUNTIME_EFFORT``) against the pinned ``RUNTIME_EFFORT_LEVELS``.
+    A signal outside the vocabulary is an explicit unknown too: ``None``
+    with ``effort_raw`` and an ``effort_unknown_reason`` naming the
+    vocabulary, so an unrecognized level is visible rather than fragmenting
+    per-effort grouping. The same block shape serves admission (the record's
+    top-level ``runtime``) and terminal finalization (``result.runtime``).
     """
     env_map: Mapping[str, str] = os.environ if env is None else env
     runtime: Dict[str, Any] = dict(supplied) if isinstance(supplied, dict) else {}
     runtime["agent"] = str(runtime.get("agent") or receiver)
-    for stale_key in ("model_source", "model_context", "model_raw", "model_unknown_reason"):
+    for stale_key in (
+        "model_source", "model_context", "model_raw", "model_unknown_reason",
+        "effort_source", "effort_raw", "effort_unknown_reason",
+    ):
         runtime.pop(stale_key, None)
 
-    raw = runtime.get("model")
-    source: Optional[str] = None
-    if str(raw if raw is not None else "").strip():
-        source = "caller"
-    else:
-        raw = env_map.get(RUNTIME_MODEL_ENV_VAR)
-        if str(raw if raw is not None else "").strip():
-            source = f"env:{RUNTIME_MODEL_ENV_VAR}"
-
+    raw, source = _runtime_signal(runtime.get("model"), env_map, RUNTIME_MODEL_ENV_VAR)
     model, context = normalize_runtime_model(raw)
     if model is None:
         runtime["model"] = None
@@ -571,15 +603,38 @@ def resolve_runtime_block(
             f"{RUNTIME_MODEL_ENV_VAR} is unset; the requested model is never "
             "used as a fallback"
         )
-        return runtime
+    else:
+        raw_text = str(raw)
+        runtime["model"] = model
+        runtime["model_source"] = source
+        if context is not None:
+            runtime["model_context"] = context
+        if raw_text != model:
+            runtime["model_raw"] = raw_text
 
-    raw_text = str(raw)
-    runtime["model"] = model
-    runtime["model_source"] = source
-    if context is not None:
-        runtime["model_context"] = context
-    if raw_text != model:
-        runtime["model_raw"] = raw_text
+    raw, source = _runtime_signal(runtime.get("effort"), env_map, RUNTIME_EFFORT_ENV_VAR)
+    effort = normalize_runtime_effort(raw)
+    if source is None:
+        runtime["effort"] = None
+        runtime["effort_source"] = None
+        runtime["effort_unknown_reason"] = (
+            "no effort-level signal: decision carried no runtime.effort and "
+            f"{RUNTIME_EFFORT_ENV_VAR} is unset; a configured preference is "
+            "never used as a fallback"
+        )
+    elif effort is None:
+        runtime["effort"] = None
+        runtime["effort_source"] = source
+        runtime["effort_raw"] = str(raw)
+        runtime["effort_unknown_reason"] = (
+            f"effort level {str(raw).strip()!r} is outside the pinned "
+            f"vocabulary ({', '.join(RUNTIME_EFFORT_LEVELS)})"
+        )
+    else:
+        runtime["effort"] = effort
+        runtime["effort_source"] = source
+        if str(raw) != effort:
+            runtime["effort_raw"] = str(raw)
     return runtime
 
 
@@ -936,6 +991,11 @@ def normalize_scope_envelope(profile: Dict[str, Any]) -> Dict[str, Any]:
     }
     for key in LEGACY_PROFILE_BOOL_FIELDS + SIDE_EFFECT_BOOL_FIELDS:
         envelope[key] = _bool_value(profile, key)
+    # The completion reply is the one continuation effect a profile may
+    # declare. The key lands only when declared, so the reply-only inference
+    # in ``envelope_covers_effect`` keeps governing every other shape.
+    if "sends_oacp_reply" in profile:
+        envelope["sends_oacp_reply"] = _bool_value(profile, "sends_oacp_reply")
 
     grants = profile.get("continuation_grants", {})
     if grants is None:
@@ -2407,6 +2467,11 @@ def continuation_scope_breaches(
     for key in declared_effects:
         if scope.get(key) is not True:
             breached.append(f"task_profile.{key}")
+    # On a granted thread the grant decides the reply, so a profile-declared
+    # reply is bounded like every other declared effect — the read-back
+    # validator compares the whole continuation vocabulary against the grant.
+    if envelope.get("sends_oacp_reply") is True and scope.get("sends_oacp_reply") is not True:
+        breached.append("task_profile.sends_oacp_reply")
     return breached
 
 
@@ -2482,6 +2547,12 @@ def _profile_declaration_details(envelope: Dict[str, Any]) -> List[Dict[str, Any
             "field": "task_profile.sends_oacp_reply_only",
             "declared": True,
             "conflicts_with": artifact_fields,
+        })
+    if envelope["sends_oacp_reply_only"] and envelope.get("sends_oacp_reply") is False:
+        details.append({
+            "field": "task_profile.sends_oacp_reply",
+            "declared": False,
+            "conflicts_with": ["task_profile.sends_oacp_reply_only"],
         })
     return details
 
@@ -2581,6 +2652,30 @@ def _actual_side_effects(actuals: Dict[str, Any]) -> Dict[str, bool]:
             raise ValueError(f"actuals.side_effects_actual.{key} must be boolean")
         normalized[key] = value
     return normalized
+
+
+def envelope_covers_effect(envelope: Optional[Dict[str, Any]], key: str) -> bool:
+    """Whether the effective scope envelope already authorizes one effect.
+
+    A capability the envelope declares true is covered. So is
+    ``sends_oacp_reply`` on an envelope declaring ``sends_oacp_reply_only``:
+    the reply is the one outward action such a leg exists to perform, so
+    realizing it is within the envelope — neither a breach nor a
+    declaration error. The rule reads the declared restrictive flag only:
+    an envelope that carries an explicit ``sends_oacp_reply`` boolean (a
+    grant-derived envelope, where the grant decides the reply, or a profile
+    that declared the reply itself) is governed
+    by that flag, and no other profile shape implies the reply — a task
+    whose brief merely requires a reply still records it through
+    ``reply_message_id`` unless the receiver-side human covers the effect.
+    """
+    if not isinstance(envelope, dict):
+        return False
+    if envelope.get(key) is True:
+        return True
+    if key != "sends_oacp_reply" or key in envelope:
+        return False
+    return envelope.get("sends_oacp_reply_only") is True
 
 
 def _actual_nonnegative_int(actuals: Dict[str, Any], key: str) -> int:
@@ -2917,6 +3012,41 @@ def _default_reauthorization_block() -> Dict[str, Any]:
     }
 
 
+def _is_recorded_standing_answer(
+    channel: str,
+    answer: Dict[str, Any],
+    effective_scope: Optional[Dict[str, Any]],
+    standing: Optional[Dict[str, Any]],
+) -> bool:
+    """Whether a re-presented answer is the record's own standing answer.
+
+    A durable scope outlives the pause it first cleared, so the receiver
+    re-presents that answer against a later pause the scope covers. It is
+    honored only as recorded: same channel, decision and decision time,
+    same deciding party, and the same effective scope the record already
+    carries on a ``resumed`` arbitration. Anything else that predates the
+    pause is not a standing answer.
+    """
+    if not isinstance(standing, dict) or standing.get("disposition") != "resumed":
+        return False
+    if standing.get("channel") != channel:
+        return False
+    if standing.get("decision") != answer["decision"]:
+        return False
+    if standing.get("decided_at_utc") != answer["decided_at_utc"]:
+        return False
+    if channel == "receiver_human" and standing.get("actor") != answer.get("actor"):
+        return False
+    if channel == "sender_reply" and standing.get("source_message_id") != answer.get(
+        "source_message_id"
+    ):
+        return False
+    recorded_scope = standing.get("scope")
+    if not isinstance(recorded_scope, dict) or not recorded_scope:
+        return False
+    return effective_scope == recorded_scope
+
+
 def _arbitrate_reauthorization(
     reauth_input: Dict[str, Dict[str, Any]],
     block: Dict[str, Any],
@@ -2926,6 +3056,9 @@ def _arbitrate_reauthorization(
     paused_at: str,
     policy: Optional[Dict[str, Any]],
     envelope: Optional[Dict[str, Any]],
+    standing: Optional[Dict[str, Any]] = None,
+    answer_floor_utc: Optional[str] = None,
+    work_started_utc: Optional[str] = None,
 ) -> None:
     """Arbitrate channel answers against the current pause, in place.
 
@@ -2933,13 +3066,28 @@ def _arbitrate_reauthorization(
     never by arrival order. The governing answer is the highest-ranked
     authoritative-capable channel bearing one; every lower-ranked answer
     is recorded as advisory. Coverage per breached field: boundary-action
-    grants (scope booleans) are durable for the task — no freshness
-    requirement; numeric budgets clear a pause only up to the granted
-    scope. A fresh scope-less answer clears exactly the current pause —
-    numeric and boundary fields alike, within the answering channel's
-    grant bounds — without creating anything durable. A spent answer
-    presented against a newer breach it does not cover is stale (the
-    pinned grant-reuse rejection).
+    grants (scope booleans) are durable for the task; numeric budgets clear
+    a pause only up to the granted scope. A fresh scope-less answer clears
+    exactly the current pause — numeric and boundary fields alike, within
+    the answering channel's grant bounds — without creating anything
+    durable. A spent answer presented against a newer breach it does not
+    cover is stale (the pinned grant-reuse rejection).
+
+    A clear never predates the pause it names. A fresh answer clears the
+    pause at its decision time. A standing answer the record already
+    carries (``standing``) covered the pause before it fired, so it clears
+    the pause at the pause's own stamp; so does a prospective answer — a
+    scoped budget or grant decided before the pause it answers and newer
+    than every answer the record carries (``_prospective_answer``): the
+    human granted the room before the breach was realized, nothing waited,
+    and the zero-length pause excludes nothing from the work clock. A
+    scope-less answer decided before the pause covers nothing (it
+    authorizes exactly the extent recorded at a pause that had not yet
+    fired) and leaves the pause current as ``stale``; a covering scoped
+    answer older than an answer the record already carries is history
+    re-presented and is refused at write time — the shape that once stored
+    a clear earlier than its pause and subtracted a negative interval from
+    the work clock.
     """
     governing = next(
         (c for c in REAUTH_GOVERNING_CHANNELS if c in reauth_input), None
@@ -3038,8 +3186,70 @@ def _arbitrate_reauthorization(
     if uncovered:
         block["disposition"] = "insufficient" if fresh else "stale"
         return
+    if fresh:
+        cleared_at = answer["decided_at_utc"]
+    elif _is_recorded_standing_answer(governing, answer, block["scope"], standing):
+        cleared_at = paused_at
+    elif _prospective_answer(
+        answer, scope_less, standing, answer_floor_utc, work_started_utc
+    ):
+        cleared_at = paused_at
+    else:
+        raise ValueError(
+            f"re-authorization on {governing} decided at "
+            f"{answer['decided_at_utc']} precedes the pause it answers "
+            f"(paused_at_utc {paused_at}) and is not the standing answer this "
+            "record already carries, nor a prospective scoped answer newer than "
+            "every answer it carries — a clear cannot predate its pause; record "
+            "a fresh answer (oacp autonomy outcome, or a --checkpoint answer "
+            "decided at or after the pause), or present the scoped budget the "
+            "human granted since the last answer"
+        )
     block["disposition"] = "resumed"
-    block["cleared_paused_at_utc"] = answer["decided_at_utc"]
+    block["cleared_paused_at_utc"] = cleared_at
+
+
+def _prospective_answer(
+    answer: Dict[str, Any],
+    scope_less: bool,
+    standing: Optional[Dict[str, Any]],
+    answer_floor_utc: Optional[str] = None,
+    work_started_utc: Optional[str] = None,
+) -> bool:
+    """Whether an answer decided before the pause it answers is prospective.
+
+    A scoped answer is forward-looking by definition — a numeric budget or a
+    boundary-action grant stands for the remainder of the task — so one the
+    human decided before the breach was realized covers the pause the way a
+    standing answer would. It must be strictly newer than every answer the
+    record already carries (the standing answer, and ``answer_floor_utc``:
+    the latest decision among the stored checkpoint answer, the retired
+    pauses and the human outcome) and no earlier than work start: an older
+    one is spent history re-presented, not a new grant. A scope-less answer
+    is never prospective (it authorizes exactly the extent recorded at the
+    pause it answers).
+    """
+    if scope_less:
+        return False
+    decided_at = _parse_clock(answer.get("decided_at_utc"))
+    if decided_at is None:
+        return False
+    floors = [_parse_clock(answer_floor_utc)]
+    if isinstance(standing, dict) and standing.get("disposition") == "resumed":
+        floors.append(_parse_clock(standing.get("decided_at_utc")))
+    if any(floor is not None and decided_at <= floor for floor in floors):
+        return False
+    started_at = _parse_clock(work_started_utc)
+    return started_at is None or decided_at >= started_at
+
+
+def _parse_clock(value: Any) -> Optional[dt.datetime]:
+    if not isinstance(value, str):
+        return None
+    try:
+        return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
 
 
 def evaluate_threshold_checkpoint(
@@ -3047,7 +3257,21 @@ def evaluate_threshold_checkpoint(
     grant_result: Dict[str, Any],
     actuals: Optional[Dict[str, Any]],
     policy: Optional[Dict[str, Any]] = None,
+    standing: Optional[Dict[str, Any]] = None,
+    answer_floor_utc: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """Evaluate one §E checkpoint against the envelope and grant.
+
+    ``standing`` is the record's recorded governing answer (the
+    ``threshold_checkpoint.reauthorization`` block that cleared its current
+    pause), which a receiver may re-present against a later pause its
+    durable scope covers. A scoped answer decided before the pause it
+    answers is prospective and clears the pause at the pause's own stamp
+    when it is newer than the standing answer and than ``answer_floor_utc``
+    (the latest decision the record carries in any form) and no earlier
+    than the actuals' ``work_started_at_utc``; any other answer decided
+    before the pause is refused rather than recorded as a clear.
+    """
     checkpoint: Dict[str, Any] = {
         "evaluated": False,
         "actual_minutes": None,
@@ -3089,7 +3313,7 @@ def evaluate_threshold_checkpoint(
     for key, actual in side_effects.items():
         if not actual:
             continue
-        if envelope.get(key) is True:
+        if envelope_covers_effect(envelope, key):
             continue
         if isinstance(grant_scope, dict) and grant_scope.get(key) is True:
             continue
@@ -3118,7 +3342,7 @@ def evaluate_threshold_checkpoint(
             )
         for field in intent_fields:
             key = field.partition(".")[2]
-            already_authorized = envelope.get(key) is True or (
+            already_authorized = envelope_covers_effect(envelope, key) or (
                 isinstance(grant_scope, dict) and grant_scope.get(key) is True
             )
             if already_authorized:
@@ -3211,6 +3435,9 @@ def evaluate_threshold_checkpoint(
             paused_at,
             policy,
             envelope,
+            standing=standing,
+            answer_floor_utc=answer_floor_utc,
+            work_started_utc=(actuals or {}).get("work_started_at_utc"),
         )
         if reauth_block["disposition"] == "resumed":
             action = "resumed_after_reauthorization"
@@ -3450,7 +3677,7 @@ def evaluate_autonomy(
     if mode == "always_pause":
         return paused(mode, ["mode_always_pause"])
 
-    message_errors = validate_message_dict(message, advisories=logged_notes)
+    message_errors = validate_message_dict(message)
     if message_errors:
         return paused(
             mode,
@@ -3842,6 +4069,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Override OACP home directory (keystore + policy trust anchor)",
     )
     args = parser.parse_args(argv)
+
+    if args.audit_dir is not None:
+        from _oacp_constants import audit_directory_warning
+
+        warning = audit_directory_warning(args.audit_dir)
+        if warning:
+            print(f"WARNING: {warning}", file=sys.stderr)
 
     try:
         # Single-read snapshot discipline: every security-sensitive input

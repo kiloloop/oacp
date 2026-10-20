@@ -210,20 +210,16 @@ def test_body_schema_boundary(fixture, case_name, tmp_path, monkeypatch):
     else:
         assert errors == expected["validation_errors"]
     assert bool(notes) == expected["advisory"]
-    for note in notes:
-        assert set(note) == {"code", "severity", "detail"}
-        assert note["code"] == "skill_owned_body_schema"
-        assert note["severity"] == "advisory"
-        assert note["detail"].startswith(kind + " body: ")
+    assert notes == []
 
-    # --quiet suppresses only success, never the one-wave advisory.
+    # --quiet stays silent for valid envelopes, including opaque workflow bodies.
     monkeypatch.setattr(sys, "argv", ["validate", str(path), "--quiet"])
     stdout, stderr = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
         validate_rc = validate_message.main()
     assert validate_rc == (1 if errors else 0)
     assert stdout.getvalue() == ""
-    assert ("ADVISORY: skill_owned_body_schema:" in stderr.getvalue()) == bool(notes)
+    assert "ADVISORY:" not in stderr.getvalue()
 
     audit_dir = receiver / "audit" / "autonomy_decisions"
     stdout, stderr = io.StringIO(), io.StringIO()
@@ -247,7 +243,7 @@ def test_body_schema_boundary(fixture, case_name, tmp_path, monkeypatch):
         assert "skill_owned_body_schema" not in decision["reason_codes"]
         recorded = [n for n in decision["logged_notes"]
                     if n["code"] == "skill_owned_body_schema"]
-        assert recorded == ([] if case.get("always_pause") else notes)
+        assert recorded == []
         assert len(records) == 1
         audit = yaml.safe_load(records[0].read_text())
         assert audit["logged_notes"] == decision["logged_notes"]
@@ -255,6 +251,7 @@ def test_body_schema_boundary(fixture, case_name, tmp_path, monkeypatch):
 
 
 def test_body_matrix_is_complete():
+    assert len(BODY_ROWS) == 192
     assert {(row["message_type"], row["mode"]) for row, _ in BODY_ROWS} == {
         (kind, mode) for kind in ("handoff", "handoff_complete")
         for mode in ("off", "warn", "enforce")

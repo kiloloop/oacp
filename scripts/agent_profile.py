@@ -48,6 +48,8 @@ from _oacp_constants import (
     is_agent_dir,
 )
 
+from _oacp_yaml import YAMLMappingError, load_yaml_mapping
+
 VALID_RUNTIMES = tuple(runtime for runtime in ALL_RUNTIMES if runtime != "unknown")
 NAME_RE = AGENT_RE
 
@@ -65,14 +67,11 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
         raise RuntimeError("PyYAML is required: pip install pyyaml")
     raw = path.read_text(encoding="utf-8")
     try:
-        data = yaml.safe_load(raw)
+        return load_yaml_mapping(raw, allow_empty=True)
     except yaml.YAMLError as exc:
         raise ValueError(f"invalid YAML in {path}: {exc}") from exc
-    if data is None:
-        data = {}
-    if not isinstance(data, dict):
-        raise ValueError(f"top-level YAML must be a mapping: {path}")
-    return data
+    except YAMLMappingError as exc:
+        raise ValueError(f"top-level YAML must be a mapping: {path}") from exc
 
 
 def _dump_yaml(data: Dict[str, Any]) -> str:

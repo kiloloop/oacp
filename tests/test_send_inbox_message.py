@@ -585,14 +585,14 @@ next_owner: "claude"
             )
             self.assertEqual(report["type"], "handoff_complete")
 
-    def test_handoff_body_diagnostics_are_advisory(self):
-        """Sending retains body diagnostics without rejecting delivery."""
-        for kind, body, detail in (
+    def test_handoff_body_policy_is_outside_message_delivery(self):
+        """Opaque workflow bodies deliver byte-identically without schema warnings."""
+        for kind, body in (
             ("handoff", 'source_agent: "codex"\ntarget_agent: "claude"\n'
-             'intent: "Continue"\n', "artifacts_to_review"),
+             'intent: "Continue"\n'),
             ("handoff", 'source_agent: "_invalid"\ntarget_agent: "claude"\n'
-             'intent: "Continue"\n', "source_agent"),
-            ("handoff_complete", "pr: not-a-number\n", "pr"),
+             'intent: "Continue"\n'),
+            ("handoff_complete", "pr: not-a-number\n"),
         ):
             with self.subTest(kind=kind, body=body), tempfile.TemporaryDirectory() as tmpdir:
                 report = send_message(
@@ -605,9 +605,9 @@ next_owner: "claude"
                     Path(report["inbox_path"]).read_bytes(),
                     Path(report["outbox_path"]).read_bytes(),
                 )
-                self.assertTrue(any(
-                    "ADVISORY: skill_owned_body_schema:" in warning and detail in warning
-                    for warning in report["warnings"]
+                self.assertFalse(any(
+                    "skill_owned_body_schema" in warning
+                    for warning in report.get("warnings", [])
                 ))
 
     def test_threading_fields(self):

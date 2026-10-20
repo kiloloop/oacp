@@ -38,6 +38,7 @@ KERNEL_DOCS = [
 ]
 WIRE_TEMPLATE = "oacp/_templates/inbox_message.template.yaml"
 REMOVED_SCRIPTS = [
+    "oacp/_scripts/init_packet.sh",
     "oacp/_scripts/normalize_findings.py",
     "oacp/_scripts/create_handoff_packet.py",
     "oacp/_scripts/init_project_workspace.sh",
@@ -45,6 +46,9 @@ REMOVED_SCRIPTS = [
     "oacp/_scripts/init_org_memory.py",
     "oacp/_scripts/promote_to_archive.py",
     "oacp/_scripts/restore_from_archive.py",
+    "oacp/_scripts/write_event.py",
+    "oacp/_scripts/check_quality_gate.py",
+    "oacp/_scripts/handoff_schema.py",
 ]
 # The memory engine ships as `agent-memory-cli`; the kernel wheel carries no
 # memory module and no org-memory templates. Matched by shape, not by name, so
@@ -187,6 +191,15 @@ class TestRemovedScriptsAbsent:
         present = [name for name in REMOVED_SCRIPTS if name in wheel_names]
         assert not present, f"removed scripts still in wheel: {present}"
 
+    def test_quality_gate_make_target_and_template_are_retired(self):
+        completed = subprocess.run(
+            ["make", "-n", "quality"], cwd=REPO_ROOT,
+            capture_output=True, text=True, check=False,
+        )
+        assert completed.returncode == 2
+        assert "No rule to make target" in completed.stderr
+        assert not (REPO_ROOT / "templates/github_actions_quality_gate.yaml").exists()
+
     def test_memory_engine_not_shipped(self, wheel_names):
         present = memory_engine_files(wheel_names)
         assert not present, f"memory engine files in wheel: {present}"
@@ -225,6 +238,8 @@ class TestMemoryEngineShapes:
 # entry points. Userland protocol docs are deliberately excluded — their
 # content is handled by a separate documentation-packaging change.
 RETIRED_REFERENCE_PATTERNS = [
+    re.compile(r"init_packet"),
+    re.compile(r"\bmake packet\b"),
     re.compile(r"init_project_workspace\.sh"),
     re.compile(r"create_handoff_packet"),
     re.compile(r"normalize_findings"),
@@ -234,6 +249,8 @@ RETIRED_REFERENCE_PATTERNS = [
     re.compile(r"\bsession_lifecycle_hooks\b"),
     re.compile(r"\boacp_coordinator\b"),
     re.compile(r"\bmcp_servers\b"),
+    re.compile(r"check_quality_gate"),
+    re.compile(r"handoff_schema"),
 ]
 
 

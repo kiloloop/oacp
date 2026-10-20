@@ -5,7 +5,6 @@
 [![Claude Code](https://img.shields.io/badge/Runtime-Claude_Code-6B4FBB.svg)](https://claude.ai/code)
 [![Codex](https://img.shields.io/badge/Runtime-Codex-74AA9C.svg)](https://openai.com/index/codex/)
 [![Cursor](https://img.shields.io/badge/Runtime-Cursor-222222.svg)](https://cursor.com/)
-[![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen)](https://github.com/kiloloop/oacp/pulls)
 
 > Coordinate agents *without* the chaos.
 
@@ -28,7 +27,7 @@ The CLI ships structured tasks between agents and lets you watch the conversatio
 ## Live agent fleet
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/kiloloop/oacp/main/docs/img/oacp-fleet-thread.png" alt="claude / codex / gemini fleet with PR #42 review thread" width="650" />
+  <img src="https://raw.githubusercontent.com/kiloloop/oacp/main/docs/img/oacp-fleet-thread.png" alt="claude / codex fleet with PR #42 review thread" width="650" />
 </p>
 
 Every multi-agent thread is a sequence of typed messages — `review_request`, `review_feedback`, `review_addressed`, `review_lgtm` — with explicit quality gates.
@@ -41,7 +40,6 @@ PROJECT · my-app                                   ● live
 
   C  claude   code           drafting PR #42
   X  codex    cli            reviewing
-  G  gemini   api            idle
 
   claude  →  review_request    "auth refactor"      [codex]
   codex   →  review_feedback   2 minor, 0 blocking  [claude]
@@ -106,7 +104,7 @@ oacp send my-project --from alice --to bob --type task_request \
 ```
 
 By default, `oacp init my-project` creates `claude`, `codex`, and `cursor`
-agents. Pass `--agents` to include Gemini or custom agent names.
+agents. Pass `--agents` to choose your own agent names.
 
 When running inside a configured agent runtime, `--from` can be omitted — OACP infers the sender from `OACP_AGENT`, `AGENT_NAME`, or the agent card. See [QUICKSTART.md](QUICKSTART.md) for a full walkthrough. Or try the [5-minute quickstart →](examples/quickstart/) to send your first message to a real AI agent.
 
@@ -228,29 +226,28 @@ uv tool install .
 <!-- BEGIN GENERATED: oacp commands — do not edit by hand; run `make docs` -->
 | Command | Description |
 |---------|-------------|
-| `oacp init` | Create a project workspace under $OACP_HOME/projects/ |
-| `oacp add-agent` | Add an agent to an existing project workspace |
-| `oacp agent` | Manage global agent profiles (init, sync, show, list) |
+| `oacp init` | Create a new project workspace; preview with --dry-run |
+| `oacp agent` | Add project agents and manage global profiles |
 | `oacp inbox` | List pending inbox messages |
 | `oacp watch` | Emit inbox delta events for Monitor-friendly polling |
-| `oacp retention` | Parked: engine archived outside the kernel; advisory shim until 0.5.3 |
-| `oacp memory` | Run agent-memory (sync, archive, restore); shim until 0.5.3 |
 | `oacp session-init` | Verify Codex startup inputs and emit SessionStart context |
 | `oacp setup` | Generate runtime-specific config files in a repo |
 | `oacp send` | Send a protocol-compliant inbox message |
-| `oacp key` | Generate and inspect message-signing keys |
-| `oacp trust` | Import, inspect, and revoke trust-root entries (catalog + pins) |
-| `oacp org-memory` | Run agent-memory org (init); shim until 0.5.3 |
-| `oacp write-event` | Write an event to org-memory/events/ |
-| `oacp autonomy-outcome` | Record a human approval/decline in an autonomy audit |
-| `oacp autonomy-finalize` | Record checkpoints and terminal states in an autonomy audit |
+| `oacp trust` | Manage local keys and project trust (catalog + pins) |
+| `oacp autonomy` | Record human outcomes, checkpoints, and terminal audit states |
 | `oacp envelope` | Compile, show, or clear the runtime envelope for a task |
 | `oacp doctor` | Check environment and workspace health |
 | `oacp validate` | Validate an inbox/outbox YAML message |
 | `oacp verify` | Verify a message's auth trailer against receiver-local pins |
 <!-- END GENERATED: oacp commands -->
 
-`oacp --version` prints the installed version.
+`oacp --version` prints the installed version. Related operations now use
+`agent add`, `trust keygen|keys`, and `autonomy outcome|finalize`; see the
+[command migration guide](docs/guides/command-migration.md).
+
+Memory operations use [agent-memory](https://github.com/kiloloop/agent-memory)
+directly. The `memory`, `org-memory`, `write-event`, and `retention` commands
+were removed in 0.5.3; see the [migration guide](docs/guides/memory-cli-migration.md).
 
 <details>
 <summary>Key flags</summary>
@@ -260,8 +257,6 @@ uv tool install .
 **`oacp watch`**: `--agent`, repeatable `--project`, `--all-projects`, `--json`, `--since` (default `now`), `--state-id <id>` for per-subscriber cursors, `--show-archived`
 
 **`oacp doctor`**: `--fix` (auto-fix safe issues), `--json`, `-o/--output`
-
-**`oacp memory`** / **`oacp org-memory`**: exec shims for [agent-memory](https://github.com/kiloloop/agent-memory) (`pip install agent-memory-cli`): argv passes through, `--oacp-dir` becomes `--home`, `oacp memory init` runs `agent-memory enable`. Kept through 0.5.2, removed in 0.5.3; call `agent-memory` directly.
 
 </details>
 
@@ -360,6 +355,8 @@ make preflight
 ```
 
 ## Documentation
+
+- [Batch verification](docs/guides/batch-verification.md) — Stream message verdicts from stdin paths
 
 - [SPEC.md](SPEC.md) — Full protocol specification
 - [examples/quickstart/](examples/quickstart/) — Hands-on tutorial: send a message to an AI agent

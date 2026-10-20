@@ -12,7 +12,9 @@ a checkpoint clear recorded over the admission outcome
 a supersession chain hijacked by an unrelated-identity
 record (`superseded_unrelated_successor`), a malformed retired-pause
 list (`invalid_pause_intervals`), a terminal-time pause stamped after
-the recorded completion (`terminal_time_pause_after_completion`), and a
+the recorded completion (`terminal_time_pause_after_completion`), a
+terminal-time pause whose recorded clear is stamped before the pause it
+names (`terminal_time_clear_precedes_pause`), and a
 checkpoint whose governing answer declined yet was finalized done over a
 retained clear timestamp (`declined_checkpoint_marked_done`) — plus valid
 shapes (`clean_terminal_done`, `final_state_superseded_valid`,

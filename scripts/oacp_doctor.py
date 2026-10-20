@@ -37,6 +37,8 @@ from _oacp_constants import (
     ALL_RUNTIMES,
     CANONICAL_CAPABILITIES,
     REPO_SLUG_RE,
+    existing_agent_names,
+    validate_project_name,
     _template_path,
     is_agent_dir,
     utc_now_iso,
@@ -255,7 +257,7 @@ def check_workspace(project_dir: Path) -> DoctorCategory:
             name="workspace.json",
             severity=Severity.error,
             message="workspace.json — not found",
-            fix_hint=f"Run: oacp init {project_dir.name}",
+            fix_hint="Init is create-only; inspect and repair this root, or move it aside before re-initializing.",
         ))
     else:
         try:
@@ -276,15 +278,16 @@ def check_workspace(project_dir: Path) -> DoctorCategory:
             ))
 
     agents_dir = project_dir / "agents"
+    agents = existing_agent_names(project_dir)
     if not agents_dir.is_dir():
         cat.results.append(DoctorResult(
             name="agents/",
             severity=Severity.error,
             message="agents/ directory — not found",
-            fix_hint=f"Run: oacp init {project_dir.name}",
+            fix_hint=f"Restore each intended agent with: oacp agent add {project_dir.name} <agent>",
         ))
     else:
-        agent_count = sum(1 for d in agents_dir.iterdir() if is_agent_dir(d))
+        agent_count = len(agents)
         cat.results.append(DoctorResult(
             name="agents/",
             severity=Severity.ok,
@@ -814,7 +817,7 @@ def check_autonomy(
                         f"integrity errors: {_summarize_paths(error_files)}"
                     ),
                     fix_hint=(
-                        "oacp autonomy-finalize <record> --validate "
+                        "oacp autonomy finalize <record> --validate "
                         "[--sweep] to list findings; close stale or "
                         "off-vocabulary records via supersession"
                     ),
@@ -842,7 +845,7 @@ def check_autonomy(
                         f"evaluation(s): {_summarize_paths(grouped)}"
                     ),
                     fix_hint=(
-                        "oacp autonomy-finalize <stale record> "
+                        "oacp autonomy finalize <stale record> "
                         "--final-state superseded --superseded-by <live "
                         "evaluation_id>"
                     ),
@@ -1209,7 +1212,7 @@ def check_trust(
             name="trust-root",
             severity=Severity.skip,
             message="no trust files — message signing not in use for this project",
-            fix_hint="Opt in with `oacp key gen` + `oacp trust import`",
+            fix_hint="Opt in with `oacp trust keygen` + `oacp trust import`",
         ))
         return cat
 
@@ -1313,6 +1316,13 @@ def run_doctor(
 
     # Workspace checks require a project
     if project:
+        try:
+            validate_project_name(project)
+        except ValueError as exc:
+            categories.append(DoctorCategory(name="Workspace", results=[DoctorResult(
+                name="project-name", severity=Severity.error, message=str(exc),
+            )]))
+            return categories
         project_dir = oacp_dir / "projects" / project
         if not project_dir.is_dir():
             ws_cat = DoctorCategory(name="Workspace")
@@ -1553,6 +1563,10 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="OACP home directory (default: $OACP_HOME or ~/oacp)",
     )
     parser.add_argument(
+        "--audit-dir", type=Path, default=None,
+        help="Diagnose the basename of a custom evaluator audit directory (does not change workspace scans)",
+    )
+    parser.add_argument(
         "--json",
         dest="json_output",
         action="store_true",
@@ -1581,6 +1595,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         project=args.project,
         oacp_dir=oacp_dir,
     )
+
+    if args.audit_dir is not None:
+        from _oacp_constants import audit_directory_warning
+
+        warning = audit_directory_warning(args.audit_dir)
+        if warning:
+            print(f"WARNING: {warning}", file=sys.stderr)
+        categories.append(DoctorCategory(name="Audit", results=[DoctorResult(
+            name="audit-directory-basename",
+            severity=Severity.warn if warning else Severity.ok,
+            message=warning or "audit directory basename is canonical",
+        )]))
 
     fixed: List[str] = []
     if args.fix and args.project:

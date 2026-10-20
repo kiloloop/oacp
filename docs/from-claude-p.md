@@ -2,8 +2,6 @@
 
 `claude -p` is how most people first script a Claude agent. It works — but if you run agents in automation, it's worth asking a question the one-liner never forces: **why is the agent headless and synchronous in the first place?**
 
-(A pricing footnote, since earlier versions of this page led with it: Anthropic explored moving programmatic usage — `claude -p`, the Agent SDK, Claude Code GitHub Actions — onto a separate metered credit, but paused that change before it took effect; per the June 15 announcement no such credit exists, subscription limits are unchanged, and advance notice is promised before any future version.)
-
 This guide is built to be handed to your agent. Read the first half for the *why*; paste the setup block into your Claude Code session for the *how*.
 
 > **Setup is a one-time ~5 minutes. Every task after that is one `oacp send` — async, non-blocking, observable.**

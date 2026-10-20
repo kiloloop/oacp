@@ -14,11 +14,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from _oacp_constants import AGENT_RE
+from _oacp_yaml import YAMLMappingError, load_yaml_mapping
 
-from handoff_schema import (  # noqa: E402
-    validate_handoff_complete_text,
-    validate_handoff_packet_text,
-)
 from message_signing import (  # noqa: E402
     auth_structure_errors,
     split_signed_message,
@@ -198,19 +195,13 @@ def _parse_simple_yaml(raw: str) -> Dict[str, Any]:
 
 def _load_message(raw: str) -> Dict[str, Any]:
     try:
-        import yaml  # type: ignore
-
-        loaded = yaml.load(raw, Loader=yaml.BaseLoader)
-    except ImportError:
-        loaded = _parse_simple_yaml(raw)
-    except Exception as exc:
-        raise MessageValidationError(f"YAML parse error: {exc}") from exc
-
-    if loaded is None:
-        loaded = {}
-    if not isinstance(loaded, dict):
-        raise MessageValidationError("top-level YAML must be a mapping/object")
-    return loaded
+        return load_yaml_mapping(
+            raw, string_scalars=True, allow_empty=True,
+            fallback=_parse_simple_yaml,
+            parse_error=lambda exc: MessageValidationError(f"YAML parse error: {exc}"),
+        )
+    except YAMLMappingError as exc:
+        raise MessageValidationError("top-level YAML must be a mapping/object") from exc
 
 
 def _as_scalar_str(data: Dict[str, Any], key: str, errors: List[str]) -> str:
@@ -261,10 +252,10 @@ def _is_nonnegative_number(value: Any) -> bool:
 def validate_message_dict(
     data: Dict[str, Any], *, advisories: Optional[List[Dict[str, str]]] = None
 ) -> List[str]:
-    """Return envelope errors; optionally collect non-rejecting body findings.
+    """Return universal-envelope errors without validating workflow body schemas.
 
-    The error-list API is preserved for existing callers. Skill body checks
-    remain advisory for 0.5.2 and leave this call path in 0.5.3.
+    The optional advisories collector remains accepted for caller compatibility
+    and is left unchanged. Workflow-owned validation runs outside this module.
     """
     errors: List[str] = []
 
@@ -404,21 +395,6 @@ def validate_message_dict(
     if body and len(body) > 20000:
         errors.append("field 'body' is too long (max 20000 chars)")
 
-    body_checks = {
-        "handoff": validate_handoff_packet_text,
-        "handoff_complete": validate_handoff_complete_text,
-    }
-    if msg_type in body_checks and body:
-        # A skill-owned schema cannot reject a universal envelope. Keep its
-        # diagnostics for one advisory wave before removing these checks.
-        for detail in body_checks[msg_type](body):
-            if advisories is not None:
-                advisories.append({
-                    "code": "skill_owned_body_schema",
-                    "severity": "advisory",
-                    "detail": f"{msg_type} body: {detail}",
-                })
-
     # Signed-message auth trailer: strict structural validation (framing +
     # locked JOSE profile), no crypto — verification is receiver-side.
     if "auth" in data:
@@ -448,7 +424,7 @@ def validate_message_file(
     except MessageValidationError as exc:
         return [str(exc)]
 
-    errors = validate_message_dict(data, advisories=advisories)
+    errors = validate_message_dict(data)
 
     # Raw-position rule for signed messages, checked against the exact
     # on-disk bytes: the auth trailer must be the final physical line,
@@ -475,13 +451,7 @@ def main() -> int:
     args = parser.parse_args()
 
     path = Path(args.message_file)
-    advisories: List[Dict[str, str]] = []
-    errors = validate_message_file(path, advisories=advisories)
-    for finding in advisories:
-        print(
-            f"ADVISORY: {finding['code']}: {finding['detail']}",
-            file=sys.stderr,
-        )
+    errors = validate_message_file(path)
     if errors:
         for err in errors:
             print(f"ERROR: {err}", file=sys.stderr)

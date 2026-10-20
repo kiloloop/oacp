@@ -763,7 +763,7 @@ class TestDrift(TrustTempDirCase):
 @unittest.skipUnless(CRYPTO_AVAILABLE, "requires oacp-cli[crypto]")
 class TestEndToEnd(TrustTempDirCase):
     def test_gen_import_verify(self) -> None:
-        """oacp key gen → trust import → a signed message verifies."""
+        """oacp trust keygen → trust import → a signed message verifies."""
         oacp_home = self.tmp / "home"
         oacp_home.mkdir()
         report = generate_keypair("iris", oacp_home)

@@ -25,22 +25,21 @@ scratch receiver workspace per golden.
 A change here is a receive-path contract change and needs a ruling, exactly
 like the signing corpus (see `../signing/README.md`).
 
-## Envelope and skill-body boundary (0.5.2)
+## Envelope and workflow-body boundary (0.5.3)
 
 `body_schema.yaml` supplies 32 cases, run for each of `handoff` and
 `handoff_complete` under off/warn/enforce. The six goldens in
-`expected/body_schema/` pin the validation errors, advisory presence and gate
+`expected/body_schema/` pin the validation errors, absence of body advisories and gate
 outcome (192 rows). The original five signing classes / 13 mode goldens above
 remain unchanged.
 
 The harness creates a scratch sender key and receiver pin, signs the exact
 case bytes, executes both `oacp validate`'s CLI entry point and the real gate
 entry point, and reads the persisted audit back. No live keys or policy are
-used. It asserts that `skill_owned_body_schema` findings carry `code`,
-`severity: advisory`, and `detail`, remain outside `reason_codes`, and reach
-`logged_notes` unchanged. Well-formed body controls record no advisory;
-malformed body schemas advise. The skill-owned body checks leave the validator
-in 0.5.3.
+used. It asserts that no `skill_owned_body_schema` finding is emitted or
+recorded in new `logged_notes`. Both well-formed and malformed workflow body
+schemas remain opaque to the kernel; their owning workflows validate them
+before side effects.
 
 | Class | Well-formed | Malformed | Absent |
 |---|---|---|---|
@@ -50,12 +49,13 @@ in 0.5.3.
 | Thread fields | Pass | Existing conversation/parent errors | Pass without grant authority |
 | Expiry | Future passes | Bad format/calendar errors; past pauses admission | Pass |
 | Gate-read profile/grant blocks | Existing policy applies | Existing profile/shape pause | Profile exemption passes; required profile pauses |
-| Skill schema | No advisory | Advisory only | Nonempty body missing skill fields advises |
+| Workflow schema | No advisory | No advisory | Nonempty body missing workflow fields produces no advisory |
 
-Combined-invalid cases pair the body advisory with invalid expiry, task
-profile, or signing input: an advisory cannot mask the existing rejection or
-pause. An always-pause control retains its early policy pause without running body
-validation or recording a gate advisory. `--quiet` suppresses only success output, not advisories.
+Combined-invalid cases pair malformed workflow bodies with invalid expiry,
+task profile, or signing input: removing body diagnostics leaves the existing
+rejection or pause unchanged. An always-pause control retains its early policy
+pause. `--quiet` suppresses success output; valid envelopes produce no body
+warnings.
 
 Schema validation and admission are distinct. Malformed `task_profile` and
 `continuation_grants` mapping shapes pause the gate with
