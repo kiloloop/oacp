@@ -5,7 +5,7 @@ set -euo pipefail
 
 # update_workspace.sh — idempotent sync of an existing project workspace
 # with the latest directory structure expected by OACP.
-# Directory structure — keep in sync with init_project_workspace.py (oacp init)
+# Directory structure comes from _oacp_constants.WORKSPACE_LAYOUT.
 
 usage() {
   cat <<EOF
@@ -36,13 +36,27 @@ fi
 PROJECT_NAME="$1"
 shift
 
-if [[ "$PROJECT_NAME" == */* || "$PROJECT_NAME" == .* ]]; then
-  echo "Error: project name must not contain '/' or start with '.'" >&2
-  exit 2
-fi
-
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OACP_ROOT="${OACP_HOME:-$HOME/oacp}"
 PROJECT_ROOT="$OACP_ROOT/projects/$PROJECT_NAME"
+
+# Validate before any workspace mutation; snapshot the visible roster once.
+# JSON preserves arbitrary existing directory names across the shell boundary.
+if ! LAYOUT_JSON="$(python3 -c '
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from _oacp_constants import existing_agent_names, validate_project_name, workspace_layout
+try:
+    validate_project_name(sys.argv[2])
+except ValueError as exc:
+    print(f"Error: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+agents = existing_agent_names(Path(sys.argv[3]))
+print(json.dumps({"agents": agents, "layout": workspace_layout(agents)}))
+' "$SCRIPT_DIR" "$PROJECT_NAME" "$PROJECT_ROOT")"; then
+  exit 2
+fi
 
 REPO_DIR=""
 ARTIFACT_LINKS=()
@@ -84,34 +98,30 @@ log_action() {
 }
 
 # ── Phase 1: Ensure directories ─────────────────────────────────────────
-EXPECTED_DIRS=(
-  "agents/codex/inbox"
-  "agents/codex/inbox/archive"
-  "agents/codex/outbox"
-  "agents/codex/dead_letter"
-  "agents/codex/audit/autonomy_decisions"
-  "agents/claude/inbox"
-  "agents/claude/inbox/archive"
-  "agents/claude/outbox"
-  "agents/claude/dead_letter"
-  "agents/claude/audit/autonomy_decisions"
-  "agents/gemini/inbox"
-  "agents/gemini/inbox/archive"
-  "agents/gemini/outbox"
-  "agents/gemini/dead_letter"
-  "agents/gemini/audit/autonomy_decisions"
-  "packets/review"
-  "packets/findings"
-  "packets/test"
-  "packets/deploy"
-  "checkpoints"
-  "merges"
-  "memory"
-  "memory/archive"
-  "artifacts"
-  "state"
-  "logs"
-)
+EXPECTED_DIRS=()
+GITKEEP_DIRS=()
+AGENT_NAMES=()
+# A failed decoder must stop before directories, placeholders, or policy are
+# written. Process substitution does not propagate the producer's exit status.
+LAYOUT_FILE="$(mktemp "${TMPDIR:-/tmp}/oacp-layout.XXXXXX")" || exit 2
+trap 'rm -f "$LAYOUT_FILE"' EXIT
+python3 -c '
+import json, os, sys
+data = json.loads(sys.argv[1])
+for path, keep in data["layout"]:
+    sys.stdout.buffer.write(os.fsencode("D" + path) + b"\0")
+    if keep:
+        sys.stdout.buffer.write(os.fsencode("K" + path) + b"\0")
+for agent in data["agents"]:
+    sys.stdout.buffer.write(os.fsencode("A" + agent) + b"\0")
+' "$LAYOUT_JSON" > "$LAYOUT_FILE" || exit 2
+while IFS= read -r -d '' entry; do
+  case "$entry" in
+    D*) EXPECTED_DIRS+=("${entry:1}") ;;
+    K*) GITKEEP_DIRS+=("${entry:1}") ;;
+    A*) AGENT_NAMES+=("${entry:1}") ;;
+  esac
+done < "$LAYOUT_FILE"
 
 for dir in "${EXPECTED_DIRS[@]}"; do
   target="$PROJECT_ROOT/$dir"
@@ -132,30 +142,6 @@ done
 # ── Phase 2: Ensure .gitkeep files ──────────────────────────────────────
 # .gitkeep goes in dirs that are typically empty placeholders.
 # NOT in memory/, state/, logs/ — those get real content.
-GITKEEP_DIRS=(
-  "agents/codex/inbox"
-  "agents/codex/inbox/archive"
-  "agents/codex/outbox"
-  "agents/codex/dead_letter"
-  "agents/codex/audit/autonomy_decisions"
-  "agents/claude/inbox"
-  "agents/claude/inbox/archive"
-  "agents/claude/outbox"
-  "agents/claude/dead_letter"
-  "agents/claude/audit/autonomy_decisions"
-  "agents/gemini/inbox"
-  "agents/gemini/inbox/archive"
-  "agents/gemini/outbox"
-  "agents/gemini/dead_letter"
-  "agents/gemini/audit/autonomy_decisions"
-  "packets/review"
-  "packets/findings"
-  "packets/test"
-  "packets/deploy"
-  "checkpoints"
-  "merges"
-  "artifacts"
-)
 
 for dir in "${GITKEEP_DIRS[@]}"; do
   target="$PROJECT_ROOT/$dir/.gitkeep"
@@ -174,70 +160,12 @@ for dir in "${GITKEEP_DIRS[@]}"; do
 done
 
 # ── Phase 3: Ensure receiver autonomy config templates ──────────────────
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RECEIVER_CONFIG_TEMPLATE="$SCRIPT_DIR/../templates/receiver_config.template.yaml"
 
-if [[ -d "$PROJECT_ROOT/agents" ]]; then
-  for agent_dir in "$PROJECT_ROOT"/agents/*; do
-    [[ -d "$agent_dir" ]] || continue
-    agent_name="$(basename "$agent_dir")"
-    audit_dir="$agent_dir/audit/autonomy_decisions"
-    archive_dir="$agent_dir/inbox/archive"
+if [[ ${#AGENT_NAMES[@]} -gt 0 ]]; then
+  for agent_name in "${AGENT_NAMES[@]}"; do
+    agent_dir="$PROJECT_ROOT/agents/$agent_name"
     config_file="$agent_dir/config.yaml"
-
-    if [[ -d "$archive_dir" ]]; then
-      log_action "~" "dir  agents/$agent_name/inbox/archive"
-      ((UNCHANGED+=1))
-    else
-      if [[ "$DRY_RUN" == true ]]; then
-        log_action "+" "dir  agents/$agent_name/inbox/archive (dry-run)"
-      else
-        mkdir -p "$archive_dir"
-        log_action "+" "dir  agents/$agent_name/inbox/archive"
-      fi
-      ((CREATED+=1))
-    fi
-
-    if [[ -f "$archive_dir/.gitkeep" ]]; then
-      log_action "~" "file agents/$agent_name/inbox/archive/.gitkeep"
-      ((UNCHANGED+=1))
-    else
-      if [[ "$DRY_RUN" == true ]]; then
-        log_action "+" "file agents/$agent_name/inbox/archive/.gitkeep (dry-run)"
-      else
-        mkdir -p "$archive_dir"
-        touch "$archive_dir/.gitkeep"
-        log_action "+" "file agents/$agent_name/inbox/archive/.gitkeep"
-      fi
-      ((CREATED+=1))
-    fi
-
-    if [[ -d "$audit_dir" ]]; then
-      log_action "~" "dir  agents/$agent_name/audit/autonomy_decisions"
-      ((UNCHANGED+=1))
-    else
-      if [[ "$DRY_RUN" == true ]]; then
-        log_action "+" "dir  agents/$agent_name/audit/autonomy_decisions (dry-run)"
-      else
-        mkdir -p "$audit_dir"
-        log_action "+" "dir  agents/$agent_name/audit/autonomy_decisions"
-      fi
-      ((CREATED+=1))
-    fi
-
-    if [[ -f "$audit_dir/.gitkeep" ]]; then
-      log_action "~" "file agents/$agent_name/audit/autonomy_decisions/.gitkeep"
-      ((UNCHANGED+=1))
-    else
-      if [[ "$DRY_RUN" == true ]]; then
-        log_action "+" "file agents/$agent_name/audit/autonomy_decisions/.gitkeep (dry-run)"
-      else
-        mkdir -p "$audit_dir"
-        touch "$audit_dir/.gitkeep"
-        log_action "+" "file agents/$agent_name/audit/autonomy_decisions/.gitkeep"
-      fi
-      ((CREATED+=1))
-    fi
 
     if [[ -f "$config_file" ]]; then
       log_action "~" "file agents/$agent_name/config.yaml"

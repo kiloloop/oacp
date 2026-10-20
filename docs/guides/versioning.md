@@ -21,7 +21,40 @@ section, see below). The protocol contract carries a separate stamp,
 `SPEC_VERSION` in `scripts/_oacp_constants.py`, which moves only under the
 contract-version rule in
 [`docs/protocol/autonomy.md`](../protocol/autonomy.md#contract-version)
-(step 2 below).
+(step 2 below). Between cuts the package version carries a `.dev0` suffix
+(see [Dev Builds Between Cuts](#dev-builds-between-cuts)).
+
+## Dev Builds Between Cuts
+
+The development repository never sits on a released number while it carries
+unreleased code. Right after each cut, a one-line follow-up PR moves
+`pyproject.toml` from the released version to the next patch number with a
+`.dev0` suffix (`0.5.3` → `0.5.4.dev0`, a [PEP 440](https://peps.python.org/pep-0440/#developmental-releases)
+developmental release). The release-bump PR of the next cut replaces that
+suffix with the release number (`0.5.4.dev0` → `0.5.4`, or `0.6.0` when the
+cut is a minor). Nothing is published for a dev version: no tag, no PyPI
+upload, no GitHub Release, and the `[Unreleased]` CHANGELOG section stays as
+it is. `tests/test_version_convention.py` pins the shape.
+
+What the convention buys:
+
+- A checkout build (`pip install -e .`, `uv run --with-editable`) and the
+  wheel it produces self-identify: `oacp --version` prints `0.5.4.dev0`,
+  never the number of a release whose code it does not carry.
+- Consumers pin release tags or PyPI versions and never a dev build. A dev
+  version installs only from a checkout; an internal index or PyPI
+  pre-release channel is not part of this convention.
+- The contract stamp is untouched: `SPEC_VERSION` always names a release
+  (`X.Y.Z`, never a dev suffix) because it names the release that carries a
+  contract move, not the package that stamped it. Between cuts a dev build
+  may therefore stamp a `spec_version` ahead of the last published package
+  — the contract moved on the development branch before the cut that
+  carries it. Readers treat `spec_version` as the contract stamp alone,
+  never as the package version, and read artifacts by that contract's shape
+  exactly as the contract-version history already requires of the
+  release-window case.
+- Every repository on this pipeline follows the same step at its own next
+  cut, so a `.dev0` version means the same thing everywhere.
 
 ## Release Pipeline
 
@@ -72,6 +105,10 @@ itself, which triggers the publish workflow.
    `uv cache prune`, `uv tool uninstall oacp-cli`, then
    `uv tool install oacp-cli==<version> --no-cache`; the short
    `uv tool install` form is only reliable in a clean tool environment.
+8. **Post-cut dev bump** — open a one-line PR on the development repository
+   moving `pyproject.toml` to the next patch number with a `.dev0` suffix
+   (see [Dev Builds Between Cuts](#dev-builds-between-cuts)). Nothing else
+   moves and nothing is published.
 
 ## Doc-Only Changes
 

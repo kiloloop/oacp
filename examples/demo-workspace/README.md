@@ -4,7 +4,7 @@
 anyone writing a wiki.*
 
 A constructed example of OACP's two memory levels mid-flight, for a fictional
-three-agent team. The blank skeletons that `oacp init` and `oacp org-memory
+three-agent team. The blank skeletons that `oacp init` and `agent-memory org
 init` create show the *format*; this shows the *system working* — decisions
 accumulating, debt tracked with origins, threads opened and closed, and a
 repeating pattern promoted into standing knowledge.

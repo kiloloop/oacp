@@ -8,12 +8,12 @@ expected:
     reason: null
   malformed_skill_body:
     validation_errors: []
-    advisory: true
+    advisory: false
     decision: auto_accepted
     reason: null
   absent_skill_fields:
     validation_errors: []
-    advisory: true
+    advisory: false
     decision: auto_accepted
     reason: null
   missing_required:
@@ -49,7 +49,7 @@ expected:
   oversized_body:
     validation_errors:
     - field 'body' is too long (max 20000 chars)
-    advisory: true
+    advisory: false
     decision: paused
     reason: message_invalid
   valid_optional:
@@ -163,22 +163,22 @@ expected:
   skill_and_expiry_invalid:
     validation_errors:
     - 'field ''expires_at'' must be UTC RFC3339 seconds format: YYYY-MM-DDTHH:MM:SSZ'
-    advisory: true
+    advisory: false
     decision: paused
     reason: message_invalid
   skill_and_profile_invalid:
     validation_errors: []
-    advisory: true
+    advisory: false
     decision: paused
     reason: task_profile_unparsable
   skill_and_auth_invalid:
     validation_errors: []
-    advisory: true
+    advisory: false
     decision: paused
     reason: message_invalid
     auth_error: structure
   always_pause_skill_invalid:
     validation_errors: []
-    advisory: true
+    advisory: false
     decision: paused
     reason: mode_always_pause

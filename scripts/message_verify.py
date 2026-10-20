@@ -51,6 +51,7 @@ import copy
 import hashlib
 import json
 import os
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -883,6 +884,20 @@ def _resolve_pins_path(args: argparse.Namespace) -> Optional[Path]:
     return None
 
 
+def _read_batch_message(path: str) -> bytes:
+    """Read one regular-file snapshot without blocking on a FIFO open."""
+    if not path:
+        raise ValueError("empty input path")
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("message path is not a regular file")
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            return handle.read(MAX_MESSAGE_BYTES + 1)
+    finally:
+        os.close(fd)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -890,7 +905,11 @@ def main() -> int:
             "(warn mode: reports, never rejects)."
         )
     )
-    parser.add_argument("message_file", help="Path to the message YAML file")
+    parser.add_argument("message_file", nargs="?", help="Path to the message YAML file")
+    parser.add_argument(
+        "--batch", action="store_true",
+        help="Read paths from stdin and stream one JSON verdict per line",
+    )
     parser.add_argument("--pins", default=None, help="Path to allowed_signers.yaml")
     parser.add_argument("--project", default=None, help="Project name (with --receiver)")
     parser.add_argument("--receiver", default=None, help="Receiver agent name")
@@ -908,11 +927,18 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", dest="json_output")
     args = parser.parse_args()
 
-    message_path = Path(args.message_file)
-    if not message_path.is_file():
-        print(f"ERROR: message file does not exist: {message_path}", file=sys.stderr)
-        return 2
-    raw = read_message_bounded(message_path)
+    if args.batch:
+        if args.message_file or args.quarantine or args.attach_audit:
+            parser.error("--batch cannot combine with a message file, --quarantine, or --attach-audit")
+    elif not args.message_file:
+        parser.error("a message file is required without --batch")
+
+    if not args.batch:
+        message_path = Path(args.message_file)
+        if not message_path.is_file():
+            print(f"ERROR: message file does not exist: {message_path}", file=sys.stderr)
+            return 2
+        raw = read_message_bounded(message_path)
 
     pins_path = _resolve_pins_path(args)
     pins: Dict[str, Dict[str, Any]] = {}
@@ -921,6 +947,35 @@ def main() -> int:
         pins, trust_error, _trust_policy_auth = _load_pins_policy_checked(
             pins_path, receiver=args.receiver, oacp_dir=args.oacp_dir
         )
+
+    if args.batch:
+        try:
+            for line in sys.stdin:
+                # Preserve spaces in paths; remove only the input record ending.
+                path = line.removesuffix("\n").removesuffix("\r")
+                try:
+                    raw = _read_batch_message(path)
+                except (OSError, ValueError) as exc:
+                    verdict = verify_message(
+                        b"", pins, trust_source=str(pins_path) if pins_path else None,
+                        trust_error=trust_error,
+                    )
+                    verdict.update(status=STATUS_INVALID, payload_sha256=None,
+                                   reason=f"cannot read message: {exc}", read_error=True)
+                else:
+                    verdict = verify_message(
+                        raw, pins, trust_source=str(pins_path) if pins_path else None,
+                        trust_error=trust_error,
+                    )
+                print(json.dumps(dict(verdict, path=path)), flush=True)
+        except (OSError, UnicodeError) as exc:
+            print(f"ERROR: batch stream failed: {exc}", file=sys.stderr)
+            if isinstance(exc, BrokenPipeError):
+                # Prevent a second broken-pipe flush during interpreter shutdown.
+                with open(os.devnull, "w") as sink:
+                    os.dup2(sink.fileno(), sys.stdout.fileno())
+            return 2
+        return 0
 
     message_auth = verify_message(
         raw,

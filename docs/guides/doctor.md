@@ -191,9 +191,9 @@ The exit code reflects the overall result:
 
 | Issue | Fix |
 |-------|-----|
-| `workspace.json — not found` | Run `oacp init <project>` to create the workspace |
+| `workspace.json — not found` | Init is create-only: inspect and repair the existing root, or move it aside before re-initializing |
 | `workspace.json — invalid` | Check for JSON syntax errors in the file |
-| `agents/ directory — not found` | Run `oacp init <project>` to recreate the workspace |
+| `agents/ directory — not found` | Restore each intended agent with `oacp agent add <project> <agent>` |
 
 ### Inbox Health
 

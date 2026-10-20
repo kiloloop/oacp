@@ -25,7 +25,7 @@ $OACP_HOME/
 ```
 
 - **Global profiles** (`agents/<name>/profile.yaml`) form the instance registry.
-  `oacp add-agent` and `oacp init --agents` create them and append project
+  `oacp agent add` and `oacp init --agents` create them and append project
   memberships without replacing existing identity fields.
 - **Project cards** (`projects/<project>/agents/<name>/agent_card.yaml`) carry project-specific overrides — permissions, skills, routing rules — and are the authoritative resolved identity for that project.
 - **Status files** (`status.yaml`) remain separate; they track dynamic session state, not static identity.

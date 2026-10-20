@@ -9,9 +9,11 @@ summary:
   non_blocking_count: 0
 findings:
   - id: "F-001"
+    # Optional stable cross-round identity: hash of file + rule class or normalized title
+    # fingerprint: ""
     severity: "P1"
     blocking: true
-    status: "open"
+    status: "open"           # the author closes it as fixed | wont_fix (the review workflow's validator reads these)
     area: "code"
     file: ""
     line: null

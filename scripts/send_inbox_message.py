@@ -734,12 +734,7 @@ def send_message(
     )
 
     # Validate
-    advisories: List[Dict[str, str]] = []
-    errors = validate_message_dict(msg, advisories=advisories)
-    warnings.extend(
-        f"ADVISORY: {finding['code']}: {finding['detail']}"
-        for finding in advisories
-    )
+    errors = validate_message_dict(msg)
     if errors:
         raise ValueError("; ".join(errors))
 
@@ -820,21 +815,8 @@ def main() -> int:
             "Card runtime fallback checks OACP_RUNTIME and runtime-specific environment markers.\n"
             "Suggested channels: brainstorm, review, deploy, incident\n"
             "(Channels are free-text — these are hints, not enforced.)\n\n"
-            "Handoff body schema (--type handoff):\n"
-            "  The owning workflow expects a structured YAML packet with these fields:\n"
-            "  Schema findings are advisory in 0.5.2; kernel checks leave in 0.5.3.\n"
-            "  The owning skill validates the body before side effects.\n"
-            "    source_agent          Originating agent name\n"
-            "    target_agent          Receiving agent name (must differ from source)\n"
-            "    intent                Description of what is being handed off\n"
-            "    artifacts_to_review   Non-empty list of artifacts (PRs, files, etc.)\n"
-            "    definition_of_done    Non-empty list of completion criteria\n"
-            "    context_bundle        Map with required sub-fields:\n"
-            "      files_touched         Non-empty list of files modified\n"
-            "      decisions_made        Non-empty list of decisions\n"
-            "      blockers_hit          Non-empty list of blockers encountered\n"
-            "      suggested_next_steps  Non-empty list of next steps\n"
-            "  Use --body-file to pass a YAML file. See templates/handoff_packet.template.yaml."
+            "Handoff bodies are validated by their owning workflow before side effects.\n"
+            "Use --body-file with the handoff format supplied by the owning workflow."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -911,7 +893,7 @@ def main() -> int:
         help=(
             "Sign this message (detached-JWS auth trailer). Default follows the "
             "sender's signing.sign_messages config knob (off). Requires a key "
-            "from `oacp key gen` and the 'oacp-cli[crypto]' extra."
+            "from `oacp trust keygen` and the 'oacp-cli[crypto]' extra."
         ),
     )
     parser.add_argument("--suffix", default=None, help="Filename disambiguator suffix")

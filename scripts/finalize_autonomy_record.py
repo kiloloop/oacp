@@ -17,6 +17,10 @@ Exit codes: 0 written (or validated) · 2 usage/validation error ·
 re-authorization flow applies before successful completion can be written.
 On ``--final-state done --replace``, scalar-pause derivation reads the stored
 checkpoint first; pass explicit actual_minutes when also changing that pause.
+A ``--replace`` whose corrected actuals would breach on a record that is
+already closed is refused without writing — the record stays as finalized and
+the breaching fields are named; scope that grew after completion is a fresh
+admission or a linked supersession.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from __future__ import annotations
 import argparse
 import copy
 import datetime as dt
+import hashlib
 import json
 import math
 import re
@@ -47,11 +52,13 @@ from autonomy_gate import (
     PINNED_COMPLETION_KINDS,
     REAUTH_GOVERNING_CHANNELS,
     _actual_side_effects,
+    envelope_covers_effect,
     evaluate_threshold_checkpoint,
     evaluation_identity,
     load_yaml_strict,
     normalize_continuation_scope,
     receiver_policy,
+    resolve_runtime_block,
 )
 from record_autonomy_outcome import GRANT_DECISIONS, HUMAN_DECISIONS
 
@@ -134,6 +141,7 @@ FINDING_SEVERITIES = {
     "invalid_cancellation": "error",
     "invalid_clock_adjustments": "error",
     "invalid_pause_intervals": "error",
+    "checkpoint_clear_precedes_pause": "error",
 }
 
 # Writer-era marker for checkpoint and non-supersession terminal receipts.
@@ -184,6 +192,27 @@ def _stamp_finalizer_provenance(result: Dict[str, Any]) -> None:
             "result.finalizer conflicts with the canonical finalizer provenance"
         )
     result["finalizer"] = dict(FINALIZER_PROVENANCE)
+
+
+def _stamp_terminal_runtime(
+    result: Dict[str, Any],
+    record: Dict[str, Any],
+    runtime: Optional[Dict[str, Any]],
+) -> None:
+    """Stamp the model and effort level serving the receiver at completion.
+
+    ``result.runtime`` resolves exactly like the admission-time ``runtime``
+    block — the caller's explicit values first, then the session's exported
+    signals, else an explicit unknown — and is never backfilled from the
+    admission block: a model or effort that changed between admission and
+    completion reads as two different stamps.
+    """
+    supplied = {
+        key: value for key, value in (runtime or {}).items() if value is not None
+    }
+    result["runtime"] = resolve_runtime_block(
+        supplied, receiver=str(record.get("receiver") or "")
+    )
 
 
 def _require_work_start(
@@ -373,6 +402,83 @@ def _pause_intervals(
     return intervals
 
 
+def _answer_floor_utc(record: Dict[str, Any]) -> Optional[str]:
+    """The latest decision the record carries in any form, or ``None``.
+
+    A prospective answer (one decided before the pause it answers) must be
+    strictly newer than this: the stored checkpoint answer whatever its
+    disposition, every retired pause's governing decision, and a recorded
+    human outcome. Anything at or before it is an answer the record already
+    arbitrated, re-presented. The one exclusion is a void clear — a stored
+    ``resumed`` answer stamped before the pause it names
+    (``_clear_precedes_pause``) — because re-presenting exactly that answer
+    is how such a record is repaired.
+    """
+    result = _result_block(record)
+    checkpoint = _checkpoint_block(record)
+    stamps: List[Optional[dt.datetime]] = []
+    reauth = checkpoint.get("reauthorization")
+    if isinstance(reauth, dict) and not (
+        reauth.get("disposition") == "resumed" and _clear_precedes_pause(checkpoint)
+    ):
+        stamps.append(_parse_utc(reauth.get("decided_at_utc")))
+    entries = result.get("pause_intervals")
+    for entry in entries if isinstance(entries, list) else []:
+        if isinstance(entry, dict):
+            stamps.append(_parse_utc(entry.get("decided_at_utc")))
+    outcome = result.get("human_outcome")
+    if isinstance(outcome, dict) and outcome.get("recorded") is True:
+        stamps.append(_parse_utc(outcome.get("decided_at_utc")))
+    known = [stamp for stamp in stamps if stamp is not None]
+    if not known:
+        return None
+    return max(known).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _clear_precedes_pause(checkpoint: Dict[str, Any]) -> bool:
+    """True when the recorded clear is stamped before the pause it names.
+
+    A writer that accepted an answer decided before the pause it answered
+    stored exactly this shape; the arbitration now records a prospective
+    scoped answer as a clear at the pause's own stamp and refuses the rest
+    at write time. Such a clear cleared nothing: reading it as one would
+    subtract a negative interval from the work clock, so every consumer
+    treats the pause as unanswered, read-back reports
+    ``checkpoint_clear_precedes_pause``, and the record stays answerable —
+    re-running ``--checkpoint`` with the same scoped answer records a
+    well-ordered clear. A resumed arbitration recorded without a clear
+    stamp cleared at its decision time.
+    """
+    reauth = checkpoint.get("reauthorization")
+    reauth = reauth if isinstance(reauth, dict) else {}
+    cleared = _parse_utc(
+        reauth.get("cleared_paused_at_utc") or reauth.get("decided_at_utc")
+    )
+    paused = _parse_utc(checkpoint.get("paused_at_utc"))
+    return cleared is not None and paused is not None and cleared < paused
+
+
+def _governing_checkpoint_answer(
+    checkpoint: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """The checkpoint arbitration that itself cleared the pause, or ``None``.
+
+    Only a ``resumed`` arbitration whose clear is stamped at or after the
+    pause it names governs. One stored with a clear before its pause
+    (``_clear_precedes_pause``) cleared nothing, and a pause the human
+    outcome answered in its stead has no arbitration of its own — neither
+    is an answer the record carries with authority: its scope is no
+    budget and it cannot be re-presented against a later pause. The same
+    holds for an answer arbitrated stale, insufficient or declined.
+    """
+    reauth = checkpoint.get("reauthorization")
+    if not isinstance(reauth, dict) or reauth.get("disposition") != "resumed":
+        return None
+    if _clear_precedes_pause(checkpoint):
+        return None
+    return reauth
+
+
 def _effective_clear(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """The governing answer that cleared the current pause, or ``None``.
 
@@ -387,7 +493,9 @@ def _effective_clear(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     pause clear nothing. Only the governing answer confers a clear: a
     clear timestamp the recorder retained beside a later ``declined``
     arbitration is history, and a declined answer recorded at or after a
-    human outcome withdraws that outcome's clear.
+    human outcome withdraws that outcome's clear. A recorded clear stamped
+    before the pause it names (``_clear_precedes_pause``) is likewise no
+    clear — the pause reads as unanswered rather than as negative work time.
     """
     checkpoint = result.get("threshold_checkpoint")
     checkpoint = checkpoint if isinstance(checkpoint, dict) else {}
@@ -396,11 +504,12 @@ def _effective_clear(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     declined = (
         reauth.get("disposition") == "declined" or reauth.get("decision") == "declined"
     )
-    if reauth.get("disposition") == "resumed" and reauth.get("cleared_paused_at_utc"):
+    governing = _governing_checkpoint_answer(checkpoint)
+    if governing is not None and governing.get("cleared_paused_at_utc"):
         return {
-            "cleared_paused_at_utc": reauth["cleared_paused_at_utc"],
-            "channel": reauth.get("channel"),
-            "decided_at_utc": reauth.get("decided_at_utc"),
+            "cleared_paused_at_utc": governing["cleared_paused_at_utc"],
+            "channel": governing.get("channel"),
+            "decided_at_utc": governing.get("decided_at_utc"),
         }
     if checkpoint.get("breached") is not True:
         return None
@@ -651,11 +760,10 @@ def _checkpoint_resolved(record: Dict[str, Any]) -> bool:
     checkpoint = _checkpoint_block(record)
     if checkpoint.get("breached") is not True:
         return True
-    reauth = checkpoint.get("reauthorization")
-    if isinstance(reauth, dict) and reauth.get("disposition") == "resumed":
+    if _governing_checkpoint_answer(checkpoint) is not None:
         return True
     # A receiver-side human ruling recorded AFTER the checkpoint pause
-    # (via `oacp autonomy-outcome` on the checkpoint-paused record) also
+    # (via `oacp autonomy outcome` on the checkpoint-paused record) also
     # clears it: the recorder refuses checkpoint records without a
     # paused_at_utc stamp, so a recorded outcome whose decision time is
     # not before the pause is a checkpoint answer, not the admission one.
@@ -664,6 +772,99 @@ def _checkpoint_resolved(record: Dict[str, Any]) -> bool:
 
 
 _EVALUATION_ID_RE = re.compile(r"^eval-[0-9a-f]{16}$")
+
+
+def _message_supersession_error(record: Dict[str, Any]) -> Optional[str]:
+    """Validate the distinct-message receipt without treating it as authority."""
+    result = _result_block(record)
+    receipt = result.get("superseded_by_message")
+    if not isinstance(receipt, dict):
+        return "missing message supersession receipt"
+    if record.get("superseded_by_evaluation_id") is not None:
+        return "message and evaluation supersession cannot be combined"
+    if (record.get("schema_version") != AUTONOMY_AUDIT_SCHEMA_VERSION
+            or record.get("decision") != "paused" or record.get("message_type") != "review_request"
+            or result.get("completion_kind") != "admission_paused"
+            or _human_outcome_recorded(record) or result.get("work_started_at_utc") is not None
+            or result.get("actual_minutes") not in (None, 0)
+            or result.get("actual_files_touched") not in (None, 0)
+            or result.get("predicted_risk_materialized") is True
+            or _checkpoint_block(record).get("evaluated") is True
+            or result.get("reply_message_id") or result.get("artifacts")):
+        return "message supersession requires a never-admitted review request without work evidence"
+    required = {"message_id", "message_sha256", "sender", "receiver", "conversation_id",
+                "source_path", "supersedes_message_id", "disposition_at_utc"}
+    if set(receipt) != required:
+        return "message supersession receipt has invalid fields"
+    if (not isinstance(receipt["message_id"], str) or not receipt["message_id"].startswith("msg-")
+            or receipt["message_id"] == record.get("message_id")
+            or receipt["supersedes_message_id"] != record.get("message_id")
+            or receipt["sender"] != record.get("sender")
+            or receipt["receiver"] != record.get("receiver")
+            or not receipt["conversation_id"]
+            or receipt["conversation_id"] != record.get("conversation_id")
+            or not isinstance(receipt["source_path"], str) or not receipt["source_path"]
+            or not isinstance(receipt["message_sha256"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", receipt["message_sha256"]) is None
+            or _parse_utc(receipt["disposition_at_utc"]) is None
+            or receipt["disposition_at_utc"] != result.get("completed_at_utc")):
+        return "message supersession receipt identity, hash or timestamp mismatch"
+    return None
+
+
+def _finalize_message_supersession(audit_path, record, message_path, now_utc):
+    from autonomy_gate import _StrictYamlLoader
+    from message_verify import receiver_intake_context, read_verified_inbox_message, read_message_bounded
+    from validate_message import validate_message_dict
+
+    audit = audit_path.resolve()
+    if (len(audit.parents) < 7 or audit.parent.name != "autonomy_decisions"
+            or audit.parents[1].name != "audit" or audit.parents[3].name != "agents"
+            or audit.parents[5].name != "projects" or audit.parents[2].name != record.get("receiver")):
+        raise ValueError("message supersession requires a canonical receiver audit path")
+    receiver_dir = audit.parents[2]
+    path = Path(message_path).resolve()
+    inbox = receiver_dir / "inbox"
+    if path.parent not in (inbox, inbox / "archive") or not path.is_file():
+        raise ValueError("replacement must be a message in this receiver's inbox or archive")
+    context = receiver_intake_context(receiver_dir, receiver=record["receiver"],
+                                      project=audit.parents[4].name, oacp_dir=str(audit.parents[6]))
+    if context["policy_error"] or context["mode"] == "off":
+        raise ValueError("message supersession requires an authorized verification context")
+    # This terminal receipt requires verified sender evidence even in warn mode.
+    context = dict(context, mode="enforce")
+    def parse_snapshot(raw, source):
+        message = yaml.load(raw.decode("utf-8"), Loader=_StrictYamlLoader)
+        if not isinstance(message, dict):
+            raise ValueError("replacement must contain a message mapping")
+        return message
+
+    snapshot = read_verified_inbox_message(path, context, parse_snapshot)
+    if snapshot["held"] or snapshot["error"] or not snapshot["data"]:
+        raise ValueError("replacement message is not verified and parseable")
+    message = snapshot["data"]
+    errors = validate_message_dict(message)
+    if errors:
+        raise ValueError("replacement message is schema-invalid")
+    if message["type"] != "review_request":
+        raise ValueError("replacement must be a review request")
+    result = _result_block(record)
+    if _is_closed(record) or result.get("final_state") != "paused":
+        raise ValueError("message supersession requires a live paused admission")
+    updated = copy.deepcopy(record)
+    completed = now_utc or utc_now_iso()
+    updated["result"].update(final_state="superseded", completed_at_utc=completed,
+        superseded_by_message={"message_id": message["id"],
+            "message_sha256": hashlib.sha256(snapshot["raw"]).hexdigest(),
+            "sender": message["from"], "receiver": message["to"],
+            "conversation_id": message.get("conversation_id"), "source_path": str(path),
+            "supersedes_message_id": record["message_id"], "disposition_at_utc": completed})
+    error = _message_supersession_error(updated)
+    if error:
+        raise ValueError(error)
+    if read_message_bounded(path) != snapshot["raw"]:
+        raise ValueError("replacement message changed during supersession")
+    return updated, False
 
 
 def validate_audit_record(
@@ -681,6 +882,11 @@ def validate_audit_record(
     state = result.get("final_state")
 
     if state == "superseded":
+        if "superseded_by_message" in result:
+            error = _message_supersession_error(record)
+            if error:
+                findings.append(_finding("superseded_missing_successor", f"{source}: {error}"))
+            return findings
         # Closed history: authority transferred to the successor, and the
         # record left the live corpus — collectors and duplicate detection
         # exclude it, and legacy off-enum vocabulary preserved inside it is
@@ -758,6 +964,25 @@ def validate_audit_record(
         _pause_intervals(record, result.get("work_started_at_utc"), clock_endpoint)
     except ValueError as exc:
         findings.append(_finding("invalid_pause_intervals", f"{source}: {exc}"))
+    stored_reauth = checkpoint.get("reauthorization")
+    stored_reauth = stored_reauth if isinstance(stored_reauth, dict) else {}
+    if (
+        checkpoint.get("breached") is True
+        and stored_reauth.get("disposition") == "resumed"
+        and _clear_precedes_pause(checkpoint)
+        and _effective_clear(result) is None
+    ):
+        # The stuck shape: the only recorded answer claims a clear earlier
+        # than the pause it names, and nothing else answered that pause.
+        findings.append(_finding(
+            "checkpoint_clear_precedes_pause",
+            f"{source}: threshold_checkpoint.reauthorization clears the pause at "
+            f"{stored_reauth.get('cleared_paused_at_utc') or stored_reauth.get('decided_at_utc')} "
+            f"before it was stamped at {checkpoint.get('paused_at_utc')} — the "
+            "clear is void and the pause reads as unanswered; re-run --checkpoint "
+            "with the scoped answer (recorded at the pause stamp) or a fresh "
+            "answer to repair it",
+        ))
     if state == "cancelled":
         findings.extend(
             _finding("invalid_cancellation", f"{source}: {detail}")
@@ -1519,8 +1744,17 @@ def apply_checkpoint(
         supplied_minutes = actuals["actual_minutes"]
         if isinstance(supplied_minutes, int) and abs(supplied_minutes - derived_minutes) > 1:
             raise ValueError("actual_minutes_inconsistent: checkpoint differs from its work clock")
+    # The record's own standing answer — the checkpoint arbitration that
+    # itself cleared the current pause, with whatever durable scope it
+    # granted — may be re-presented against a new pause. A pause the
+    # human-outcome route answered instead leaves no arbitration to stand
+    # on, and one stamped before its pause cleared nothing: neither lends
+    # an earlier answer authority, so any other answer decided before the
+    # new pause is refused by the arbitration.
+    standing = _governing_checkpoint_answer(_checkpoint_block(record))
     checkpoint = evaluate_threshold_checkpoint(
-        envelope, _grant_result(updated), actuals, policy=policy
+        envelope, _grant_result(updated), actuals, policy=policy,
+        standing=standing, answer_floor_utc=_answer_floor_utc(record),
     )
     result = updated.setdefault("result", {})
     breached = checkpoint.get("breached") is True
@@ -1567,7 +1801,10 @@ def _reconcile_resolved_checkpoint(
     complete terminal ``side_effects_actual`` map is persisted, and a
     still-paused action reconciles to ``resumed_after_reauthorization``
     (the six paused-terminal records in the audit corpora are exactly this
-    missed reconciliation).
+    missed reconciliation). Scope is read only from the arbitration that
+    governs the pause: an answer that did not clear it — stamped before
+    the pause, or arbitrated stale, insufficient or declined beside the
+    human outcome that did — is no budget.
     """
     result = updated.setdefault("result", {})
     checkpoint = result.setdefault("threshold_checkpoint", {})
@@ -1576,26 +1813,33 @@ def _reconcile_resolved_checkpoint(
     grant = _grant_result(updated)
     grant_scope = grant.get("scope") if grant.get("decision") == "accepted" else None
     grant_scope = grant_scope if isinstance(grant_scope, dict) else {}
-    reauth = checkpoint.get("reauthorization")
-    reauth = reauth if isinstance(reauth, dict) else {}
+    reauth = _governing_checkpoint_answer(checkpoint) or {}
     reauth_scope = reauth.get("scope")
     reauth_scope = reauth_scope if isinstance(reauth_scope, dict) else {}
     paused_effects = checkpoint.get("side_effects_actual")
     paused_effects = paused_effects if isinstance(paused_effects, dict) else {}
 
+    closed = _is_closed(updated)
     final_effects = _actual_side_effects(actuals)
     raw_effects = actuals.get("side_effects_actual") or {}
     uncovered = sorted(
         key
         for key, realized in final_effects.items()
         if realized
-        and envelope.get(key) is not True
+        and not envelope_covers_effect(envelope, key)
         and grant_scope.get(key) is not True
         and reauth_scope.get(key) is not True
         and paused_effects.get(key) is not True
     )
     if uncovered:
         fields = ", ".join(f"side_effects_actual.{key}" for key in uncovered)
+        if closed:
+            raise ValueError(
+                f"--replace refused: the corrected actuals realize {fields} "
+                "beyond what this closed record resolved — nothing written, "
+                "the record stays as finalized; scope that grew after "
+                "completion is a fresh admission or a linked supersession"
+            )
         raise ValueError(
             f"terminal actuals realize {fields} beyond the resolved "
             "re-authorization — record a fresh checkpoint (--checkpoint "
@@ -1638,6 +1882,12 @@ def _reconcile_resolved_checkpoint(
             and not isinstance(final_value, bool)
             and final_value > bound
         ):
+            if closed:
+                raise ValueError(
+                    f"--replace refused: terminal {key} {final_value} exceeds "
+                    f"the {basis} ({bound}) on a closed record — nothing "
+                    "written, the record stays as finalized"
+                )
             raise ValueError(
                 f"terminal {key} {final_value} exceeds the {basis} "
                 f"({bound}) — record a fresh checkpoint before finalizing"
@@ -1665,19 +1915,28 @@ def finalize_audit_record(
     reply_message_id: Optional[str] = None,
     artifacts: Optional[Sequence[str]] = None,
     superseded_by: Optional[str] = None,
+    superseded_by_message: Optional[Path] = None,
     cancellation: Optional[Dict[str, Any]] = None,
     replace: bool = False,
     now_utc: Optional[str] = None,
     policy: Optional[Dict[str, Any]] = None,
+    runtime: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], bool]:
     """Return the finalized record; raises on any integrity violation.
 
     The second return value is True when a terminal checkpoint breached
     and the record was left checkpoint-paused instead of terminal.
+    ``runtime`` carries the caller's explicit serving ``model`` / ``effort``
+    for the terminal stamp; the session's exported signals fill what it
+    leaves out.
     """
     if final_state not in TERMINAL_FINAL_STATES:
         choices = ", ".join(sorted(TERMINAL_FINAL_STATES))
         raise ValueError(f"final_state must be one of: {choices}")
+    if superseded_by_message is not None:
+        if final_state != "superseded" or superseded_by is not None or actuals or reply_message_id or artifacts or cancellation or replace:
+            raise ValueError("message supersession accepts only --final-state superseded and its replacement message path")
+        return _finalize_message_supersession(audit_path, record, superseded_by_message, now_utc)
     schema = record.get("schema_version")
     if schema not in {1, AUTONOMY_AUDIT_SCHEMA_VERSION}:
         raise ValueError("audit.schema_version must be 1 or 2")
@@ -1784,7 +2043,7 @@ def finalize_audit_record(
         if record.get("decision") == "paused" and not _human_outcome_recorded(record):
             raise ValueError(
                 "terminal ⇒ not paused: a paused admission needs a recorded "
-                "human outcome (oacp autonomy-outcome) before it can be done"
+                "human outcome (oacp autonomy outcome) before it can be done"
             )
         siblings = _live_siblings(audit_path, record)
         if siblings:
@@ -1799,9 +2058,23 @@ def finalize_audit_record(
         prior_breach = _checkpoint_block(record).get("breached") is True
         if prior_breach:
             if not _checkpoint_resolved(record):
+                detail = ""
+                stored = _checkpoint_block(record)
+                if _clear_precedes_pause(stored):
+                    stored_reauth = stored.get("reauthorization") or {}
+                    detail = (
+                        " — its recorded clear at "
+                        f"{stored_reauth.get('cleared_paused_at_utc')} is stamped "
+                        f"before the pause at {stored.get('paused_at_utc')} and "
+                        "clears nothing; re-run --checkpoint presenting the "
+                        "scoped answer (a prospective grant clears at the pause "
+                        "stamp) or record a fresh answer with oacp autonomy "
+                        "outcome, then finalize"
+                    )
                 raise ValueError(
                     "terminal ⇒ not paused: the breached checkpoint has no "
                     "resumed re-authorization or post-pause human outcome"
+                    + detail
                 )
             _reconcile_resolved_checkpoint(updated, actuals)
         elif isinstance(updated.get("scope_envelope"), dict):
@@ -1813,6 +2086,22 @@ def finalize_audit_record(
                 policy=policy, terminal=True,
             )
             if checkpoint_paused:
+                if replace and _is_closed(record):
+                    # A breach at --replace time on closed history has no
+                    # answerable pause: the recorder and --checkpoint both
+                    # refuse closed records, so writing the paused shape
+                    # here would leave the record paused and closed with no
+                    # tool exit. Fail closed and name what would breach.
+                    breaching = _checkpoint_block(updated).get("breached_fields") or []
+                    fields = ", ".join(str(field) for field in breaching)
+                    raise ValueError(
+                        f"--replace refused: the corrected actuals would breach "
+                        f"{fields} on a record closed at "
+                        f"{result.get('completed_at_utc')} — nothing written, the "
+                        f"record stays {current_state}; scope that grew after "
+                        "completion is a fresh admission or a linked supersession, "
+                        "never a post-completion pause"
+                    )
                 return updated, True
         else:
             result_block = updated.setdefault("result", {})
@@ -1857,6 +2146,7 @@ def finalize_audit_record(
                 result_block[key] = actuals[key]
     if final_state != "superseded":
         _stamp_finalizer_provenance(result_block)
+        _stamp_terminal_runtime(result_block, updated, runtime)
     if reply_message_id is not None:
         result_block["reply_message_id"] = reply_message_id
     else:
@@ -1971,6 +2261,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--reply-message-id")
     parser.add_argument("--artifact", action="append", dest="artifacts")
     parser.add_argument("--completed-at")
+    parser.add_argument(
+        "--model",
+        help="model serving the receiver at completion (default: OACP_RUNTIME_MODEL)",
+    )
+    parser.add_argument(
+        "--effort",
+        help="effort level at completion (default: OACP_RUNTIME_EFFORT)",
+    )
     parser.add_argument("--cancelled-by", choices=("human", "sender"))
     parser.add_argument("--cancelled-at", help="cancellation time (YYYY-MM-DDTHH:MM:SSZ)")
     parser.add_argument("--reason", help="optional cancellation explanation")
@@ -1982,6 +2280,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--superseded-by",
         help="evaluation_id of the superseding evaluation (final_state superseded)",
     )
+    parser.add_argument("--superseded-by-message", type=Path,
+                        help="Attest sender supersession using this verified replacement review-request file")
     parser.add_argument(
         "--sweep",
         action="store_true",
@@ -1993,6 +2293,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.superseded_by_message is not None and (args.checkpoint or args.validate or args.started_at):
+            raise ValueError("message supersession cannot combine with checkpoint, validation or work-start options")
+        if (args.model or args.effort) and args.final_state not in {"done", "error", "cancelled"}:
+            raise ValueError(
+                "--model and --effort stamp the serving runtime at completion; "
+                "they apply to --final-state done, error or cancelled only"
+            )
         cancellation = None
         if args.final_state == "cancelled":
             cancellation = {
@@ -2055,12 +2362,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     reply_message_id=args.reply_message_id,
                     artifacts=args.artifacts,
                     superseded_by=args.superseded_by,
+                    superseded_by_message=args.superseded_by_message,
                     cancellation=cancellation,
                     replace=args.replace,
                     now_utc=measured_at_utc,
                     policy=policy,
+                    runtime={"model": args.model, "effort": args.effort},
                 )
             if not args.dry_run:
+                receipt = _result_block(updated).get("superseded_by_message")
+                if args.superseded_by_message is not None:
+                    from message_verify import read_message_bounded
+                    current = read_message_bounded(Path(receipt["source_path"]))
+                    if hashlib.sha256(current).hexdigest() != receipt["message_sha256"]:
+                        raise ValueError("replacement message changed before audit commit")
                 atomic_replace_yaml(args.audit_file, updated)
 
         result = updated.get("result", {})

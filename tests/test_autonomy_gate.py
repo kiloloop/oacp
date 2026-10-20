@@ -25,19 +25,25 @@ from autonomy_gate import (  # noqa: E402
     BREACH_SUB_BASES,
     PINNED_COMPLETION_KINDS,
     PINNED_REASON_CODES,
+    RUNTIME_EFFORT_ENV_VAR,
     RUNTIME_MODEL_ENV_VAR,
+    TaskProfileError,
     _base_result,
+    _profile_declaration_errors,
     admission_ledger_codes,
     canonical_policy_sha256,
+    envelope_covers_effect,
     evaluate_autonomy,
     evaluate_threshold_checkpoint,
     main as autonomy_main,
     normalize_continuation_scope,
+    normalize_runtime_effort,
     normalize_runtime_model,
     normalize_scope_envelope,
     resolve_runtime_block,
     write_audit_record,
 )
+from finalize_autonomy_record import validate_audit_record  # noqa: E402
 
 
 FIXTURE_ROOT = Path(__file__).parent / "conformance" / "autonomy"
@@ -1908,7 +1914,7 @@ def test_resolve_runtime_block_reads_env_signal() -> None:
     runtime = resolve_runtime_block(
         None,
         "claude",
-        env={RUNTIME_MODEL_ENV_VAR: "Claude-Fable-5[1m]"},
+        env={RUNTIME_MODEL_ENV_VAR: "Claude-Fable-5[1m]", RUNTIME_EFFORT_ENV_VAR: "xhigh"},
     )
     assert runtime == {
         "agent": "claude",
@@ -1916,7 +1922,56 @@ def test_resolve_runtime_block_reads_env_signal() -> None:
         "model_source": f"env:{RUNTIME_MODEL_ENV_VAR}",
         "model_context": "1m",
         "model_raw": "Claude-Fable-5[1m]",
+        "effort": "xhigh",
+        "effort_source": f"env:{RUNTIME_EFFORT_ENV_VAR}",
     }
+
+
+def test_normalize_runtime_effort_pins_the_vocabulary() -> None:
+    assert normalize_runtime_effort(" High ") == "high"
+    assert normalize_runtime_effort("MAX") == "max"
+    assert normalize_runtime_effort("ultra") is None
+    assert normalize_runtime_effort("80") is None
+    assert normalize_runtime_effort(None) is None
+
+
+def test_resolve_runtime_block_caller_effort_wins_over_env() -> None:
+    runtime = resolve_runtime_block(
+        {"effort": "High"}, "codex", env={RUNTIME_EFFORT_ENV_VAR: "low"}
+    )
+    assert runtime["effort"] == "high"
+    assert runtime["effort_source"] == "caller"
+    assert runtime["effort_raw"] == "High"
+    assert "effort_unknown_reason" not in runtime
+
+
+def test_resolve_runtime_block_off_vocabulary_effort_is_explicit_unknown() -> None:
+    # A numeric or vendor-specific level is kept as raw text, never coerced
+    # onto the nearest pinned level and never dropped silently.
+    runtime = resolve_runtime_block(None, "claude", env={RUNTIME_EFFORT_ENV_VAR: "80"})
+    assert runtime["effort"] is None
+    assert runtime["effort_source"] == f"env:{RUNTIME_EFFORT_ENV_VAR}"
+    assert runtime["effort_raw"] == "80"
+    assert "xhigh" in runtime["effort_unknown_reason"]
+
+
+def test_resolve_runtime_block_explicit_unknown_effort_without_signal() -> None:
+    runtime = resolve_runtime_block(None, "claude", env={})
+    assert runtime["effort"] is None
+    assert runtime["effort_source"] is None
+    assert runtime["effort_unknown_reason"]
+    assert "effort_raw" not in runtime
+
+
+def test_resolve_runtime_block_drops_stale_effort_provenance() -> None:
+    runtime = resolve_runtime_block(
+        {"effort": "low", "effort_raw": "stale", "effort_unknown_reason": "stale"},
+        "codex",
+        env={},
+    )
+    assert runtime["effort"] == "low"
+    assert "effort_raw" not in runtime
+    assert "effort_unknown_reason" not in runtime
 
 
 def test_resolve_runtime_block_caller_value_wins_over_env() -> None:
@@ -1966,6 +2021,7 @@ def test_written_record_stamps_normalized_env_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(RUNTIME_MODEL_ENV_VAR, "Claude-Fable-5[1m]")
+    monkeypatch.setenv(RUNTIME_EFFORT_ENV_VAR, "XHigh")
     audit_dir = tmp_path / "audit" / "autonomy_decisions"
     assert autonomy_main([
         "--config",
@@ -1984,6 +2040,9 @@ def test_written_record_stamps_normalized_env_model(
     assert runtime["model_context"] == "1m"
     assert runtime["model_source"] == f"env:{RUNTIME_MODEL_ENV_VAR}"
     assert runtime["model_raw"] == "Claude-Fable-5[1m]"
+    assert runtime["effort"] == "xhigh"
+    assert runtime["effort_source"] == f"env:{RUNTIME_EFFORT_ENV_VAR}"
+    assert runtime["effort_raw"] == "XHigh"
 
 
 def test_written_record_never_carries_silent_null_model(
@@ -2205,30 +2264,173 @@ def test_reauth_sender_cannot_grant_merges_pr() -> None:
     assert checkpoint["action"] == "paused_for_reauthorization"
 
 
-def test_reauth_boundary_action_grant_is_durable_across_pauses() -> None:
-    # A stale answer cannot clear a numeric breach (per-checkpoint
-    # consumption), but the boundary action it granted stays granted for
-    # the remainder of the task.
-    checkpoint = evaluate_threshold_checkpoint(
+def _standing_answer(decided_at: str, scope: Dict[str, Any]) -> Dict[str, Any]:
+    """The answer as the record recorded it when it cleared an earlier pause."""
+    first = evaluate_threshold_checkpoint(
         _envelope(),
         {"present": False},
         {
             "actual_minutes": 1,
             "actual_files_touched": 0,
-            "paused_at_utc": "2026-05-12T13:10:00Z",
+            "paused_at_utc": "2026-05-12T12:30:00Z",
             "declared_intent_fields": ["task_profile.merges_pr"],
             "reauthorization": {
                 "receiver_human": {
                     "decision": "approved",
-                    "decided_at_utc": "2026-05-12T12:50:00Z",
-                    "scope": {"merges_pr": True},
+                    "decided_at_utc": decided_at,
+                    "scope": scope,
                 },
             },
         },
         policy=_REAUTH_POLICY,
     )
+    assert first["reauthorization"]["disposition"] == "resumed"
+    return first["reauthorization"]
+
+
+def _later_pause_actuals(decided_at: str = "2026-05-12T12:50:00Z") -> Dict[str, Any]:
+    return {
+        "actual_minutes": 1,
+        "actual_files_touched": 0,
+        "paused_at_utc": "2026-05-12T13:10:00Z",
+        "declared_intent_fields": ["task_profile.merges_pr"],
+        "reauthorization": {
+            "receiver_human": {
+                "decision": "approved",
+                "decided_at_utc": decided_at,
+                "scope": {"merges_pr": True},
+            },
+        },
+    }
+
+
+def test_reauth_boundary_action_grant_is_durable_across_pauses() -> None:
+    # A stale answer cannot clear a numeric breach (per-checkpoint
+    # consumption), but the boundary action it granted stays granted for
+    # the remainder of the task: re-presented as the record recorded it, it
+    # clears a later pause at that pause's own stamp — the answer predates
+    # the pause, so nothing waited and the clear never precedes it.
+    standing = _standing_answer("2026-05-12T12:50:00Z", {"merges_pr": True})
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(),
+        {"present": False},
+        _later_pause_actuals(),
+        policy=_REAUTH_POLICY,
+        standing=standing,
+    )
     assert checkpoint["reauthorization"]["disposition"] == "resumed"
     assert checkpoint["action"] == "resumed_after_reauthorization"
+    assert checkpoint["reauthorization"]["cleared_paused_at_utc"] == (
+        "2026-05-12T13:10:00Z"
+    )
+
+
+def test_reauth_scoped_answer_before_pause_is_prospective() -> None:
+    # The human granted the boundary action before the breach was realized
+    # and the record carries no earlier answer: a prospective grant. It
+    # clears the pause at the pause's own stamp (nothing waited), keeps its
+    # decision time, and never stores a clear earlier than its pause.
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(),
+        {"present": False},
+        _later_pause_actuals(),
+        policy=_REAUTH_POLICY,
+    )
+    reauth = checkpoint["reauthorization"]
+    assert reauth["disposition"] == "resumed"
+    assert checkpoint["action"] == "resumed_after_reauthorization"
+    assert reauth["decided_at_utc"] == "2026-05-12T12:50:00Z"
+    assert reauth["cleared_paused_at_utc"] == "2026-05-12T13:10:00Z"
+
+
+def test_reauth_scoped_numeric_budget_before_pause_is_prospective() -> None:
+    # The issue shape: a files overrun foreseen mid-task, a scoped budget
+    # granted in session, the breach realized minutes later.
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(expected_files_touched=3),
+        {"present": False},
+        {
+            "actual_minutes": 7,
+            "actual_files_touched": 4,
+            "paused_at_utc": "2026-05-12T12:44:18Z",
+            "reauthorization": {
+                "receiver_human": {
+                    "decision": "approved",
+                    "decided_at_utc": "2026-05-12T12:40:34Z",
+                    "scope": {"max_actual_minutes": 45, "max_actual_files_touched": 5},
+                },
+            },
+        },
+        policy=_REAUTH_POLICY,
+    )
+    reauth = checkpoint["reauthorization"]
+    assert checkpoint["breached_fields"] == ["actual_files_touched"]
+    assert reauth["disposition"] == "resumed"
+    assert reauth["decided_at_utc"] == "2026-05-12T12:40:34Z"
+    assert reauth["cleared_paused_at_utc"] == "2026-05-12T12:44:18Z"
+
+
+def test_reauth_scopeless_answer_before_pause_is_stale() -> None:
+    # A scope-less approval authorizes exactly the extent recorded at the
+    # pause it answers, which did not exist when it was decided: it covers
+    # nothing, the pause stays current, and no clear is stored.
+    actuals = _later_pause_actuals()
+    del actuals["reauthorization"]["receiver_human"]["scope"]
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(),
+        {"present": False},
+        actuals,
+        policy=_REAUTH_POLICY,
+    )
+    reauth = checkpoint["reauthorization"]
+    assert reauth["disposition"] == "stale"
+    assert reauth.get("cleared_paused_at_utc") is None
+    assert checkpoint["action"] != "resumed_after_reauthorization"
+
+
+def test_reauth_scoped_answer_newer_than_standing_is_prospective() -> None:
+    # A second grant decided after the recorded one and before the new pause
+    # is a new prospective answer, not the standing one re-presented.
+    standing = _standing_answer("2026-05-12T12:50:00Z", {"merges_pr": True})
+    actuals = _later_pause_actuals("2026-05-12T13:00:00Z")
+    actuals["reauthorization"]["receiver_human"]["scope"] = {
+        "merges_pr": True, "comments_on_github": True,
+    }
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(),
+        {"present": False},
+        actuals,
+        policy=_REAUTH_POLICY,
+        standing=standing,
+    )
+    reauth = checkpoint["reauthorization"]
+    assert reauth["disposition"] == "resumed"
+    assert reauth["decided_at_utc"] == "2026-05-12T13:00:00Z"
+    assert reauth["cleared_paused_at_utc"] == "2026-05-12T13:10:00Z"
+
+
+@pytest.mark.parametrize("drift", ["decided_at_utc", "scope", "actor"])
+def test_reauth_answer_before_pause_refused_when_older_than_or_unlike_standing(
+    drift: str,
+) -> None:
+    # An answer older than the standing one is history re-presented; one
+    # decided at the same moment but differing in scope or actor is neither
+    # the standing answer nor a newer grant.
+    standing = _standing_answer("2026-05-12T12:50:00Z", {"merges_pr": True})
+    if drift == "decided_at_utc":
+        standing["decided_at_utc"] = "2026-05-12T12:51:00Z"
+    elif drift == "scope":
+        standing["scope"] = dict(standing["scope"], comments_on_github=True)
+    else:
+        standing["actor"] = "someone-else"
+    with pytest.raises(ValueError, match="precedes the pause it answers"):
+        evaluate_threshold_checkpoint(
+            _envelope(),
+            {"present": False},
+            _later_pause_actuals(),
+            policy=_REAUTH_POLICY,
+            standing=standing,
+        )
 
 
 def test_reauth_fresh_scopeless_receiver_approval_clears_pause_extent() -> None:
@@ -4077,3 +4279,206 @@ def test_content_sensitivity_advisory_survives_earlier_hard_stops(
     assert [
         note for note in decision["logged_notes"] if note["code"] == "lexical_advisory_reply_only"
     ] == _REPLY_ONLY_NOTES
+
+
+# ── reply-only coverage of the realized reply ─────────────────────────────
+
+
+def test_envelope_covers_effect_reads_the_declared_flag_only() -> None:
+    assert envelope_covers_effect({"sends_oacp_reply_only": True}, "sends_oacp_reply") is True
+    assert envelope_covers_effect({"sends_oacp_reply_only": False}, "sends_oacp_reply") is False
+    # An explicit reply flag (grant-derived envelopes carry one) governs.
+    assert envelope_covers_effect(
+        {"sends_oacp_reply_only": True, "sends_oacp_reply": False}, "sends_oacp_reply",
+    ) is False
+    assert envelope_covers_effect({"sends_oacp_reply_only": True}, "merges_pr") is False
+    assert envelope_covers_effect({"merges_pr": True}, "merges_pr") is True
+    assert envelope_covers_effect(None, "sends_oacp_reply") is False
+
+
+def test_profile_declared_reply_lands_in_envelope_only_when_declared() -> None:
+    assert "sends_oacp_reply" not in _envelope()
+    assert _envelope(sends_oacp_reply=True)["sends_oacp_reply"] is True
+    assert _envelope(sends_oacp_reply="false")["sends_oacp_reply"] is False
+    with pytest.raises(TaskProfileError, match="sends_oacp_reply must be boolean"):
+        _envelope(sends_oacp_reply="yes")
+
+
+def test_checkpoint_profile_declared_reply_covers_realized_reply() -> None:
+    # An implementation leg that declares PR effects and the completion
+    # reply: realizing both at finalization stays within the envelope.
+    envelope = _envelope(
+        external_side_effects=True,
+        creates_or_updates_pr=True,
+        sends_oacp_reply=True,
+    )
+    assert envelope_covers_effect(envelope, "sends_oacp_reply") is True
+    checkpoint = evaluate_threshold_checkpoint(
+        envelope,
+        {"present": False},
+        {
+            "actual_minutes": 5,
+            "actual_files_touched": 1,
+            "side_effects_actual": {
+                "creates_or_updates_pr": True,
+                "sends_oacp_reply": True,
+            },
+        },
+    )
+    assert checkpoint["breached"] is False
+    assert checkpoint["declaration_errors"] == []
+
+
+def test_checkpoint_undeclared_reply_on_artifact_profile_still_breaches() -> None:
+    envelope = _envelope(external_side_effects=True, creates_or_updates_pr=True)
+    checkpoint = evaluate_threshold_checkpoint(
+        envelope,
+        {"present": False},
+        {
+            "actual_minutes": 5,
+            "actual_files_touched": 1,
+            "side_effects_actual": {"sends_oacp_reply": True},
+        },
+    )
+    assert checkpoint["breached_fields"] == ["side_effects_actual.sends_oacp_reply"]
+
+
+def test_declared_reply_false_beside_reply_only_is_a_declaration_error() -> None:
+    envelope = _envelope(sends_oacp_reply_only=True, sends_oacp_reply=False)
+    assert _profile_declaration_errors(envelope) == ["task_profile.sends_oacp_reply"]
+    assert _profile_declaration_errors(_envelope(sends_oacp_reply_only=True)) == []
+
+
+def _granted_thread_case(
+    tmp_path: Path, *, grant_reply: Optional[bool], profile_reply: bool
+) -> Dict[str, Any]:
+    """Evaluate the continuation fixture with a profile-declared reply against
+    a standing grant whose scope omits, denies, or permits the reply."""
+    config = _load_yaml(FIXTURE_ROOT / "configs" / "auto_review_continuation_enabled.yaml")
+    message = _load_yaml(FIXTURE_ROOT / "messages" / "continuation_grant.yaml")
+    marker = "  sends_oacp_reply_only: false\n"
+    assert marker in message["body"]
+    message["body"] = message["body"].replace(
+        marker, marker + f"  sends_oacp_reply: {str(profile_reply).lower()}\n", 1
+    )
+    prior = _load_yaml(FIXTURE_ROOT / "audits" / "prior_thread_grant_approved.yaml")
+    if grant_reply is not None:
+        grant = prior["result"]["human_outcome"]["grant"]
+        grant["granted_scope"]["sends_oacp_reply"] = grant_reply
+        grant["requested_scope"]["sends_oacp_reply"] = grant_reply
+    (tmp_path / "prior.yaml").write_text(
+        yaml.safe_dump(prior, sort_keys=False), encoding="utf-8"
+    )
+    return evaluate_autonomy(message, config, audit_dir=tmp_path, receiver="codex")
+
+
+@pytest.mark.parametrize("grant_reply", [None, False])
+def test_profile_declared_reply_beyond_grant_pauses(
+    tmp_path: Path, grant_reply: Optional[bool]
+) -> None:
+    # The grant decides the reply on a granted thread: a declared reply the
+    # grant does not permit pauses at admission, exactly where the read-back
+    # validator would otherwise flag the accepted record as incoherent.
+    decision = _granted_thread_case(tmp_path, grant_reply=grant_reply, profile_reply=True)
+    assert decision["decision"] == "paused"
+    assert decision["reason_codes"] == ["continuation_grant_scope_exceeded"]
+    assert decision["breached"] == ["task_profile.sends_oacp_reply"]
+
+
+@pytest.mark.parametrize("grant_reply", [None, False, True])
+def test_profile_declared_reply_false_never_exceeds_grant(
+    tmp_path: Path, grant_reply: Optional[bool]
+) -> None:
+    decision = _granted_thread_case(tmp_path, grant_reply=grant_reply, profile_reply=False)
+    assert decision["decision"] == "auto_accepted"
+    assert decision["scope_envelope"]["sends_oacp_reply"] is False
+    assert [f["detail"] for f in validate_audit_record(decision) if f["severity"] == "error"] == []
+
+
+def test_profile_declared_reply_within_grant_admits_and_reads_back_clean(
+    tmp_path: Path,
+) -> None:
+    decision = _granted_thread_case(tmp_path, grant_reply=True, profile_reply=True)
+    assert decision["decision"] == "auto_accepted"
+    assert decision["continuation_grant"]["decision"] == "accepted"
+    assert decision["scope_envelope"]["sends_oacp_reply"] is True
+    assert [f["detail"] for f in validate_audit_record(decision) if f["severity"] == "error"] == []
+
+    # Realizing the permitted reply at the checkpoint stays within the grant.
+    checkpoint = evaluate_threshold_checkpoint(
+        decision["scope_envelope"],
+        decision["continuation_grant"],
+        {
+            "actual_minutes": 10,
+            "actual_files_touched": 1,
+            "side_effects_actual": {
+                "creates_or_updates_pr": True,
+                "sends_oacp_reply": True,
+            },
+        },
+    )
+    assert checkpoint["breached"] is False
+    assert checkpoint["action"] == "continued_with_grant"
+
+
+def test_checkpoint_reply_only_profile_covers_realized_reply() -> None:
+    envelope = _envelope(sends_oacp_reply_only=True)
+    assert envelope["sends_oacp_reply_only"] is True
+    checkpoint = evaluate_threshold_checkpoint(
+        envelope,
+        {"present": False},
+        {
+            "actual_minutes": 5,
+            "actual_files_touched": 1,
+            "side_effects_actual": {"sends_oacp_reply": True},
+        },
+    )
+    assert checkpoint["breached"] is False
+    assert checkpoint["declaration_errors"] == []
+    assert checkpoint["action"] == "within_declared_envelope"
+    assert checkpoint["side_effects_actual"]["sends_oacp_reply"] is True
+
+
+def test_checkpoint_reply_on_profile_without_reply_only_still_breaches() -> None:
+    checkpoint = evaluate_threshold_checkpoint(
+        _envelope(sends_oacp_reply_only=False),
+        {"present": False},
+        {
+            "actual_minutes": 5,
+            "actual_files_touched": 1,
+            "side_effects_actual": {"sends_oacp_reply": True},
+        },
+    )
+    assert checkpoint["breached"] is True
+    assert checkpoint["breached_fields"] == ["side_effects_actual.sends_oacp_reply"]
+    assert checkpoint["declaration_errors"] == ["side_effects_actual.sends_oacp_reply"]
+
+
+def test_checkpoint_explicit_reply_flag_governs_reply_only_envelope() -> None:
+    envelope = _envelope(sends_oacp_reply_only=True)
+    envelope["sends_oacp_reply"] = False
+    checkpoint = evaluate_threshold_checkpoint(
+        envelope,
+        {"present": False},
+        {
+            "actual_minutes": 5,
+            "actual_files_touched": 1,
+            "side_effects_actual": {"sends_oacp_reply": True},
+        },
+    )
+    assert checkpoint["breached"] is True
+    assert checkpoint["breached_fields"] == ["side_effects_actual.sends_oacp_reply"]
+
+
+def test_checkpoint_declared_intent_reply_on_reply_only_profile_is_already_authorized() -> None:
+    with pytest.raises(ValueError, match="already declared true"):
+        evaluate_threshold_checkpoint(
+            _envelope(sends_oacp_reply_only=True),
+            {"present": False},
+            {
+                "actual_minutes": 1,
+                "actual_files_touched": 0,
+                "paused_at_utc": "2026-05-12T12:30:00Z",
+                "declared_intent_fields": ["task_profile.sends_oacp_reply"],
+            },
+        )

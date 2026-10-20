@@ -185,6 +185,9 @@ CODEX_SESSION_START_VALUE_OPTIONS = ("--project", "--hub-dir")
 # for a shell to expand.
 CODEX_SHELL_EXPANSION_CHARS = ("$", "`")
 
+# Frontmatter name line of templates/claude/agents/role_agent.template.md.
+AGENT_TEMPLATE_NAME_LINE = "name: role-name\n"
+
 
 def _load_template(relative: str) -> Optional[str]:
     """Load a template file, returning None if not found."""
@@ -675,6 +678,12 @@ def setup_runtime(
                 "---\n\n"
                 "# OACP Agent\n\n"
                 "Configure this agent role for your project.\n"
+            )
+        else:
+            # The template ships a placeholder name; the generated agent is
+            # named after the project, matching its file name.
+            template_content = template_content.replace(
+                AGENT_TEMPLATE_NAME_LINE, f"name: {project_label}\n", 1
             )
         agent_file = repo_dir / ".claude" / "agents" / f"{project_label}.md"
         if _write_if_missing(agent_file, template_content):

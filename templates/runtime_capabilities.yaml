@@ -1,4 +1,4 @@
-# Default capabilities per runtime. Used by `oacp add-agent --runtime`.
+# Default capabilities per runtime. Used by `oacp agent add --runtime`.
 # Customize per your environment — these are sensible defaults.
 # See: docs/protocol/runtime_capabilities.md
 

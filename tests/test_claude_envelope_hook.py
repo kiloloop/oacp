@@ -3052,3 +3052,529 @@ def test_authority_mutation_with_expansion_escalates(tmp_path: Path) -> None:
     decision = _process_bash(repo, f"rm {audit_dir}/*.yaml")
     assert decision.action == "ask"
     assert "expansion" in decision.reason
+
+
+# Realistic shell forms below use synthetic identities and repository names.
+@pytest.mark.parametrize("command", [
+    'git commit --author="Example Bot <bot@example.com>" -m "change"',
+    'git commit -m "change\n\nCo-Authored-By: Example <user@example.com>"',
+    'echo "a > b"',
+    "echo 'x>out.txt'",
+    r'echo x\>out.txt',
+    r'echo "escaped \"quote > data"',
+    'git commit -m "change"',
+    'echo hi > ""',
+])
+def test_quoted_redirect_data_does_not_consume_file_budget(command: str) -> None:
+    decision = bash(command, make_envelope(expected_files_touched=0))
+    assert decision.action == "allow", decision.reason
+    assert decision.new_files == []
+
+
+@pytest.mark.parametrize("command, target", [
+    ('echo "a > b" > real.txt', "/repo/real.txt"),
+    ('echo hi > "two words.txt"', "/repo/two words.txt"),
+    ("echo hi > 'two > words.txt'", "/repo/two > words.txt"),
+    (r'echo hi > two\ words.txt', "/repo/two words.txt"),
+    ('echo "$(echo hi > inner.txt)"', "/repo/inner.txt"),
+    ('echo `echo hi > inner.txt`', "/repo/inner.txt"),
+    ('echo hi > real.txt< input.txt', "/repo/real.txt"),
+])
+def test_real_redirects_survive_quote_masking(command: str, target: str) -> None:
+    decision = bash(command)
+    assert decision.action == "allow", decision.reason
+    assert decision.new_files == [target]
+    assert bash(command, make_envelope(expected_files_touched=0)).action == "deny"
+
+
+@pytest.mark.parametrize("prefix", [
+    "TOKEN=$(/tools/token-helper reviewer)",
+    'TOKEN="$(/tools/token-helper reviewer)"',
+    "TOKEN=`/tools/token-helper reviewer`",
+    'TOKEN="`/tools/token-helper reviewer`"',
+    "A=one TOKEN=$(/tools/token-helper reviewer) B=two",
+    "env TOKEN=$(/tools/token-helper reviewer)",
+    "TOKEN=$(/tools/token-helper)",
+])
+@pytest.mark.parametrize("mutation, capability", [
+    ("issue comment 7 --body-file note.md", "comments_on_github"),
+    ("pr create --title change --body-file note.md", "creates_or_updates_pr"),
+    ("pr merge 7 --squash", "merges_pr"),
+])
+def test_substitution_assignment_cannot_hide_gh_mutation(
+    prefix: str, mutation: str, capability: str,
+) -> None:
+    command = f"{prefix} gh {mutation} --repo other-org/other-repo"
+    denied = bash(command, make_envelope(**{capability: False}))
+    assert denied.action == "deny", denied.reason
+    assert capability in denied.reason
+    scoped = bash(command, make_envelope(**{capability: True}))
+    assert scoped.action in ("ask", "deny"), scoped.reason
+
+
+def test_substitution_assignment_still_classifies_inner_command() -> None:
+    decision = bash("TOKEN=$(gh pr merge 7) cat notes.md")
+    assert decision.action == "deny"
+    assert "merges_pr" in decision.reason
+
+
+def test_dynamic_program_after_assignment_asks() -> None:
+    assert bash('TOKEN=one $(printf "gh") pr merge 7').action == "ask"
+
+
+@pytest.mark.parametrize("command", [
+    "oacp verify message.yaml",
+    "oacp verify message.yaml --project sample --receiver claude --json",
+    "oacp verify --json --pins pins.yaml message.yaml --oacp-dir /runtime",
+    "oacp verify message.yaml --project=sample --receiver=claude --pins=pins.yaml --oacp-dir=/runtime",
+    "/tools/oacp verify message.yaml --json",
+    "uv run oacp verify message.yaml --json",
+    "oacp verify --help",
+])
+def test_readonly_verify_is_allowed(command: str) -> None:
+    decision = bash(command, make_envelope(expected_files_touched=0))
+    assert decision.action == "allow", decision.reason
+    assert decision.new_files == []
+
+
+@pytest.mark.parametrize("arguments", [
+    "message.yaml --quarantine", "message.yaml --q", "message.yaml --quar",
+    "message.yaml --attach-audit record.yaml", "message.yaml --attach-audit=record.yaml",
+    "message.yaml --a=record.yaml", "message.yaml --att record.yaml",
+    "message.yaml --unknown", "message.yaml --pins", "message.yaml --pins=",
+    "one.yaml two.yaml", "message.yaml $OPTIONS", "${MESSAGE}",
+    "*.yaml", "{one,two}.yaml", "message.yaml --pins=$PINS",
+    'message.yaml "$(echo --quarantine)"', 'message.yaml `echo --quarantine`',
+])
+def test_verify_write_modes_and_ambiguous_arguments_still_ask(arguments: str) -> None:
+    assert bash(f"oacp verify {arguments}").action == "ask"
+
+
+def test_verify_allowance_preserves_shell_write_gates() -> None:
+    # Redirect argv is outside the narrowly exempt grammar, so it retains
+    # review rather than bypassing the write boundary.
+    assert bash("oacp verify message.yaml > .env").action == "ask"
+    assert bash("oacp verify message.yaml && gh pr merge 7").action == "deny"
+    assert bash('oacp verify message.yaml > "check result.json"').action == "ask"
+
+
+@pytest.mark.parametrize("command, constraint", [
+    ("A='$(' gh pr merge 7 ')'", "merges_pr"),
+    ("A='`' gh pr merge 7 '`'", "merges_pr"),
+    ("A='$(' gh pr create --title t --body b ')'", "creates_or_updates_pr"),
+    ("A='`' gh issue comment 7 --body x '`'", "comments_on_github"),
+    ("A='`' git push origin main '`'", "protected branch"),
+    ("A='`' cp x .env '`'", "secret-class"),
+    (r'A="\`" gh pr merge 7 "\`"', "merges_pr"),
+    (r'A=\` gh pr merge 7 \`', "merges_pr"),
+])
+def test_literal_substitution_delimiters_cannot_hide_commands(
+    command: str, constraint: str,
+) -> None:
+    envelope = make_envelope(**{constraint: False}) if constraint == "creates_or_updates_pr" else make_envelope()
+    decision = bash(command, envelope)
+    assert decision.action == "deny", decision.reason
+    assert constraint in decision.reason
+
+
+@pytest.mark.parametrize("flag", ["--quarantine", "--q", "--attach-audit=record.yaml", "--a=record.yaml"])
+def test_verify_mutation_flag_rejection_without_message(flag: str) -> None:
+    decision = bash(f"oacp verify {flag}")
+    assert decision.action == "ask"
+    assert "only read-only oacp verify" in decision.reason
+
+
+@pytest.mark.parametrize("command", [
+    "A='$(' gh pr merge 7 ')'",
+    "A='`' gh pr merge 7 '`'",
+    r'A="\`" gh pr merge 7 "\`"',
+    r'A=\` gh pr merge 7 \`',
+    'A=$(printf "synthetic token") gh pr merge 7',
+])
+def test_shell_confirms_command_after_literal_or_live_assignment(command: str) -> None:
+    # Synthetic shell function: no real GitHub executable or external effect.
+    import subprocess
+
+    result = subprocess.run(
+        ["bash", "-c", 'gh() { printf "%s\\n" "$@"; }; ' + command],
+        check=True, capture_output=True, text=True,
+    )
+    assert result.stdout.splitlines()[:3] == ["pr", "merge", "7"]
+    decision = bash(command)
+    assert decision.action == "deny"
+    assert "merges_pr" in decision.reason
+
+
+# Realistic shell syntax with synthetic command arguments; gh is never executed.
+@pytest.mark.parametrize('command', [
+    r"A=$'\'' gh pr merge 7 #'",
+    "A=x # '\ngh pr merge 7 # '",
+    "A=x # <<'END'\ngh pr merge 7\nEND",
+    "echo $'hello'",
+    "echo prefix$'suffix'",
+    "echo $\\\n'hello'",
+    "echo ok;# 'ignored quote\ngh pr merge 7",
+    "echo $(A=$'x' gh pr merge 7)",
+    'echo "$(A=$\'x\' gh pr merge 7)"',
+    "echo `A=$'x' gh pr merge 7`",
+    "# comment\necho harmless",
+])
+def test_unsupported_ansi_c_quotes_and_shell_comments_ask(command: str) -> None:
+    decision = bash(command, make_envelope(merges_pr=False))
+    assert decision.action == 'ask'
+    assert 'not statically supported' in decision.reason
+    assert not decision.new_files
+
+
+@pytest.mark.parametrize('command', [
+    "echo '# literal'",
+    'echo "# literal"',
+    r'echo \#literal',
+    'echo word#suffix',
+    r'echo word\ #suffix',
+    "echo ''#suffix",
+    'echo ""#suffix',
+    "echo word\\\n#suffix",
+    r"echo \$\'literal\'",
+    'echo "$\'literal\'"',
+    "cat <<'END'\nA=$'\\'' gh pr merge 7 #'\n# <<IGNORED\nEND",
+])
+def test_quoted_escaped_and_embedded_shell_markers_remain_data(command: str) -> None:
+    decision = bash(command, make_envelope(merges_pr=False))
+    assert decision.action == 'allow', decision.reason
+    assert not decision.new_files
+
+
+@pytest.mark.parametrize('command', [
+    r"A=$'\'' gh pr merge 7 #'",
+    "A=x # '\ngh pr merge 7 # '",
+])
+def test_shell_bypass_repros_execute_stub_but_are_not_allowed(command: str) -> None:
+    import subprocess
+
+    # A shell function proves the parser behavior without invoking GitHub.
+    result = subprocess.run(
+        ['bash', '--noprofile', '--norc', '-c',
+         'gh() { printf "STUB_GH:%s\\n" "$*"; }; ' + command],
+        capture_output=True, text=True, check=True,
+    )
+    assert result.stdout == 'STUB_GH:pr merge 7\n'
+    assert bash(command, make_envelope(merges_pr=False)).action == 'ask'
+
+
+@pytest.mark.parametrize("quote", ["'", '"'])
+@pytest.mark.parametrize("operator", ["<<EOF", "<<-EOF", "<<\\EOF"])
+def test_multiline_quoted_heredoc_cannot_hide_outer_mutation(
+    quote: str, operator: str,
+) -> None:
+    import subprocess
+
+    # Realistic shell syntax, synthetic PR number, and a harmless local stub.
+    command = (
+        f"echo {quote}x\ncat {operator}\n"
+        f"{quote}; gh pr merge 7; echo {quote}\nEOF\n{quote}"
+    )
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-c",
+         'gh() { printf "STUB_GH:%s\\n" "$*"; }; ' + command],
+        capture_output=True, text=True, check=True,
+    )
+    assert result.stdout.splitlines().count("STUB_GH:pr merge 7") == 1
+    with pytest.raises(ValueError, match="heredoc.*multi-line quote"):
+        hook._strip_heredoc_bodies(command)
+    decision = bash(command, make_envelope(merges_pr=False))
+    assert decision.action == "ask"
+    assert "heredoc" in decision.reason
+    assert not decision.new_files
+
+
+@pytest.mark.parametrize("command", [
+    "A=x # <<'END'\ngh pr merge 7\nEND",
+    "A=$'x' cat <<'END'\ngh pr merge 7\nEND",
+])
+def test_heredoc_preprocessing_rejects_unsupported_operator_lines(command: str) -> None:
+    # Pin the early guard independently of the later segment scanner. A
+    # deleted pre-strip guard must fail even if classify() still returns ask.
+    with pytest.raises(ValueError, match="not statically supported"):
+        hook._strip_heredoc_bodies(command)
+
+
+@pytest.mark.parametrize("quote", ["'", '"'])
+def test_heredoc_line_starting_in_quote_but_ending_outside_asks(quote: str) -> None:
+    import subprocess
+
+    # Realistic shell syntax with a synthetic PR and harmless local stubs.
+    # The operator is quoted data, but the next line executes outside the quote.
+    command = f"echo {quote}x\ncat <<EOF {quote}\ngh pr merge 7\nEOF"
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-c",
+         'gh() { printf "STUB_GH:%s\\n" "$*"; }; EOF() { :; }; ' + command],
+        capture_output=True, text=True, check=True,
+    )
+    assert result.stdout.splitlines().count("STUB_GH:pr merge 7") == 1
+    # Reading quote state after scanning the operator line must fail this test.
+    with pytest.raises(ValueError, match="heredoc.*multi-line quote"):
+        hook._strip_heredoc_bodies(command)
+    assert bash(command, make_envelope(merges_pr=False)).action == "ask"
+
+
+def test_heredoc_quote_model_divergence_fails_closed() -> None:
+    import subprocess
+
+    # The pre-strip scanner and splitter must evolve together: the splitter's
+    # rejection currently prevents nested substitution quotes from hiding code.
+    # Realistic syntax, synthetic PR number, and a harmless local stub.
+    command = """echo "$(echo "'")"
+echo '
+cat <<EOF
+'; gh pr merge 7; echo '
+EOF
+'"""
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-c",
+         'gh() { printf "STUB_GH:%s\\n" "$*"; }; ' + command],
+        capture_output=True, text=True, check=True,
+    )
+    assert result.stdout.splitlines().count("STUB_GH:pr merge 7") == 1
+    assert bash(command, make_envelope(merges_pr=False)).action == "ask"
+
+
+@pytest.mark.parametrize("command", [
+    'echo "ordinary\nmulti-line text"',
+    "echo 'ordinary\nmulti-line text'",
+    'echo "literal <<EOF"',
+    "echo 'literal <<EOF'",
+    "cat <<'END'\necho \"x\ncat <<EOF\n\"; gh pr merge 7\nEND",
+    "cat <<'ONE' <<'TWO'\n' # <<EOF\nONE\n$'quoted'\nTWO",
+])
+def test_unambiguous_quotes_and_literal_heredoc_payloads_remain_allowed(
+    command: str,
+) -> None:
+    decision = bash(command, make_envelope(merges_pr=False))
+    assert decision.action == "allow", decision.reason
+    assert not decision.new_files
+
+
+def test_multiline_backtick_heredoc_cannot_hide_mutation() -> None:
+    import subprocess
+
+    command = "echo `printf '%s' '\n<<END\n'\ngh pr merge 7\nprintf '%s' '\nEND\n'`"
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-c",
+         'gh() { printf "STUB_GH:%s\\n" "$*"; }; ' + command],
+        capture_output=True, text=True, check=True,
+    )
+    assert "STUB_GH:pr merge 7" in result.stdout
+    with pytest.raises(ValueError, match="heredoc.*multi-line quote"):
+        hook._strip_heredoc_bodies(command)
+    assert bash(command, make_envelope(merges_pr=False)).action == "ask"
+
+
+@pytest.mark.parametrize("suffix, expected", [("", "allow"), ("\ngh pr merge 7", "deny")])
+def test_real_heredoc_after_multiline_quote_close_preserves_later_commands(
+    suffix: str, expected: str,
+) -> None:
+    command = "echo 'multiline\n' ; cat <<'END'\nliteral\nEND" + suffix
+    decision = bash(command, make_envelope(merges_pr=False))
+    assert decision.action == expected, decision.reason
+    if suffix:
+        assert "merges_pr" in decision.reason
+
+
+# ── Read-only gh groups and the harness-named scratchpad ($TMPDIR) ───────────
+
+
+def _readonly_envelope() -> Dict[str, Any]:
+    """A reply-only research profile: every mutation flag false, no file budget."""
+    return make_envelope(
+        external_side_effects=False,
+        creates_or_updates_pr=False,
+        comments_on_github=False,
+        commits_changes=False,
+        merges_pr=False,
+        files_issues=False,
+        sends_oacp_reply_only=True,
+        expected_files_touched=0,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _clear_sandbox_tmpdir(monkeypatch: pytest.MonkeyPatch):
+    """A developer session exports the harness variable; tests set it explicitly."""
+    monkeypatch.delenv(hook.SANDBOX_TMPDIR_ENV_VAR, raising=False)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh search repos foo --json name",
+        "gh search issues 'envelope hook' --repo example-org/private-repo",
+        "gh search prs --author alice --state open",
+        "gh search commits fix --limit 5",
+        "gh search code TMPDIR --json path",
+    ],
+)
+def test_gh_search_is_read_only_under_a_reply_only_envelope(command: str) -> None:
+    decision = bash(command, _readonly_envelope())
+    assert decision.action == "allow", decision.reason
+
+
+def test_gh_unknown_verb_still_escalates() -> None:
+    decision = bash("gh run delete 12345", _readonly_envelope())
+    assert decision.action == "ask", decision.reason
+    assert "cannot classify" in decision.reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("cat x | base64 > $TMPDIR/r1.b64", id="redirect_bare"),
+        pytest.param(
+            'printf "x: nan\\n" > "${TMPDIR}/probe/obs.yaml"', id="redirect_braced_quoted"
+        ),
+        pytest.param("python3 -m pytest -q 2>&1 | tee $TMPDIR/pytest.log", id="tee_operand"),
+        pytest.param("touch $TMPDIR/marker", id="touch_operand"),
+    ],
+)
+def test_sandboxed_tmpdir_write_target_is_the_scratchpad(
+    command: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The harness names the sandboxed temp dir; the target takes the exemption."""
+    monkeypatch.setenv(hook.SANDBOX_TMPDIR_ENV_VAR, "/scratchpad/sandbox")
+    decision = bash(command, _readonly_envelope())
+    assert decision.action == "allow", decision.reason
+    assert decision.new_files == []
+
+
+@pytest.mark.parametrize(
+    "command, env_value, tool_input_extra",
+    [
+        pytest.param("echo x > $TMPDIR/r1.b64", "/elsewhere/tmp", {}, id="tmpdir_outside_scratchpad"),
+        pytest.param("echo x > $TMPDIR/r1.b64", None, {}, id="tmpdir_unnamed"),
+        pytest.param("echo x > $TMPDIR/r1.b64", "relative/tmp", {}, id="tmpdir_relative"),
+        pytest.param(
+            "echo x > $TMPDIR/r1.b64",
+            "/scratchpad/sandbox",
+            {"dangerouslyDisableSandbox": True},
+            id="call_opts_out_of_sandbox",
+        ),
+        pytest.param("echo x > $TMPDIR/$NAME.b64", "/scratchpad/sandbox", {}, id="second_variable"),
+        pytest.param("echo x > $TMPDIR/*.b64", "/scratchpad/sandbox", {}, id="expansion_in_rest"),
+        pytest.param("echo x > $TMPDIR/../escape.b64", "/scratchpad/sandbox", {}, id="parent_escape"),
+        pytest.param("echo x > $TMPDIRX/r1.b64", "/scratchpad/sandbox", {}, id="other_variable_prefix"),
+        pytest.param("echo x > ${TMPDIR}x/r1.b64", "/scratchpad/sandbox", {}, id="braced_with_suffix"),
+        pytest.param("echo x > $HOME/r1.b64", "/scratchpad/sandbox", {}, id="home_variable"),
+        pytest.param("echo x > $(pwd)/r1.b64", "/scratchpad/sandbox", {}, id="command_substitution"),
+        pytest.param('OUT=$TMPDIR/x.log; echo x > "$OUT"', "/scratchpad/sandbox", {}, id="assigned_then_used"),
+    ],
+)
+def test_tmpdir_write_target_keeps_escalating_outside_the_resolvable_shape(
+    command: str,
+    env_value: Optional[str],
+    tool_input_extra: Dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if env_value is not None:
+        monkeypatch.setenv(hook.SANDBOX_TMPDIR_ENV_VAR, env_value)
+    tool_input = {"command": command, **tool_input_extra}
+    decision = hook.classify("Bash", tool_input, "/repo", _readonly_envelope())
+    assert decision.action == "ask", decision.reason
+    assert "variable" in decision.reason or "expansion" in decision.reason
+
+
+# Each shape: the command (ELSEWHERE stands for a directory outside both the
+# scratchpad and the repo) and whether the hook may exempt its write. The
+# refused shapes are ones where the shell can write somewhere other than the
+# scratchpad, or where the classifier cannot prove it does not.
+TMPDIR_SHAPES = [
+    ("bare", "echo x > $TMPDIR/bare.md", True),
+    ("braced_quoted", 'echo x > "${TMPDIR}/braced.md"', True),
+    ("quoted_reference_then_literal", 'echo x > "$TMPDIR"/split.md', True),
+    ("tee_in_pipeline", "printf x | tee $TMPDIR/tee.md", True),
+    ("redirect_duplication_in_pipeline", "echo x 2>&1 | cat > $TMPDIR/pipe.md", True),
+    (
+        "literal_heredoc_body",
+        "cat > $TMPDIR/body.md <<'EOF'\nTMPDIR=ELSEWHERE; $HOME `pwd` {a,b}\nEOF",
+        True,
+    ),
+    ("symlink_inside_scratchpad", "echo x > $TMPDIR/inner/inside.md", True),
+    ("reassigned", 'TMPDIR=ELSEWHERE; echo x > "$TMPDIR/assigned.md"', False),
+    ("exported", 'export TMPDIR=ELSEWHERE; echo x > "$TMPDIR/exported.md"', False),
+    ("prefix_assignment", "TMPDIR=ELSEWHERE echo x > $TMPDIR/prefix.md", False),
+    ("single_quoted", "echo x > '$TMPDIR/quoted.md'", False),
+    ("escaped_dollar", "echo x > \\$TMPDIR/escaped.md", False),
+    ("last_stage_read_then_list", "echo ELSEWHERE | read T{M,}PDIR; echo x > $TMPDIR/list.md", False),
+    ("brace_constructed_name", "echo ELSEWHERE | read T{M,}PDIR | echo x > $TMPDIR/stage.md", False),
+    ("expanding_heredoc_body", "cat <<EOF > $TMPDIR/heredoc.md\n${a[TMPDIR=5]}\nEOF", False),
+    ("named_descriptor_redirect", "echo x {TMPDIR}>/dev/null > $TMPDIR/named.md", False),
+    ("command_list", "cd ELSEWHERE && echo x > $TMPDIR/chained.md", False),
+    ("other_expansion", "echo $HOME > $TMPDIR/other.md", False),
+    ("symlink_out_of_scratchpad", "echo x > $TMPDIR/link/child.md", False),
+    ("symlink_then_parent", "echo x > $TMPDIR/link/../escaped.md", False),
+]
+
+
+@pytest.fixture
+def tmpdir_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A scratchpad under a pinned prefix, a repo cwd and an outside directory."""
+    root = Path(os.path.realpath(tmp_path))
+    scratch = root / "scratch" / "sandbox"
+    (scratch / "sub").mkdir(parents=True)
+    (scratch / "inner").symlink_to(scratch / "sub")
+    elsewhere = root / "elsewhere"
+    (elsewhere / "child").mkdir(parents=True)
+    (scratch / "link").symlink_to(elsewhere / "child")
+    repo = root / "repo"
+    # Lets a literal-dollar write succeed, so the shell test sees where it lands.
+    (repo / "$TMPDIR").mkdir(parents=True)
+    monkeypatch.setattr(hook, "SCRATCHPAD_PREFIXES", (str(root / "scratch") + "/",))
+    monkeypatch.setenv(hook.SANDBOX_TMPDIR_ENV_VAR, str(scratch))
+    return root, scratch, repo, elsewhere
+
+
+def _classify_shape(template: str, repo: Path, elsewhere: Path) -> hook.Decision:
+    command = template.replace("ELSEWHERE", str(elsewhere))
+    return hook.classify("Bash", {"command": command}, str(repo), _readonly_envelope())
+
+
+@pytest.mark.parametrize(
+    "template, exempt", [shape[1:] for shape in TMPDIR_SHAPES],
+    ids=[shape[0] for shape in TMPDIR_SHAPES],
+)
+def test_tmpdir_exemption_covers_only_provable_shapes(
+    template: str, exempt: bool, tmpdir_layout,
+) -> None:
+    _root, _scratch, repo, elsewhere = tmpdir_layout
+    decision = _classify_shape(template, repo, elsewhere)
+    if exempt:
+        assert decision.action == "allow", decision.reason
+        assert decision.new_files == []
+    else:
+        assert decision.action == "ask", decision.reason
+
+
+@pytest.mark.parametrize("shell", [["bash", "--noprofile", "--norc"], ["zsh", "-f"]], ids=["bash", "zsh"])
+def test_every_exempted_tmpdir_write_lands_in_the_scratchpad(shell, tmpdir_layout) -> None:
+    """Run each exempted shape in a real shell and find where its write went."""
+    import shutil
+    import subprocess
+
+    if shutil.which(shell[0]) is None:
+        pytest.skip(f"{shell[0]} is not installed")
+    root, scratch, repo, elsewhere = tmpdir_layout
+    exempted = 0
+    for case, template, _exempt in TMPDIR_SHAPES:
+        if _classify_shape(template, repo, elsewhere).action != "allow":
+            continue
+        exempted += 1
+        before = {path for path in root.rglob("*") if path.is_file()}
+        subprocess.run(
+            [*shell, "-c", template.replace("ELSEWHERE", str(elsewhere))],
+            cwd=repo, env={**os.environ, "TMPDIR": str(scratch)},
+            capture_output=True, text=True, check=False,
+        )
+        written = {path for path in root.rglob("*") if path.is_file()} - before
+        assert written, case
+        for path in written:
+            assert hook._within(os.path.realpath(path), str(scratch)), (case, path)
+    assert exempted == sum(shape[2] for shape in TMPDIR_SHAPES)

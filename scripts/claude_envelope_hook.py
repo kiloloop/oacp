@@ -84,7 +84,7 @@ SUBSTITUTION_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
 # descriptor duplication and closure (`>&2`, `2>&1`, `>&-`): the word
 # after a `dup` match is a file only when it is not digits or `-`.
 REDIRECT_TARGET_RE = re.compile(
-    r">>?(?:(?P<dup>&)|\|)?\s*(?P<word>[^\s;|&]+)"
+    r">>?(?:(?P<dup>&)|\|)?\s*(?P<word>[^\s;|&<>]+)"
 )
 # `<(cmd)` / `>(cmd)`: the inner command runs in its own process and is
 # classified as a segment, like `$(cmd)`.
@@ -156,6 +156,17 @@ SCRATCHPAD_PREFIXES = (
     "/tmp/claude/",
     "/private/tmp/claude/",
 )
+# The harness runs each sandboxed Bash call with TMPDIR set to its runtime
+# scratchpad and exports that directory to hooks under this name. The hook
+# process's own TMPDIR is the login temp dir and is never consulted.
+SANDBOX_TMPDIR_ENV_VAR = "CLAUDE_TMPDIR"
+SANDBOX_TMPDIR_TARGET_RE = re.compile(r"^\$(?:\{TMPDIR\}|TMPDIR)(?P<rest>/.*)?$")
+# One expansion the shell performs that is exactly the TMPDIR value: no
+# operator, modifier or subscript, and not the prefix of a longer name.
+SANDBOX_TMPDIR_REFERENCE_RE = re.compile(r"\$(?:\{TMPDIR\}|TMPDIR(?![A-Za-z0-9_\[]))")
+# Descriptor duplications (`2>&1`, `>&2`, `<&-`, `&>file`) are redirects,
+# not the `&` list and background operators.
+REDIRECT_DUPLICATION_RE = re.compile(r"\d*[<>]&(?:\d+|-)?|&>>?")
 
 DEPENDENCY_FILENAMES = {
     "pyproject.toml",
@@ -189,6 +200,10 @@ PACKAGE_MANAGERS = {
 DEPENDENCY_VERBS = {"install", "add", "remove", "uninstall"}
 
 GH_READONLY_ACTIONS = {"view", "list", "status", "checks", "diff", "download"}
+# Groups whose every subcommand is a read: `gh search {repos,issues,prs,
+# commits,code}` queries the search API and mutates nothing, so the group
+# passes whole instead of falling through to the fail-closed escalation.
+GH_READONLY_GROUPS = {"search"}
 GH_PR_CLASS = {("pr", "create"), ("pr", "edit"), ("pr", "ready"), ("pr", "update-branch")}
 GH_COMMENT_CLASS = {("pr", "comment"), ("pr", "review"), ("issue", "comment")}
 # Constraint-gated classes for the granular capabilities beyond PR artifacts
@@ -514,6 +529,105 @@ def _normalize_file_path(path: str, cwd: str) -> str:
 
 def _within(canonical: str, root: str) -> bool:
     return canonical == root or canonical.startswith(root + os.sep)
+
+
+def sandbox_tmpdir_is_unmodified(command: str, stripped: str) -> bool:
+    """Whether every ``$TMPDIR`` the shell expands in ``command`` is the call's own.
+
+    ``stripped`` is ``command`` with its heredoc bodies removed. The
+    resolution trusts the TMPDIR the call starts with, so the command must
+    be unable to change it before a write target is expanded, and each
+    ``$TMPDIR`` left after quote removal must be one the shell expands.
+    Both hold for a single pipeline of simple commands whose only expansions
+    are ``$TMPDIR``/``${TMPDIR}`` references outside single quotes and
+    escapes. Within one simple command, words and redirects are expanded
+    before any builtin assignment runs, and a pipeline stage never sees an
+    assignment made by another stage. A list (``;``, ``&&``, ``||``, ``&``,
+    newline) is refused because a later command sees assignments made
+    earlier, including by the last pipeline stage, which zsh runs in the
+    current shell. Grouping and brace syntax, backticks, any other mention
+    of TMPDIR, and expanding heredoc bodies are refused too: each can
+    construct or assign the name before the target is expanded.
+    """
+    if "`" in stripped:
+        return False
+    for match in HEREDOC_OPERATOR_RE.finditer(command):
+        if match.group(5) is not None and match.group(4) is None:
+            return False
+    view = SANDBOX_TMPDIR_REFERENCE_RE.sub(
+        lambda found: " " * len(found.group(0)), _shell_syntax_view(stripped)
+    )
+    view = REDIRECT_DUPLICATION_RE.sub(" ", view.strip().replace("|&", "|"))
+    if re.search(r"[;&\n(){}]|\|\|", view):
+        return False
+    references = 0
+    quote: Optional[str] = None
+    index = 0
+    while index < len(stripped):
+        char = stripped[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+        if char == "$":
+            match = SANDBOX_TMPDIR_REFERENCE_RE.match(stripped, index)
+            if match is None:
+                return False
+            references += 1
+            index = match.end()
+            continue
+        if char == '"':
+            quote = None if quote == '"' else '"'
+        elif char == "'" and quote is None:
+            quote = "'"
+        index += 1
+    return stripped.count("TMPDIR") == references
+
+
+def resolve_sandbox_tmpdir_target(target: str, sandboxed: bool = True) -> Optional[str]:
+    """Literal scratchpad path for a ``$TMPDIR/...`` Bash write target, or None.
+
+    The harness mandates ``$TMPDIR`` for temporary files and, for a sandboxed
+    call, expands it to the runtime scratchpad — a spelling the variable gate
+    would otherwise escalate. The hook cannot see the call's shell state, but
+    the harness names that directory in ``CLAUDE_TMPDIR``, so the target
+    resolves when every condition holds: the call stays sandboxed (no per-call
+    opt-out) and its command cannot have changed TMPDIR (the caller checks
+    ``sandbox_tmpdir_is_unmodified``), ``$TMPDIR`` or ``${TMPDIR}`` is the
+    whole first component, the remainder carries no further variable,
+    substitution or expansion syntax and no ``..`` component, the named
+    directory lies under a scratchpad prefix, and the path, with its
+    symlinks resolved, stays inside it. Anything else returns None and keeps the
+    existing escalation. A session whose sandbox is disabled outright still
+    exports the variable, so the per-call opt-out is the only sandbox signal
+    available here.
+    """
+    if not sandboxed:
+        return None
+    match = SANDBOX_TMPDIR_TARGET_RE.match(target)
+    if match is None:
+        return None
+    rest = match.group("rest") or ""
+    if "$" in rest or "`" in rest or EXPANSION_SYNTAX_RE.search(rest):
+        return None
+    # A link another pipeline stage creates after classification would
+    # change where `..` lands, so a parent component is never resolved.
+    if ".." in rest.split("/"):
+        return None
+    root = os.environ.get(SANDBOX_TMPDIR_ENV_VAR) or ""
+    if not os.path.isabs(root):
+        return None
+    canonical_root = os.path.realpath(root)
+    if not canonical_root.startswith(SCRATCHPAD_PREFIXES):
+        return None
+    resolved = os.path.realpath(canonical_root + rest)
+    if not _within(resolved, canonical_root):
+        return None
+    return resolved
 
 
 def is_bookkeeping_path(
@@ -929,7 +1043,7 @@ def _classify_gh(
             )
         return ALLOW
 
-    if action in GH_READONLY_ACTIONS:
+    if group in GH_READONLY_GROUPS or action in GH_READONLY_ACTIONS:
         return ALLOW
 
     key = (group, action)
@@ -1114,7 +1228,7 @@ def _classify_envelope_clear(
             f"{context.message_id} shows result.final_state 'done' with no "
             "completed_at_utc — a legacy born-done admission that was never "
             "finalized, not a completed task; run the terminal finalize "
-            "(oacp autonomy-finalize --final-state done) first"
+            "(oacp autonomy finalize --final-state done) first"
         )
     return _deny(
         f"oacp envelope clear while the audit record for "
@@ -1123,6 +1237,46 @@ def _classify_envelope_clear(
         "paused task re-authorizes via the §E checkpoint, and completion "
         "requires the audit record update first"
     )
+
+
+def _classify_oacp_verify(tokens: List[str]) -> Decision:
+    """Allow only the verifier's known read-only argv grammar.
+
+    Quarantine writes beside the input, and audit attachment accepts an
+    arbitrary destination (including authority records). Neither is a blanket
+    bookkeeping exemption. Unknown options, including argparse abbreviations,
+    keep the existing ask rather than silently opening a write path.
+    """
+    value_flags = {"--pins", "--project", "--receiver", "--oacp-dir"}
+    positionals = 0
+    index = 2
+    while index < len(tokens):
+        token = tokens[index]
+        if re.search(r"[$`*?\[\]{}~]", token):
+            return _ask("cannot resolve shell expansion in oacp verify arguments")
+        if token in ("--json", "--help", "-h"):
+            index += 1
+            continue
+        flag, separator, value = token.partition("=")
+        if flag in value_flags:
+            if not separator:
+                index += 1
+                if index >= len(tokens):
+                    return _ask("missing oacp verify option value")
+                value = tokens[index]
+            if not value or value.startswith("-") or re.search(r"[$`*?\[\]{}~]", value):
+                return _ask("cannot resolve oacp verify option value")
+        elif token.startswith("-"):
+            return _ask(
+                "only read-only oacp verify is exempt; audit attachment, "
+                "quarantine and unknown options require review"
+            )
+        else:
+            positionals += 1
+            if positionals > 1:
+                return _ask("cannot classify oacp verify arguments")
+        index += 1
+    return ALLOW
 
 
 def _classify_oacp(
@@ -1147,6 +1301,10 @@ def _classify_oacp(
 
     if sub in OACP_ALWAYS_ALLOWED:
         return ALLOW
+    if sub == "verify":
+        if len(tokens) < 2 or tokens[1] != "verify":
+            return _ask("cannot classify oacp verify invocation")
+        return _classify_oacp_verify(tokens)
     if sub == "envelope":
         if action == "show":
             return ALLOW
@@ -1337,6 +1495,85 @@ def _sed_in_place_targets(tokens: List[str]) -> Optional[List[str]]:
     return operands if script_option else operands[1:]
 
 
+def _shell_spans(segment: str) -> List[Tuple[int, int, str]]:
+    """Share quote/escape state between redirect and argv views.
+
+    Only a live substitution opener may hide a span from shlex. Literal
+    openers in single quotes or behind a backslash must remain shell data,
+    or they can swallow the command following an environment assignment.
+    Substitution nesting remains bounded by _segments_of's fail-closed check.
+    """
+    spans: List[Tuple[int, int, str]] = []
+    quote: Optional[str] = None
+    index = 0
+    while index < len(segment):
+        char = segment[index]
+        if char == "\\" and quote != "'":
+            end = min(index + 2, len(segment))
+            spans.append((index, end, "data"))
+            index = end
+            continue
+        if quote != "'":
+            match = SUBSTITUTION_RE.match(segment, index)
+            kind = "substitution"
+            if match is None and quote is None:
+                match = PROCESS_SUBSTITUTION_RE.match(segment, index)
+                kind = "process"
+            if match is not None:
+                spans.append((index, match.end(), kind))
+                index = match.end()
+                continue
+        kind = "syntax"
+        if quote is not None:
+            kind = "data"
+            if char == quote:
+                quote = None
+        elif char in ("'", '"'):
+            quote = char
+            kind = "data"
+        spans.append((index, index + 1, kind))
+        index += 1
+    return spans
+
+
+def _shell_syntax_view(segment: str) -> str:
+    """Mask shell data without losing offsets or quoted filename whitespace.
+
+    Substitution bodies are classified separately by _segments_of; their
+    operators must never become redirects of the outer command.
+    """
+    return "".join(
+        segment[start:end] if kind == "syntax" else "x" * (end - start)
+        for start, end, kind in _shell_spans(segment)
+    )
+
+
+def _shell_tokens(segment: str) -> List[str]:
+    """Keep live substitutions opaque to shlex, then restore their spelling.
+
+    shlex alone splits VAR=$(program arg) in the middle of the assignment,
+    hiding the actual program that follows it. The spelling is restored so
+    unresolved selectors, write targets and program names still fail closed.
+    """
+    prefix = "__oacp_substitution_"
+    while prefix in segment:
+        prefix += "_"
+    replacements: Dict[str, str] = {}
+    parts: List[str] = []
+    for start, end, kind in _shell_spans(segment):
+        raw = segment[start:end]
+        if kind == "substitution":
+            marker = f"{prefix}{len(replacements)}__"
+            replacements[marker] = raw
+            parts.append(marker)
+        else:
+            parts.append(raw)
+    tokens = shlex.split("".join(parts), posix=True)
+    for marker, original in replacements.items():
+        tokens = [token.replace(marker, original) for token in tokens]
+    return tokens
+
+
 def _segment_write_targets(tokens: List[str], segment: str) -> List[str]:
     """Determinable file-write targets of one shell segment (F-004).
 
@@ -1344,19 +1581,18 @@ def _segment_write_targets(tokens: List[str], segment: str) -> List[str]:
     parseable from argv. Read-only or unrecognized programs contribute no
     targets — the secret/dependency/counter gate then simply does not fire.
     """
-    targets = [
-        match.group("word").strip("'\"")
-        for match in REDIRECT_TARGET_RE.finditer(segment)
-        # `> >(cmd)`: the destination is the inner command, classified as
-        # its own segment; the operator spelling is not a path.
-        if not match.group("word").startswith((">(", "<("))
-        # `>&N` / `>&-` duplicate or close a descriptor; only a non-numeric
-        # word after `>&` is Bash's combined-output redirect to a file.
-        and not (
-            match.group("dup")
-            and (match.group("word").isdigit() or match.group("word") == "-")
-        )
-    ]
+    targets = []
+    for match in REDIRECT_TARGET_RE.finditer(_shell_syntax_view(segment)):
+        raw_word = segment[match.start("word"):match.end("word")]
+        if raw_word.startswith((">(", "<(")):
+            continue
+        words = _shell_tokens(raw_word)
+        if not words or not words[0]:
+            continue
+        word = words[0]
+        if match.group("dup") and (word.isdigit() or word == "-"):
+            continue
+        targets.append(word)
     if not tokens:
         return targets
     prog = tokens[0].rsplit("/", 1)[-1]
@@ -1568,6 +1804,49 @@ def _gate_write_paths(
     return ALLOW
 
 
+def _reject_unsupported_shell_words(
+    command: str, state: Tuple[Optional[str], bool] = (None, False)
+) -> Tuple[Optional[str], bool]:
+    """Fail closed before our POSIX-style scanners interpret shell words.
+
+    ANSI-C strings use different quote/escape rules from shlex. Comments can
+    contain arbitrary quotes or heredoc operators that would hide later code.
+    Neither construct is modeled here; quoted/escaped data and embedded '#'
+    remain ordinary word content. Substitution bodies are checked separately.
+    """
+    quote, word_started = state
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if char == "\\" and quote != "'":
+            if command[index + 1:index + 2] != "\n":
+                word_started = True
+            index += 2
+            continue
+        if quote is not None:
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char == "$":
+            following = index + 1
+            while command[following:following + 2] == "\\\n":
+                following += 2
+            if command[following:following + 1] == "'":
+                raise ValueError("ANSI-C shell quoting is not statically supported")
+        if char == "#" and not word_started:
+            raise ValueError("word-initial shell comments are not statically supported")
+        if char in ("'", '"', "`"):
+            quote = char
+            word_started = True
+        elif char in " \t\n;|&()<>":
+            word_started = False
+        else:
+            word_started = True
+        index += 1
+    return quote, word_started
+
+
 def _split_shell_segments(command: str) -> List[str]:
     """Split on shell operators outside quotes and substitutions.
 
@@ -1576,6 +1855,7 @@ def _split_shell_segments(command: str) -> List[str]:
     line continuations, and rejects unterminated quoting/substitution instead
     of guessing. Separator characters inside quoted arguments stay data.
     """
+    _reject_unsupported_shell_words(command)
     segments: List[str] = []
     current: List[str] = []
     quote: Optional[str] = None
@@ -1736,11 +2016,13 @@ def _strip_heredoc_bodies(command: str) -> str:
     body, so a command or backtick substitution inside it can execute a
     write — that body is not dropped but escalated. Raises ValueError on an
     unterminated heredoc, an operator without a parseable delimiter, or an
-    executable substitution inside an expanding body (the caller escalates
-    rather than guessing).
+    executable substitution inside an expanding body, or an apparent operator
+    on a line starting inside a quote (the caller escalates rather than
+    guessing).
     """
     kept: List[str] = []
     pending: List[Tuple[str, bool, bool]] = []
+    shell_state: Tuple[Optional[str], bool] = (None, False)
     for line in command.split("\n"):
         if pending:
             word, strip_tabs, expands = pending[0]
@@ -1753,9 +2035,18 @@ def _strip_heredoc_bodies(command: str) -> str:
                     "command substitution inside an expanding (unquoted) heredoc body"
                 )
             continue
+        # Check operator lines before stripping. Carry quote/word state over
+        # newlines and continuations; literal heredoc payloads skip this check.
+        starts_in_quote = shell_state[0] is not None
+        shell_state = _reject_unsupported_shell_words(line + "\n", shell_state)
         delimiters = _heredoc_delimiters(line)
         if delimiters is None:
             raise ValueError("heredoc operator without a delimiter")
+        if starts_in_quote and delimiters:
+            # The line-local delimiter scanner cannot distinguish a quoted
+            # operator from one after the inherited quote closes. Never drop
+            # later program text as a guessed heredoc body in either case.
+            raise ValueError("heredoc operator on a line starting inside a multi-line quote")
         for word, strip_tabs, expands, start, end in reversed(delimiters):
             line = line[:start] + line[end:]
         pending.extend(
@@ -1860,6 +2151,9 @@ def _classify_segment(
         return _ask(f"cannot classify wrapper invocation: {segment!r}")
     if not tokens:
         return None
+
+    if stripped and re.search(r"[$`(){}*?\[\]]", tokens[0]):
+        return _ask(f"cannot resolve shell program name: {tokens[0]!r}")
 
     # Redirect targets are a property of the segment, writer-program targets
     # of the argv — both must be gated regardless of which branch handles
@@ -2002,6 +2296,8 @@ def classify_bash(
     constraints: Dict[str, Any],
     counters: Dict[str, Any],
     context: Optional[WorkspaceContext] = None,
+    *,
+    sandboxed: bool = True,
 ) -> Decision:
     if not constraints.get("destructive_ops"):
         for label, pattern in DESTRUCTIVE_PATTERNS:
@@ -2013,7 +2309,8 @@ def classify_bash(
 
     write_targets: List[str] = []
     try:
-        segments = _segments_of(_strip_heredoc_bodies(command))
+        stripped = _strip_heredoc_bodies(command)
+        segments = _segments_of(stripped)
     except ValueError as error:
         return _ask(f"cannot segment shell command ({error}): {command!r}")
     # A command with exactly one segment has no earlier shell state (cd,
@@ -2022,7 +2319,7 @@ def classify_bash(
     standalone = len(segments) == 1
     for segment in segments:
         try:
-            tokens = shlex.split(segment, posix=True)
+            tokens = _shell_tokens(segment)
         except ValueError:
             if _degraded_readonly_segment(segment):
                 continue
@@ -2039,7 +2336,16 @@ def classify_bash(
         if decision is not None:
             return decision
 
+    gated_targets: List[str] = []
+    tmpdir_resolvable = sandboxed and sandbox_tmpdir_is_unmodified(command, stripped)
     for target in write_targets:
+        # The harness-named scratchpad is the one variable spelling the hook
+        # can resolve; from here on it is a literal path and takes the
+        # bookkeeping exemption like any other scratchpad write.
+        resolved = resolve_sandbox_tmpdir_target(target, tmpdir_resolvable)
+        if resolved is not None:
+            gated_targets.append(resolved)
+            continue
         # A target spelled through a shell variable or substitution takes
         # its value from shell state the classifier cannot see; escalate
         # instead of normalizing the unexpanded spelling to a cwd-relative
@@ -2060,8 +2366,9 @@ def classify_bash(
                 "that cannot be statically resolved; use explicit literal "
                 "paths"
             )
+        gated_targets.append(target)
     return _gate_write_paths(
-        write_targets, cwd, constraints, counters, "write", context
+        gated_targets, cwd, constraints, counters, "write", context
     )
 
 
@@ -2111,7 +2418,14 @@ def classify(
 
     if tool_name == "Bash":
         return classify_bash(
-            str(tool_input.get("command") or ""), cwd, constraints, counters, context
+            str(tool_input.get("command") or ""),
+            cwd,
+            constraints,
+            counters,
+            context,
+            # The harness's per-call sandbox opt-out is the only sandbox
+            # signal a hook receives; absent, the call runs sandboxed.
+            sandboxed=tool_input.get("dangerouslyDisableSandbox") is not True,
         )
     if tool_name in ("Edit", "Write"):
         file_path = str(tool_input.get("file_path") or "")

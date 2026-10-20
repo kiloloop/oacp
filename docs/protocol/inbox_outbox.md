@@ -124,21 +124,15 @@ constraints also remain envelope errors. Signature verification is a separate
 receiver-side boundary: enforce rejects unverified messages; warn only
 annotates them and grants no authority.
 
-Starting in 0.5.2, `oacp validate` reports malformed `handoff` and
-`handoff_complete` body schemas with `skill_owned_body_schema` advisories
-instead of rejecting the message. Each finding has `code`, `severity:
-advisory`, and `detail`; the CLI prints `ADVISORY: <code>: <detail>` to stderr,
-including with `--quiet`, and exits zero when no envelope errors remain.
-`oacp send` includes the same diagnostics in its warnings; the autonomy gate
-records them in `logged_notes`. Envelope errors still reject even when an
-advisory is also present. Missing, empty, nested, or oversized `body` fields
-remain envelope errors.
+In 0.5.3, `oacp validate`, `oacp send`, and autonomy admission do not validate
+`handoff` or `handoff_complete` workflow body schemas. The former
+`skill_owned_body_schema` advisories are no longer emitted or appended to new
+audit notes; existing audit notes remain historical evidence. Missing, empty,
+nested, or oversized `body` fields remain envelope errors.
 
-The handoff schema checks stay in the validator for this one advisory wave;
-**0.5.3 removes them from the validator's call path**. The owning skill must
-validate its versioned body before side effects and return a typed failure.
-An advisory or successful message validation does not admit work or prove a
-workflow body safe to execute.
+The owning workflow must validate its versioned body before side effects and
+return a typed failure when that validation fails. Successful message
+validation does not admit work or prove a workflow body safe to execute.
 
 The autonomy gate retains its existing parsing and authority checks for the
 body blocks it consumes (`task_profile`, `continuation_grants`). Standalone
@@ -148,8 +142,8 @@ Review-specific body validation belongs to the review workflow.
 
 ## Type-Specific Body Schemas
 
-These are workflow requirements, not kernel envelope requirements. During
-0.5.2 their schema findings are advisory as described above.
+These are workflow requirements, not kernel envelope requirements. The owning
+workflow enforces them; the kernel treats their contents as opaque text.
 
 ### `type: handoff`
 
@@ -165,7 +159,7 @@ The handoff workflow expects a structured YAML `body` with these fields:
 - `context_bundle.blockers_hit` (non-empty list)
 - `context_bundle.suggested_next_steps` (non-empty list)
 
-Reference template: `templates/handoff_packet.template.yaml`
+The owning handoff workflow supplies its template; OACP does not bundle one.
 
 ### `type: handoff_complete`
 
@@ -297,7 +291,7 @@ approval; preserve their historical audits. See
 execution accounting, and migration.
 
 Paused task approvals, modifications, and declines are recorded with
-`oacp autonomy-outcome <audit.yaml> --decision <approved|modified|declined>`.
+`oacp autonomy outcome <audit.yaml> --decision <approved|modified|declined>`.
 The v2 audit outcome captures the pause reasons, human decision, decision
 latency, and any separately approved/modified/denied continuation grant.
 
@@ -386,8 +380,8 @@ evidence.
 
 The reference engine (`<project> --dry-run --json`, workspace `retention`
 override) is parked, unwired to any runtime, at
-`shared/archive/oacp-retention/` in the agent-skills repository; `oacp
-retention` only points there until its removal in 0.5.3. Dispatcher cleanup
+`shared/archive/oacp-retention/` in the agent-skills repository. The `oacp
+retention` advisory command was removed in 0.5.3. Dispatcher cleanup
 archives completed inbound dispatch traffic like any other message, and
 intermediate WIP/ack notifications are ordinary archived messages.
 

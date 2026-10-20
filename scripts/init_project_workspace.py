@@ -14,6 +14,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from _oacp_constants import (
     AGENT_RE,
+    AGENT_SUBDIRS as AGENT_SUBDIRS,
+    WORKSPACE_LAYOUT,
+    validate_project_name as _validate_project_name,
+    workspace_layout,
     CREATABLE_RUNTIMES,
     SPEC_VERSION,
     _template_path,
@@ -22,6 +26,10 @@ from _oacp_constants import (
 from agent_profile import upsert_global_profile
 
 DEFAULT_AGENTS = ("claude", "codex", "cursor")
+
+
+class ProjectExistsError(FileExistsError):
+    """The project root existed before this initializer reserved it."""
 
 
 def _validate_agent_name(name: str) -> None:
@@ -53,55 +61,19 @@ should not rediscover from scratch.
 | _None yet._ |  |  |  |  |
 """
 
-STATIC_DIRECTORIES = (
-    "packets/review",
-    "packets/findings",
-    "packets/test",
-    "packets/deploy",
-    "checkpoints",
-    "merges",
-    "memory",
-    "memory/archive",
-    "artifacts",
-    "state",
-    "logs",
-)
-
-STATIC_GITKEEP_PATHS = (
-    "packets/review/.gitkeep",
-    "packets/findings/.gitkeep",
-    "packets/test/.gitkeep",
-    "packets/deploy/.gitkeep",
-    "checkpoints/.gitkeep",
-    "merges/.gitkeep",
-    "artifacts/.gitkeep",
-)
-
-AGENT_SUBDIRS = (
-    "inbox",
-    "inbox/archive",
-    "outbox",
-    "dead_letter",
-    "audit/autonomy_decisions",
+# Compatibility views of the shared layout for direct script consumers.
+STATIC_DIRECTORIES = tuple(path for scope, path, _ in WORKSPACE_LAYOUT if scope == "project")
+STATIC_GITKEEP_PATHS = tuple(
+    f"{path}/.gitkeep" for path, keep in workspace_layout(scope="project") if keep
 )
 
 
 def _agent_dirs(agents: Sequence[str]) -> List[str]:
-    """Return directory paths for the given agents."""
-    dirs: List[str] = []
-    for agent in agents:
-        for sub in AGENT_SUBDIRS:
-            dirs.append(f"agents/{agent}/{sub}")
-    return dirs
+    return [path for path, _ in workspace_layout(agents, scope="agent")]
 
 
 def _agent_gitkeeps(agents: Sequence[str]) -> List[str]:
-    """Return .gitkeep paths for the given agents."""
-    keeps: List[str] = []
-    for agent in agents:
-        for sub in AGENT_SUBDIRS:
-            keeps.append(f"agents/{agent}/{sub}/.gitkeep")
-    return keeps
+    return [f"{path}/.gitkeep" for path, keep in workspace_layout(agents, scope="agent") if keep]
 
 
 def _parse_link(value: str) -> Tuple[str, str]:
@@ -145,6 +117,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         default=None,
         help="Override OACP home directory (default: $OACP_HOME or ~/oacp)",
     )
+    parser.add_argument("--fail-if-exists", action="store_true",
+                        help="Refuse an existing project root (also the default)")
+    parser.add_argument("--dry-run", action="store_true", help="Plan without any filesystem writes")
+    parser.add_argument("--json", action="store_true", dest="json_output",
+                        help="Emit the plan or apply result as JSON")
     return parser.parse_args(list(argv))
 
 
@@ -169,9 +146,62 @@ def _receiver_config_template() -> str:
         return path.read_text(encoding="utf-8")
 
 
-def _validate_project_name(name: str) -> None:
-    if name.startswith(".") or "/" in name or "\\" in name:
-        raise ValueError("project name must not contain path separators or start with '.'")
+def plan_workspace(
+    project_name: str,
+    *,
+    oacp_root: Path,
+    repo_dir: Optional[Path] = None,
+    artifact_links: Sequence[Tuple[str, str]] = (),
+    agents: Sequence[str] = DEFAULT_AGENTS,
+) -> Dict[str, object]:
+    """Describe creation and shared-profile effects without creating even locks."""
+    _validate_project_name(project_name)
+    if not project_name:
+        raise ValueError("project name must not be empty")
+    for agent in agents:
+        _validate_agent_name(agent)
+    if artifact_links and repo_dir is None:
+        raise ValueError("--link requires --repo")
+    destinations = set()
+    for _, dst in artifact_links:
+        relative = Path(dst)
+        if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+            raise ValueError("artifact destination must be a relative path inside artifacts/")
+        normalized = str(relative)
+        if normalized in destinations:
+            raise ValueError("duplicate artifact destination")
+        if relative.parts[0] == ".gitkeep":
+            raise ValueError("artifact destination collides with workspace layout")
+        if any(relative in Path(other).parents or Path(other) in relative.parents
+               for other in destinations):
+            raise ValueError("artifact destinations must not contain each other")
+        destinations.add(normalized)
+    root = oacp_root / "projects" / project_name
+    exists = root.exists() or root.is_symlink()
+    actions = []
+    if not exists:
+        directories = {root}
+        files = {root / "workspace.json"}
+        for relative, keep in workspace_layout(agents):
+            directory = root / relative
+            directories.add(directory)
+            if keep:
+                files.add(directory / ".gitkeep")
+        files.update(root / "memory" / name for name in (
+            "project_facts.md", "decision_log.md", "open_threads.md", "known_debt.md"))
+        files.update(root / "agents" / agent / "config.yaml" for agent in agents)
+        for path in sorted(directories | files):
+            actions.append({"path": str(path), "operation": "create_directory" if path in directories else "create_file"})
+        for agent in dict.fromkeys(agents):
+            actions.append({"path": str(oacp_root / "agents" / agent / "profile.yaml"),
+                            "operation": "ensure_project_membership"})
+        for src, dst in artifact_links:
+            source = repo_dir / src
+            actions.append({"path": str(root / "artifacts" / dst),
+                            "operation": "create_symlink" if source.exists() else "skip_missing_source",
+                            "target": str(source)})
+    return {"version": 1, "project_root": str(root), "can_apply": not exists,
+            "reason": "project_exists" if exists else None, "actions": actions}
 
 
 def initialize_workspace(
@@ -182,18 +212,24 @@ def initialize_workspace(
     artifact_links: Sequence[Tuple[str, str]] = (),
     agents: Sequence[str] = DEFAULT_AGENTS,
 ) -> Dict[str, object]:
-    _validate_project_name(project_name)
-    for agent in agents:
-        _validate_agent_name(agent)
+    plan = plan_workspace(project_name, oacp_root=oacp_root, repo_dir=repo_dir,
+                          artifact_links=artifact_links, agents=agents)
     project_root = oacp_root / "projects" / project_name
+    if not plan["can_apply"]:
+        raise ProjectExistsError(f"project root already exists: {project_root}")
+    project_root.parent.mkdir(parents=True, exist_ok=True)
+    # Exclusive reservation is the apply-time no-clobber gate. A dry-run is a
+    # snapshot, not a lock: another initializer may win before this mkdir.
+    try:
+        project_root.mkdir()
+    except FileExistsError as exc:
+        raise ProjectExistsError(f"project root already exists: {project_root}") from exc
 
-    all_dirs = _agent_dirs(agents) + list(STATIC_DIRECTORIES)
-    for relative_dir in all_dirs:
-        (project_root / relative_dir).mkdir(parents=True, exist_ok=True)
-
-    all_gitkeeps = _agent_gitkeeps(agents) + list(STATIC_GITKEEP_PATHS)
-    for relative_path in all_gitkeeps:
-        (project_root / relative_path).touch()
+    for relative_dir, keep in workspace_layout(agents):
+        directory = project_root / relative_dir
+        directory.mkdir(parents=True, exist_ok=True)
+        if keep:
+            (directory / ".gitkeep").touch()
 
     _write_if_missing(project_root / "memory" / "project_facts.md", _project_facts_template())
     _write_if_missing(
@@ -229,7 +265,8 @@ def initialize_workspace(
         "updated_at": now,
         "spec_version": SPEC_VERSION,
     }
-    workspace_path.write_text(json.dumps(workspace, indent=2) + "\n", encoding="utf-8")
+    with workspace_path.open("x", encoding="utf-8") as handle:
+        handle.write(json.dumps(workspace, indent=2) + "\n")
 
     warnings: List[str] = []
     created_links: List[Tuple[str, str]] = []
@@ -243,10 +280,6 @@ def initialize_workspace(
                 warnings.append(f"Skipped artifacts/{dst} — {source} not found")
                 continue
             destination.parent.mkdir(parents=True, exist_ok=True)
-            if destination.is_symlink() or destination.is_file():
-                destination.unlink()
-            elif destination.exists():
-                raise ValueError(f"artifact destination exists and is not a symlink: {destination}")
             destination.symlink_to(source)
             created_links.append((dst, str(source)))
 
@@ -272,6 +305,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     try:
+        if args.dry_run:
+            plan = plan_workspace(args.project_name, oacp_root=oacp_root,
+                                  repo_dir=repo_dir, artifact_links=args.link,
+                                  agents=agents_list)
+            if args.json_output:
+                print(json.dumps(plan, indent=2))
+            else:
+                print(f"Plan: {plan['project_root']}")
+                if plan["reason"]:
+                    print(f"Refused: {plan['reason']}")
+                for action in plan["actions"]:
+                    print(f"  {action['operation']}: {action['path']}")
+            return 0 if plan["can_apply"] else 3
         result = initialize_workspace(
             args.project_name,
             oacp_root=oacp_root,
@@ -279,9 +325,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             artifact_links=args.link,
             agents=agents_list,
         )
-    except ValueError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
+    except (ValueError, OSError) as exc:
+        code = 3 if isinstance(exc, ProjectExistsError) else 1
+        if args.json_output:
+            print(json.dumps({"version": 1, "error": "already_exists" if code == 3 else "initialization_failed",
+                              "message": str(exc)}))
+        else:
+            print(f"Error: {exc}", file=sys.stderr)
+        return code
+
+    if args.json_output:
+        print(json.dumps(dict(result, version=1), default=str, indent=2))
+        return 0
 
     if result["created_links"]:
         print(f"Creating artifact symlinks from repo: {repo_dir}")

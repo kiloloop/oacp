@@ -101,7 +101,7 @@ def test_modification_cli_round_trip_preserves_admission_and_auth(
     modification_path = tmp_path / "modification.yaml"
     modification_path.write_text(yaml.safe_dump(modification))
     result = subprocess.run([
-        sys.executable, "-m", "oacp.cli", "autonomy-outcome", str(audit_path),
+        sys.executable, "-m", "oacp.cli", "autonomy", "outcome", str(audit_path),
         "--decision", "modified", "--modification-file", str(modification_path),
         "--actor", "alice", "--decided-at", "2026-07-11T01:02:05Z", "--json",
     ], cwd=Path(__file__).resolve().parent.parent, capture_output=True, text=True)

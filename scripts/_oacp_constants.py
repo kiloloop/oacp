@@ -17,7 +17,7 @@ REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 # names the contract it was produced under. Moves only under the
 # contract-version rule (docs/protocol/autonomy.md, "Contract version");
 # the spec's own literals must agree (tests/test_spec_version.py).
-SPEC_VERSION = "0.5.2"
+SPEC_VERSION = "0.5.3"
 CREATABLE_RUNTIMES = ("claude", "codex", "cursor", "gemini")
 ALL_RUNTIMES = ("claude", "codex", "cursor", "gemini", "human", "unknown")
 CODEX_SESSION_START_CONTEXT_LIMIT = 2_500
@@ -38,6 +38,67 @@ CANONICAL_CAPABILITIES = {
 }
 
 
+# Immutable directory policy: (scope, relative directory, placeholder marker).
+# Agent paths expand only over the caller's explicit or existing roster.
+WORKSPACE_LAYOUT = (
+    ("agent", "inbox", True),
+    ("agent", "inbox/archive", True),
+    ("agent", "outbox", True),
+    ("agent", "dead_letter", True),
+    ("agent", "audit/autonomy_decisions", True),
+    ("project", "packets/review", True),
+    ("project", "packets/findings", True),
+    ("project", "packets/test", True),
+    ("project", "packets/deploy", True),
+    ("project", "checkpoints", True),
+    ("project", "merges", True),
+    ("project", "memory", False),
+    ("project", "memory/archive", False),
+    ("project", "artifacts", True),
+    ("project", "state", False),
+    ("project", "logs", False),
+)
+AGENT_SUBDIRS = tuple(path for scope, path, _ in WORKSPACE_LAYOUT if scope == "agent")
+
+
+def validate_project_name(name: str) -> None:
+    """Preserve the project-name boundary used by init and agent addition."""
+    if name.startswith(".") or "/" in name or "\\" in name:
+        raise ValueError("project name must not contain path separators or start with '.'")
+
+
+def workspace_layout(agents=(), *, scope: str | None = None) -> tuple:
+    """Expand immutable (relative directory, gitkeep) entries for a roster.
+
+    The caller owns agent-name validation. Migration/diagnostic callers supply
+    existing visible directory names instead of inventing a default roster.
+    """
+    if scope not in {None, "agent", "project"}:
+        raise ValueError(f"unknown workspace layout scope: {scope}")
+    entries = []
+    if scope in {None, "agent"}:
+        entries.extend(
+            (f"agents/{agent}/{path}", keep)
+            for agent in agents
+            for row_scope, path, keep in WORKSPACE_LAYOUT
+            if row_scope == "agent"
+        )
+    if scope in {None, "project"}:
+        entries.extend(
+            (path, keep) for row_scope, path, keep in WORKSPACE_LAYOUT
+            if row_scope == "project"
+        )
+    return tuple(entries)
+
+
+def existing_agent_names(project_dir: Path) -> tuple:
+    """Snapshot the existing visible roster in deterministic name order."""
+    agents_dir = project_dir / "agents"
+    if not agents_dir.is_dir():
+        return ()
+    return tuple(sorted(path.name for path in agents_dir.iterdir() if is_agent_dir(path)))
+
+
 def is_agent_dir(path: Path) -> bool:
     """Return whether *path* is a visible agent directory."""
     return path.is_dir() and not path.name.startswith(".")
@@ -51,6 +112,16 @@ def utc_now_iso(now: dt.datetime | None = None) -> str:
     else:
         base = base.astimezone(dt.timezone.utc)
     return base.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def audit_directory_warning(path: Path) -> str | None:
+    """Diagnose a custom audit location without changing its semantics."""
+    if Path(path).name != "autonomy_decisions":
+        return (
+            f"audit directory {str(path)!r}: expected basename 'autonomy_decisions'; "
+            "records outside the canonical layout may be invisible to workspace tooling"
+        )
+    return None
 
 
 @contextmanager

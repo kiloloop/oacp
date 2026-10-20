@@ -66,7 +66,7 @@ class TestToListSelfSend(unittest.TestCase):
 class TestHandoffBroadcastRejected(unittest.TestCase):
     def test_handoff_broadcast_rejected(self):
         msg = _base_msg(type="handoff", to=["codex", "gemini"])
-        # Skill body diagnostics must not suppress the envelope broadcast error.
+        # Handoff body contents must not suppress the envelope broadcast error.
         errors = validate_message_dict(msg)
         self.assertTrue(any("does not support broadcast" in e for e in errors))
 
@@ -195,33 +195,28 @@ class TestBackwardCompatStringTo(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
-class TestSkillBodyAdvisories(unittest.TestCase):
+class TestWorkflowBodyBoundary(unittest.TestCase):
     def test_errors_api_stays_compatible_without_collector(self):
         for kind in ("handoff", "handoff_complete"):
             self.assertEqual(validate_message_dict(_base_msg(type=kind)), [])
 
-    def test_advisories_append_without_mutating_message(self):
+    def test_body_validation_leaves_message_and_compatibility_collector_unchanged(self):
         for kind in ("handoff", "handoff_complete"):
             msg = _base_msg(type=kind)
             original = dict(msg)
             notes = [{"code": "caller_note"}]
             self.assertEqual(validate_message_dict(msg, advisories=notes), [])
             self.assertEqual(msg, original)
-            self.assertEqual(notes[0], {"code": "caller_note"})
-            self.assertGreater(len(notes), 1)
-            for finding in notes[1:]:
-                self.assertEqual(finding["code"], "skill_owned_body_schema")
-                self.assertEqual(finding["severity"], "advisory")
-                self.assertTrue(finding["detail"].startswith(kind + " body: "))
+            self.assertEqual(notes, [{"code": "caller_note"}])
 
-    def test_advisory_does_not_hide_envelope_error(self):
+    def test_workflow_body_does_not_hide_envelope_error(self):
         for kind in ("handoff", "handoff_complete"):
             notes = []
             errors = validate_message_dict(
                 _base_msg(type=kind, expires_at="invalid"), advisories=notes
             )
             self.assertTrue(any("expires_at" in error for error in errors))
-            self.assertTrue(notes)
+            self.assertEqual(notes, [])
 
 
 if __name__ == "__main__":

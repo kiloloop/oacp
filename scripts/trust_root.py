@@ -184,7 +184,7 @@ def load_catalog(catalog_path: Path) -> Dict[str, Dict[str, Any]]:
 
 
 def load_public_stub(stub_path: Path) -> Dict[str, Any]:
-    """Load and validate a ``<kid>.pub.json`` stub written by ``oacp key gen``.
+    """Load and validate a ``<kid>.pub.json`` stub written by ``oacp trust keygen``.
 
     Returns a normalized entry: agent, domain, instance, kid, jwk,
     created_at_utc. Raises ``TrustImportError`` on any structural or

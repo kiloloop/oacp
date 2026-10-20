@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from _oacp_constants import AGENT_RE, ALL_RUNTIMES
+from _oacp_yaml import YAMLMappingError, load_yaml_mapping
 
 # ---------------------------------------------------------------------------
 # Schema definitions
@@ -96,19 +97,12 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
     """Load a YAML file, trying PyYAML first then falling back to simple parser."""
     raw = path.read_text(encoding="utf-8")
     try:
-        import yaml  # type: ignore
-
-        data = yaml.safe_load(raw)
-    except ImportError:
-        data = _parse_simple_yaml(raw)
-    except Exception as exc:
-        raise ValueError(f"YAML parse error: {exc}") from exc
-
-    if data is None:
-        data = {}
-    if not isinstance(data, dict):
-        raise ValueError("top-level YAML must be a mapping")
-    return data
+        return load_yaml_mapping(
+            raw, allow_empty=True, fallback=_parse_simple_yaml,
+            parse_error=lambda exc: ValueError(f"YAML parse error: {exc}"),
+        )
+    except YAMLMappingError as exc:
+        raise ValueError("top-level YAML must be a mapping") from exc
 
 
 def _parse_simple_yaml(raw: str) -> Dict[str, Any]:

@@ -151,6 +151,44 @@ class TestCheckWorkspace(unittest.TestCase):
             self.assertEqual(agents_result.severity, Severity.error)
 
 
+    def test_minimal_workspace_uses_only_existing_visible_roster(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            project_dir = Path(td)
+            _write(project_dir / "workspace.json", '{}')
+            for name in ("alice", ".scratch"):
+                (project_dir / "agents" / name).mkdir(parents=True)
+            cat = check_workspace(project_dir)
+            self.assertEqual({result.name for result in cat.results}, {"workspace.json", "agents/"})
+            self.assertTrue(all(result.severity == Severity.ok for result in cat.results))
+            roster = next(result for result in cat.results if result.name == "agents/")
+            self.assertEqual(roster.message, "agents/ directory — 1 agent(s)")
+            self.assertEqual(list((project_dir / "agents" / "alice").iterdir()), [])
+
+    def test_fix_missing_inbox_leaves_no_stale_workspace_error(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            project_dir = home / "projects" / "demo"
+            (project_dir / "agents" / "bob").mkdir(parents=True)
+            _write(project_dir / "workspace.json", '{}')
+            categories = [check_workspace(project_dir), check_inbox_health(project_dir)]
+            self.assertFalse(has_errors(categories))
+            self.assertEqual(categories[1].results[0].fixable, "mkdir_inbox")
+            fixed = apply_fixes(categories, home, "demo")
+            self.assertIn("Created bob/inbox/", fixed)
+            self.assertTrue((project_dir / "agents" / "bob" / "inbox").is_dir())
+            self.assertFalse(has_errors(categories))
+            self.assertTrue(all(row.severity == Severity.ok for row in categories[0].results))
+
+    def test_doctor_rejects_unsafe_project_names(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            for project in (".hidden", "a/b", "a\\b"):
+                cats = run_doctor(project=project, oacp_dir=Path(td),
+                                  runner=_fake_runner(), which_fn=_fake_which(set()))
+                workspace = next(cat for cat in cats if cat.name == "Workspace")
+                self.assertEqual(workspace.results[0].name, "project-name")
+                self.assertEqual(workspace.results[0].severity, Severity.error)
+
+
 class TestCheckInboxHealth(unittest.TestCase):
     def test_empty_inbox(self) -> None:
         with tempfile.TemporaryDirectory() as td:

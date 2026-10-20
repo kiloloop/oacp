@@ -68,5 +68,8 @@ two_pauses_first_answer_human_outcome.yaml: []
 declined_checkpoint_marked_done.yaml:
 - terminal_paused_without_outcome
 terminal_time_pause_cleared.yaml: []
+terminal_time_clear_precedes_pause.yaml:
+- checkpoint_clear_precedes_pause
+- terminal_paused_without_outcome
 terminal_time_pause_after_completion.yaml:
 - actual_minutes_inconsistent

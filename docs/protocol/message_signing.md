@@ -160,9 +160,9 @@ it grants nothing to revoke).
 
 ```bash
 # on the signer's machine — mints the keypair + a public stub
-oacp key gen --agent iris
-# → $OACP_HOME/keys/<domain>/iris/<instance>/<kid>.json       (private, 0600)
-# → $OACP_HOME/keys/<domain>/iris/<instance>/<kid>.pub.json   (public stub)
+oacp trust keygen --agent alice
+# → $OACP_HOME/keys/<domain>/alice/<instance>/<kid>.json       (private, 0600)
+# → $OACP_HOME/keys/<domain>/alice/<instance>/<kid>.pub.json   (public stub)
 
 # on the receiver's side — catalog + pin in one step
 oacp trust import /path/to/<kid>.pub.json --project my-project --agent claude
@@ -196,6 +196,8 @@ makes the whole file unusable rather than silently trusted. How a stub
 travels between machines is out of scope for v0.4.0: any channel the
 operator already trusts for configuration (the pins are receiver-local
 either way).
+
+For read-only verification of multiple paths, see [batch verification](../guides/batch-verification.md).
 
 ## Receiver audit stamping (`--attach-audit`)
 
@@ -256,7 +258,7 @@ can never authenticate a message.
 
 - **Trust anchor**: the machine-local keystore under `$OACP_HOME/keys/`.
   A policy file for receiver X verifies only against agent X's own public
-  keys (the `<kid>.pub.json` stubs written by `oacp key gen`); a valid
+  keys (the `<kid>.pub.json` stubs written by `oacp trust keygen`); a valid
   signature by a *different* local agent's key is a receiver-binding
   failure, not authorization. Tampering with a policy file on disk
   therefore requires the 0600 private key material, not just filesystem
@@ -320,7 +322,7 @@ can never authenticate a message.
   with no record; absent pins simply mean no pins).
 - **Bootstrap**: a fresh workspace's policy files are unsigned and load
   normally with `policy_auth.status: unsigned` recorded — signing requires
-  a key, so the order is `oacp init` → `oacp key gen --agent <receiver>` →
+  a key, so the order is `oacp init` → `oacp trust keygen --agent <receiver>` →
   `oacp trust sign-policy`. Unsigned is a visible, recorded state, never a
   silent one. On a host without the crypto extra, a signed but
   *unenrolled* policy file records `unsupported` and loads (signing
@@ -352,7 +354,7 @@ can never authenticate a message.
 
 ## Rotation and revocation
 
-Rotation is overlap-based: `oacp key gen` mints a new key alongside the
+Rotation is overlap-based: `oacp trust keygen` mints a new key alongside the
 old; senders sign with every local key (capped at 8), so a message
 verifies against either pin while receivers import the new stub. Remove
 the retired key file to stop signing with it; receivers revoke the old pin

@@ -58,12 +58,18 @@ related_pr: "86"
 subject: "Review: review loop protocol (#86)"
 body: |
   pr: 86
+  repo: acme/widgets
   branch: claude/review-loop-protocol
+  round: 1
+  max_rounds: 2
+  declared_head: 4f6c2a9d8e1b3c5a7f0d2e4b6a8c1e3f5a7b9d0c
   diff_summary: |
     Adds review loop protocol spec, reviewer workflow,
     reviewer runbook, 4 new message types in validate_message.py,
     tests, and CHANGELOG/inbox_outbox.md updates.
   handoff_ref: ""
+  side_effects:
+    - comments_on_github
   max_turns_reviewer: 8
   max_runtime_s_reviewer: 600
 ```
@@ -77,8 +83,12 @@ body: |
 | `diff_summary` | Yes | Brief summary of the changes |
 | `repo` | No* | Repository slug (`owner/repo`). *Required on granted rounds; the review workflow validates it against the approved thread's repository and PR before work |
 | `round` | No* | 1-based review round of this request (default `1`). *Declare explicitly on granted follow-up rounds; the receiver floors it against its own audit trail |
+| `max_rounds` | No | Round cap the author declares for this review: `2` by default, `3` at most (see Round Limits). A request past the cap carries `human_direction` |
 | `declared_head` | No | Full commit SHA the author believes is the PR head. Advisory only — the reviewer never trusts it (see Exact-Head Validation) |
-| `side_effects` | No | Review side effects this round needs beyond the defaults (`writes_findings_packet`, `sends_oacp_reply`); entries from `comments_on_github`, `submits_github_review` |
+| `side_effects` | No* | GitHub actions the round needs beyond the defaults (`writes_findings_packet`, `sends_oacp_reply`), from `comments_on_github` and `submits_github_review`. *Required whenever the round expects any GitHub action: omission declares the defaults only, and the reviewer withholds every undeclared action (reported in `withheld_side_effects`) — on a repository whose ruleset requires a submitted review, an undeclared `submits_github_review` costs a round |
+| `human_direction` | No* | Who sanctioned a round past `max_rounds`, when, and its scope. *Required on such a round (see Escalation) |
+| `supersedes_message_id` | No | `id` of an earlier `review_request` this one replaces (see Superseding a request) |
+| `supersede_reason` | No* | Why the earlier request is replaced. *Required with `supersedes_message_id` |
 | `handoff_ref` | No | Reference to a handoff packet if this review follows a handoff |
 | `max_turns_reviewer` | No | Hard turn budget for reviewer invocation (default `8`) |
 | `max_runtime_s_reviewer` | No | Hard runtime budget in seconds for reviewer invocation (default `600`) |
@@ -98,8 +108,10 @@ related_pr: "86"
 subject: "Review feedback: round 1 (#86)"
 body: |
   findings_packet: packets/findings/20260213_review_loop_codex_r1.yaml
+  validated_head: 4f6c2a9d8e1b3c5a7f0d2e4b6a8c1e3f5a7b9d0c
   round: 1
   blocking_count: 2
+  withheld_side_effects: []
   telemetry:
     model: gpt-5
     turns: 6
@@ -114,12 +126,25 @@ body: |
 | Field | Required | Description |
 |-------|----------|-------------|
 | `findings_packet` | Yes | Path to the findings packet (relative to project workspace) |
+| `validated_head` | Yes | Full SHA of the live PR head the findings bind to — the exact-head resolution, never the request's `declared_head` (see Exact-Head Validation) |
 | `round` | Yes | Current review round number (1-based) |
 | `blocking_count` | Yes | Number of blocking findings in this round |
+| `withheld_side_effects` | No | Declared or granted effects the reviewer did not perform this round (`[]` when it performed every declared effect); see Continuation Grants |
 | `escalation` | No | Escalation marker (for example `max_rounds_exceeded` or `reviewer_budget_exceeded`) |
 | `telemetry` | No | Optional telemetry map with `model`, `turns`, `input_tokens`, `output_tokens`, `wall_time_s`, `est_cost_usd` |
 
 The findings packet follows the standard format in `templates/findings_packet.template.yaml`.
+
+Finding `id` values (`F-NNN`) are per round. A packet may give each finding a
+stable `fingerprint` — a hash of the file plus the rule class or normalized
+title, in the shape of SARIF `partialFingerprints` — so a delta-round packet
+can tie a row to its origin without restating rows; it is optional. OACP
+bundles no packet validator: the per-finding fields and the status values
+that close a finding are the owning review workflow's. The template seeds
+`status: open`, and the closure vocabulary in use is `fixed` and `wont_fix`
+(carried over from the bundled evaluator OACP no longer ships); a workflow
+that adopts another set maps these two in its validator before its reviewers
+emit the new values.
 
 ### `review_addressed`
 
@@ -135,7 +160,7 @@ created_at_utc: "2026-02-13T11:00:00Z"
 related_pr: "86"
 subject: "Feedback addressed: round 1 (#86)"
 body: |
-  commit_sha: abc1234
+  commit_sha: 9b1d7e3f5a2c4e6b8d0f1a3c5e7b9d2f4a6c8e0b
   changes_summary: |
     Fixed both blocking issues:
     - Added missing error handling for empty diff
@@ -153,11 +178,13 @@ body: |
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `commit_sha` | Yes | Commit SHA containing the fixes |
+| `commit_sha` | Yes | Full SHA of the commit containing the fixes |
 | `changes_summary` | Yes | Summary of what was changed to address the feedback |
 | `round` | Yes | The round number whose feedback is being addressed |
+| `validated_head` | No | Full PR head SHA after the fixes were pushed, when it is not `commit_sha` itself (a follow-up or squashed commit); the next round still resolves the live head |
 | `touched_files` | No | List of files edited to address findings |
 | `addressed_finding_ids` | No | List of finding IDs the author considers addressed |
+| `human_direction` | No* | Who sanctioned the round that follows, when, and its scope. *Required when the next `review_request` runs past `max_rounds` (see Escalation) |
 
 ### `review_lgtm`
 
@@ -175,6 +202,8 @@ subject: "LGTM: review loop protocol (#86)"
 body: |
   quality_gate_result: pass
   merge_ready: true
+  validated_head: 9b1d7e3f5a2c4e6b8d0f1a3c5e7b9d2f4a6c8e0b
+  withheld_side_effects: []
   nits:
     - nit_id: NIT-001
       tier: P3
@@ -199,6 +228,8 @@ body: |
 |-------|----------|-------------|
 | `quality_gate_result` | Yes | Result of the quality gate check (`pass` or `fail`) |
 | `merge_ready` | Yes | Whether the PR is ready to merge (`true` or `false`) |
+| `validated_head` | Yes | Full SHA of the live PR head the approval binds to; the author's completion check compares it with the live head before merging, and any later head change needs a fresh round (see Exact-Head Validation) |
+| `withheld_side_effects` | No | Declared or granted effects the reviewer did not perform this round (`[]` when it performed every declared effect); see Continuation Grants |
 | `nits` | No | Structured list of deferred non-blocking items (`P2`/`P3`) tracked after merge readiness |
 | `follow_ups` | No | Legacy shorthand list of deferred items; may mirror `nits` during migration |
 | `telemetry` | No | Optional telemetry map with `model`, `turns`, `input_tokens`, `output_tokens`, `wall_time_s`, `est_cost_usd` |
@@ -240,9 +271,26 @@ context, never evidence:
   the live head, or a truncated declaration, is a mismatch, not a match.
 - A mismatch does not abort the round: the reviewer reviews the live head
   and approves only what it actually validated.
+- Every terminal verdict names the head it validated in `validated_head`,
+  taken verbatim from the live resolution. The author's completion check
+  compares that value with the live head before merging.
 - Head drift after approval or PR comment invalidates completion: an LGTM
   binds to the exact head it validated, and any later head change requires
   a fresh round.
+
+### Superseding a Request
+
+An author replaces a request the reviewer cannot act on — a wrong or moved
+head, a wrong repository, a body that misstates the ask — by sending a new
+`review_request` in the same conversation, threaded on the old one, with
+`supersedes_message_id` naming the old request and `supersede_reason`
+saying why. The replacement is an ordinary request: it is admitted on its
+own and inherits no authority from the one it replaces. The reviewer's
+workflow establishes the supersession, acts on the replacement only, and
+closes a never-admitted original through the
+[sender-superseded review](autonomy.md#closing-a-sender-superseded-never-admitted-review)
+terminal path; an original already admitted is cancelled by its own rules.
+The kernel does not read these fields.
 
 ### Continuation Grants (Auto-Continued Rounds)
 
@@ -297,7 +345,7 @@ scope; historical audit evidence is preserved. See the
 
 - **Default maximum rounds**: 2 (aligned with `packet_states.yaml` and `multi_agent_shared_workspace.md`).
 - Projects may configure up to 3 rounds via `max_review_rounds` in project `AGENTS.md`, but the default is 2.
-- Configurable per review via the `review_request` body or project-level configuration.
+- Configurable per review via `max_rounds` in the `review_request` body (never above 3) or project-level configuration.
 - After reaching the maximum round count without passing the quality gate, the reviewer sends a final `review_feedback` with an escalation note in the body indicating the round limit was reached.
 
 ### Budget Controls
@@ -311,7 +359,7 @@ When a budget is exhausted before review completion, reviewer sends `review_feed
 
 ### Shell-Only Polling Rule
 
-Any wait state (inbox polling, timeouts, reminders) **MUST** use shell or script loops. Periodic idle polling **MUST NOT** consume LLM turns.
+Any wait state (inbox polling, timeouts, reminders) **MUST** use shell or script loops. Periodic idle polling **MUST NOT** consume LLM turns. An event-driven wakeup (an inbox watcher such as `oacp watch` starting a fresh invocation when a message lands) satisfies this rule; a loop that re-reads the inbox inside LLM turns does not.
 
 ### Timeout Behavior
 
@@ -339,6 +387,13 @@ Escalation occurs when:
 2. **Reviewer budget exceeded**: reviewer sends `review_feedback` with `escalation: reviewer_budget_exceeded`.
 3. **Unresolvable disagreement**: either party sends a `question` message to coordinator/team lead.
 4. **Staleness/timeout**: author escalates via `notification`.
+
+A round past `max_rounds` runs only on recorded human direction. The
+`review_request` that opens it, and the `review_addressed` that precedes it,
+carry `human_direction`: who sanctioned the round, when, and its scope. The
+sanction covers that round alone; a further round needs a fresh one. A valid
+in-scope continuation grant counts as recorded direction (see Continuation
+Grants).
 
 ### Risk-Tiered Finding Outcomes (#155)
 
@@ -404,9 +459,11 @@ The quality gate determines whether reviewer sends `review_lgtm` or another `rev
 
 This aligns with existing merge-readiness criteria in the shared workspace protocol.
 
-Integration points:
-- `scripts/preflight.py` — automated quality checks (conflict markers, linting, etc.)
-- `scripts/check_quality_gate.py` — dedicated script for machine-readable quality-gate evaluation (see `packet_states.yaml`)
+The owning review workflow evaluates these criteria with its versioned
+validator before sending a verdict or authorizing side effects. OACP no longer
+bundles a findings-policy evaluator or a `make quality` target.
+`scripts/preflight.py` remains the repository check for conflict markers,
+linting, packaging, and tests.
 
 ## Comparison with background review automation
 
@@ -441,6 +498,7 @@ subject: "Review: new logging module (#90)"
 body: |
   pr: 90
   branch: claude/jsonl-logging
+  max_rounds: 2
   diff_summary: |
     Adds structured JSONL logging to all scripts.
     New file: scripts/logger.py (200 lines).
@@ -462,6 +520,7 @@ related_pr: "90"
 subject: "Review feedback: round 1 (#90)"
 body: |
   findings_packet: packets/findings/20260213_logging_gemini_r1.yaml
+  validated_head: 2c8e4a6f0b1d3e5a7c9f1b3d5e7a9c1e3f5b7d9a
   round: 1
   blocking_count: 1
 ```
@@ -478,7 +537,7 @@ created_at_utc: "2026-02-13T10:15:00Z"
 related_pr: "90"
 subject: "Feedback addressed: round 1 (#90)"
 body: |
-  commit_sha: def5678
+  commit_sha: 7d1f3b5a9c2e4f6a8b0d2c4e6f8a0b2d4c6e8f0a
   changes_summary: |
     Fixed blocking P1: added file rotation to prevent unbounded log growth.
   round: 1
@@ -522,6 +581,7 @@ subject: "LGTM: new logging module (#90)"
 body: |
   quality_gate_result: pass
   merge_ready: true
+  validated_head: 7d1f3b5a9c2e4f6a8b0d2c4e6f8a0b2d4c6e8f0a
   nits:
     - nit_id: NIT-001
       tier: P3

@@ -14,7 +14,7 @@ Usage:
     trust_cli.py sign-policy --project <name> --agent <receiver>
                  [--kid <kid>] [--oacp-dir <path>] [--json]
 
-`import` records a `<kid>.pub.json` public stub (written by `oacp key gen`)
+`import` records a `<kid>.pub.json` public stub (written by `oacp trust keygen`)
 in the project's zero-authority catalog and pins it `active` in the
 receiver's `allowed_signers.yaml` — the pins are what grant trust at verify
 time. `--catalog-only` records the identity without granting anything.
@@ -27,10 +27,10 @@ import.
 
 `sign-policy` signs the receiver's two policy files — `config.yaml` and
 `trust/allowed_signers.yaml` — with the receiver agent's own local signing
-key (`oacp key gen`), appending a policy-class auth trailer to each. Run it
+key (`oacp trust keygen`), appending a policy-class auth trailer to each. Run it
 after creating the workspace and again after every policy edit; loaders
 verify the signatures at load time and fail closed on tamper. Bootstrap
-order for a fresh project: `oacp init` → `oacp key gen --agent <receiver>`
+order for a fresh project: `oacp init` → `oacp trust keygen --agent <receiver>`
 → `oacp trust sign-policy` (unsigned policy files load with the unsigned
 state recorded until then).
 
@@ -97,7 +97,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     imp = sub.add_parser(
         "import", help="Import a public key stub into catalog + receiver pins"
     )
-    imp.add_argument("stub", help="Path to a <kid>.pub.json stub from `oacp key gen`")
+    imp.add_argument("stub", help="Path to a <kid>.pub.json stub from `oacp trust keygen`")
     imp.add_argument("--project", required=True, help="Project workspace name")
     imp.add_argument(
         "--agent",

@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-10-20
+
+Kernel commands regroup under `agent`, `trust`, and `autonomy`, and the retired memory, packet, and findings surfaces leave the kernel.
+
+### Added
+
+- Custom audit directories outside the expected layout draw a warning ([guide](docs/guides/command-migration.md#audit-directory-diagnostics)).
+- Message verification streams verdicts for paths supplied on standard input ([guide](docs/guides/batch-verification.md)).
+- Admission and finalization stamp the serving model and effort ([contract](docs/protocol/autonomy.md#terminal-finalization-and-audit-integrity)).
+- Task profiles may declare `sends_oacp_reply` for the completion reply ([contract](docs/protocol/autonomy.md#message-fields)).
+
+### Changed
+
+- **Breaking:** Agent, key, and audit-writer commands move under `agent`, `trust`, and `autonomy` ([migration](docs/guides/command-migration.md)).
+- **Breaking:** Workspace initialization refuses existing roots and offers a write-free plan ([migration](docs/guides/workspace-initialization.md)).
+- Protocol contract stamp `spec_version` moves to `0.5.3` ([contract version](docs/protocol/autonomy.md#contract-version)).
+- Review verdicts name the head they bind to in `validated_head` ([spec](docs/protocol/review_loop.md#message-schemas)).
+- Review rounds add `max_rounds`, `withheld_side_effects`, `human_direction`, supersession ([spec](docs/protocol/review_loop.md#message-schemas)).
+- A review round that expects a GitHub action must declare `side_effects` ([spec](docs/protocol/review_loop.md#message-schemas)).
+- `SECURITY.md` names the same-user forgery limit of message signing ([policy](SECURITY.md#local-forgery-the-same-user-threat-model)).
+
+### Removed
+
+- Packet initialization and the packet and handoff templates ([migration](docs/guides/command-migration.md#packet-and-handoff-templates)).
+- The findings evaluator and quality gate; workflows own their validators ([migration](docs/guides/command-migration.md#workflow-validators)).
+- Handoff body-schema checks and advisories from message validation and admission ([boundary](docs/protocol/inbox_outbox.md#validation-boundary)).
+- The `oacp memory` and `oacp org-memory` shims; call the memory tool directly ([migration](docs/guides/memory-cli-migration.md)).
+- The `oacp write-event` shim and bundled event writer; use `agent-memory event write` ([migration](docs/guides/memory-cli-migration.md)).
+- The `oacp retention` advisory command ([migration](docs/guides/memory-cli-migration.md#retention)).
+
+### Fixed
+
+- Never-admitted reviews close on replacement evidence ([contract](docs/protocol/autonomy.md#closing-a-sender-superseded-never-admitted-review)).
+- Workspace updates preserve the existing agent roster ([layout](scripts/_oacp_constants.py)).
+- Inbox and watch text output keeps untrusted values on a bounded, terminal-safe line ([renderers](scripts/oacp_inbox.py)).
+- A scoped re-authorization decided before its pause clears it at the pause stamp ([contract](docs/protocol/autonomy.md#consumption)).
+- A stored clear stamped before its pause reads as unanswered ([contract](docs/protocol/autonomy.md#threshold-exceeded-checkpoint)).
+- `sends_oacp_reply_only: true` covers its own reply without a checkpoint pause ([contract](docs/protocol/autonomy.md#threshold-exceeded-checkpoint)).
+- A breaching `--replace` on a closed record fails closed ([contract](docs/protocol/autonomy.md#terminal-finalization-and-audit-integrity)).
+- The envelope hook treats `gh search` as a read ([adapter](docs/protocol/autonomy.md#delivery-static-shim-dynamic-envelope)).
+- The envelope hook exempts single-pipeline sandboxed `$TMPDIR` writes ([adapter](docs/protocol/autonomy.md#delivery-static-shim-dynamic-envelope)).
+- The envelope hook no longer counts quoted redirect characters as file writes ([classifier](scripts/claude_envelope_hook.py)).
+- The envelope hook asks for review on unsupported quoting, shell comments, and ambiguous heredocs ([classifier](scripts/claude_envelope_hook.py)).
+- The envelope hook classifies mutations after command-substitution environment assignments ([classifier](scripts/claude_envelope_hook.py)).
+- The envelope hook permits read-only message verification while retaining review for write modes ([classifier](scripts/claude_envelope_hook.py)).
+- `oacp setup claude` writes an agent file Claude Code loads, named after the project ([template](templates/claude/agents/role_agent.template.md)).
+
 ## [0.5.2] - 2026-09-15
 
 ### Added
@@ -912,6 +959,7 @@ The central debrief store is the headline change: every agent's full end-of-sess
 - Checkout step in github-release workflow job (#19)
 - Pre-release audit fixes: SHA-pinned actions, dangling doc refs (#15, #16)
 
+[0.5.3]: https://github.com/kiloloop/oacp/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/kiloloop/oacp/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/kiloloop/oacp/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/kiloloop/oacp/compare/v0.4.6...v0.5.0

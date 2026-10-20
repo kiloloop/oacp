@@ -131,10 +131,12 @@ When recording an MCP tool invocation in evidence, include:
 
 ## Integration Points
 
-### check_quality_gate.py
+### Workflow quality gates
 
-No changes needed. The quality gate evaluates findings by `severity`, `blocking`,
-and `status` — evidence attachments are informational and don't affect the gate verdict.
+The owning review workflow evaluates findings by `severity`, `blocking`, and
+`status` using its versioned validator. Evidence attachments are informational
+and do not affect the gate verdict. The kernel does not bundle a findings
+policy evaluator or a GitHub Actions quality-gate template.
 
 ### Gemini QA Workflow
 
@@ -158,7 +160,7 @@ When Claude or Codex read a findings packet with `evidence_attachments`:
 - The `evidence` field remains a plain string — no breaking changes
 - `evidence_attachments` is optional — old packets without it still work
 - `mcp_tool` in `commands_run` is optional — plain commands still work
-- `check_quality_gate.py` ignores unknown fields in findings
+- Evidence metadata does not change the workflow's findings-status policy
 
 ## Future Extensions
 

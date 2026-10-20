@@ -4,7 +4,7 @@ A single skill format that works across Claude Code and Codex runtimes. One agen
 
 ## Status
 
-Draft — Issue #105
+Draft
 
 ## File Structure
 
@@ -72,7 +72,7 @@ One-line summary.
 ### Claude Code
 
 - Execution model notes specific to Claude Code
-- Tool-specific instructions (Task tool, Read tool, etc.)
+- Tool-specific instructions (Agent tool, Read tool, etc.)
 
 ### Codex
 
@@ -133,11 +133,11 @@ Put runtime-specific execution details in `## Runtime Adapters`:
 
 | Concern | Claude Code | Codex |
 |---------|-------------|-------|
-| Background tasks | `run_in_background: true` on Bash tool | Foreground loop in session |
+| Background tasks | Monitor tool running `oacp watch` for recurring events; `run_in_background: true` on Bash tool for one-shot waits | Foreground loop in session |
 | File reading | Read tool | `cat` or inline python |
 | YAML parsing | Read tool (raw text, LLM parses) | `python3 yaml.safe_load` |
-| Sandbox | `dangerouslyDisableSandbox: true` for `gh`/`git`/`rm` | Use default permissions; request escalation only when required by environment policy |
-| Subagent spawning | Task tool with model/mode params | Native multi-agent tools (`spawn_agent`, `send_input`, `wait_agent`, `close_agent`) |
+| Sandbox | Sandboxed by default; retry with `dangerouslyDisableSandbox: true` only after a command fails on a sandbox restriction | Use default permissions; request escalation only when required by environment policy |
+| Subagent spawning | Agent tool with `subagent_type`/`model` params | Native multi-agent tools (`spawn_agent`, `send_input`, `wait_agent`, `close_agent`) |
 | Skill invocation | Skill tool (`/review-loop-reviewer`) | Direct command reference |
 
 ### 4. Action tables are universal
@@ -184,11 +184,11 @@ See the current Claude and Codex implementations in the [oacp-skills](https://gi
 - `codex/skills/check-inbox/SKILL.md`
 
 Key differences that would live in `## Runtime Adapters`:
-- Claude: background Bash poller with `run_in_background: true`
+- Claude: Monitor tool running `oacp watch`
 - Codex: foreground loop in session
 - Claude: Read tool for YAML parsing
 - Codex: `python3 yaml.safe_load` for structured parsing
-- Claude: `dangerouslyDisableSandbox: true`
+- Claude: sandboxed by default; unsandboxed retry only after a sandbox-restriction failure
 - Codex: use default permissions; request escalation only when required by environment
 
 Everything else (args, action table, safety rules, protocol references) is identical.

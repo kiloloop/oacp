@@ -13,7 +13,7 @@ a message.
 
 Trust anchor: the machine-local keystore under ``$OACP_HOME/keys/``. A
 policy file for receiver X must verify against one of agent X's own public
-keys (the ``<kid>.pub.json`` stubs written by ``oacp key gen``). Tampering
+keys (the ``<kid>.pub.json`` stubs written by ``oacp trust keygen``). Tampering
 with a policy file on disk therefore requires the 0600 private key material,
 not just filesystem write access. The receiver-binding check is what stops a
 co-located agent's key from authorizing another receiver's policy.
@@ -37,7 +37,7 @@ Verification outcomes (the load contract):
 
 - ``unsigned`` — no auth trailer AND the target was never enrolled.
   Loadable; recorded as unsigned. This is the bootstrap state: a fresh
-  workspace signs its policy files after the first ``oacp key gen`` via
+  workspace signs its policy files after the first ``oacp trust keygen`` via
   ``oacp trust sign-policy``, which enrolls the target.
 - ``verified`` — the trailer verifies against a keystore key owned by the
   receiver agent AND the signed context matches the target. The signer

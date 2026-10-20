@@ -30,15 +30,12 @@ import argparse
 import datetime as dt
 import json
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
 
-try:
-    import yaml
-except ImportError:  # pragma: no cover
-    yaml = None  # type: ignore[assignment]
-
 from _oacp_constants import is_agent_dir
+from _oacp_yaml import YAMLMappingError, load_yaml_mapping
 
 
 def _resolve_oacp_home(explicit: Optional[str] = None) -> Path:
@@ -53,19 +50,17 @@ def _coerce_oacp_home(explicit: Optional[Union[str, Path]]) -> Path:
 
 def _parse_yaml_mapping_bytes(raw: bytes, path: Path) -> Dict[str, Any]:
     """Parse a mapping from an already-read snapshot (never re-reads *path*)."""
-    text = raw.decode("utf-8")
-    if yaml is not None:
-        loaded = yaml.load(text, Loader=yaml.BaseLoader)
-    else:
+    def fallback(text: str) -> Dict[str, Any]:
         from validate_message import _parse_simple_yaml
+        return _parse_simple_yaml(text)
 
-        loaded = _parse_simple_yaml(text)
-
-    if loaded is None:
-        return {}
-    if not isinstance(loaded, dict):
-        raise ValueError(f"top-level YAML must be a mapping: {path}")
-    return loaded
+    try:
+        return load_yaml_mapping(
+            raw.decode("utf-8"), string_scalars=True, allow_empty=True,
+            fallback=fallback,
+        )
+    except YAMLMappingError as exc:
+        raise ValueError(f"top-level YAML must be a mapping: {path}") from exc
 
 
 def _parse_created_at(value: str) -> Optional[dt.datetime]:
@@ -254,6 +249,20 @@ def list_inbox(
     }
 
 
+def sanitize_text(value: Any, limit: int = 200) -> str:
+    """Bound untrusted display text to one terminal-safe line.
+
+    Shared by inbox and watch text renderers; structured output keeps the
+    original values. Escape table separators before computing column widths.
+    """
+    text = "".join(
+        "?" if unicodedata.category(char) in {"Cc", "Cf", "Cs", "Zl", "Zp"}
+        else "\\|" if char == "|" else char
+        for char in str(value)[:limit]
+    )
+    return text[:limit - 3] + "..." if len(text) > limit or len(str(value)) > limit else text
+
+
 def _render_table(messages: List[Dict[str, str]]) -> str:
     headers = ["#", "From", "Type", "Priority", "Subject", "Age"]
     rows = [
@@ -267,6 +276,7 @@ def _render_table(messages: List[Dict[str, str]]) -> str:
         ]
         for index, message in enumerate(messages, start=1)
     ]
+    rows = [[sanitize_text(cell) for cell in row] for row in rows]
     widths = [
         max(len(header), *(len(row[col]) for row in rows))
         for col, header in enumerate(headers)
@@ -283,10 +293,10 @@ def _render_table(messages: List[Dict[str, str]]) -> str:
 def render_report(report: Dict[str, Any]) -> str:
     """Render a human-readable inbox listing."""
     sections: List[str] = []
-    project = str(report["project"])
+    project = sanitize_text(report["project"])
     for agent_report in report["agents"]:
         count = int(agent_report["message_count"])
-        header = f"INBOX: {agent_report['agent']} ({project}) — {count} message"
+        header = f"INBOX: {sanitize_text(agent_report['agent'])} ({project}) — {count} message"
         if count != 1:
             header += "s"
         if count == 0:

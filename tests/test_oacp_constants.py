@@ -15,6 +15,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from _oacp_constants import (  # noqa: E402
     AGENT_RE,
+    WORKSPACE_LAYOUT,
+    existing_agent_names,
+    validate_project_name,
+    workspace_layout,
     _template_path,
     _write_if_missing,
     is_agent_dir,
@@ -72,6 +76,46 @@ class TestTemplatePath(unittest.TestCase):
     def test_resolves_repo_template(self) -> None:
         with _template_path("agent_card.template.yaml") as path:
             self.assertTrue(path.is_file())
+
+
+class TestWorkspaceLayout(unittest.TestCase):
+    def test_table_and_expansion_are_immutable(self):
+        self.assertIsInstance(WORKSPACE_LAYOUT, tuple)
+        self.assertTrue(all(isinstance(row, tuple) for row in WORKSPACE_LAYOUT))
+        empty = workspace_layout()
+        self.assertTrue(empty)
+        self.assertTrue(all(not path.startswith("agents/") for path, _ in empty))
+        selected = dict(workspace_layout(("alice", "bob")))
+        for agent in ("alice", "bob"):
+            self.assertTrue(selected[f"agents/{agent}/inbox/archive"])
+            self.assertTrue(selected[f"agents/{agent}/audit/autonomy_decisions"])
+        for path in ("memory", "memory/archive", "state", "logs"):
+            self.assertFalse(selected[path])
+        self.assertTrue(selected["packets/review"])
+        self.assertEqual(dict(workspace_layout(("alice",), scope="agent")),
+                         {path: keep for path, keep in selected.items() if path.startswith("agents/alice/")})
+
+    def test_project_name_boundary_is_shared_without_narrowing_other_names(self):
+        from add_agent import _validate_project_name as add_validate
+        from init_project_workspace import _validate_project_name as init_validate
+        self.assertIs(add_validate, validate_project_name)
+        self.assertIs(init_validate, validate_project_name)
+        for invalid in (".hidden", "..", "a/b", "a\\b"):
+            with self.subTest(name=invalid), self.assertRaisesRegex(ValueError, "path separators"):
+                validate_project_name(invalid)
+        for valid in ("demo", "a..b", "project 1", "_custom"):
+            validate_project_name(valid)
+
+    def test_existing_roster_is_sorted_and_skips_hidden_or_regular_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertEqual(existing_agent_names(root), ())
+            agents = root / "agents"
+            agents.mkdir()
+            for name in ("bob", ".scratch", "alice"):
+                (agents / name).mkdir()
+            (agents / "not-an-agent.txt").touch()
+            self.assertEqual(existing_agent_names(root), ("alice", "bob"))
 
 
 if __name__ == "__main__":

@@ -817,7 +817,7 @@ def load_signers(
         where = _keys_root(oacp_home)
         raise SigningUnavailableError(
             f"no signing key for agent {agent!r} under {where} — "
-            "run: oacp key gen --agent " + agent
+            "run: oacp trust keygen --agent " + agent
         )
     entries.sort(key=lambda e: e["created_at_utc"], reverse=True)
     return [FileKeySigner(Path(e["key_path"])) for e in entries[:MAX_SIGNATURES]]

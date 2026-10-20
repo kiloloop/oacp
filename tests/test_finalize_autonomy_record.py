@@ -18,6 +18,10 @@ from finalize_autonomy_record import (  # noqa: E402
     DuplicateKeyError,
     FINALIZER_PROVENANCE,
     FINDING_SEVERITIES,
+    _active_minutes,
+    _checkpoint_resolved,
+    _effective_clear,
+    _governing_checkpoint_answer,
     _predecessor_evaluation_id,
     apply_checkpoint,
     finalize_audit_record,
@@ -27,6 +31,8 @@ from finalize_autonomy_record import (  # noqa: E402
     validate_audit_record,
 )
 from autonomy_gate import (  # noqa: E402
+    RUNTIME_EFFORT_ENV_VAR,
+    RUNTIME_MODEL_ENV_VAR,
     continuation_scope_envelope,
     evaluate_threshold_checkpoint,
     normalize_continuation_scope,
@@ -986,6 +992,120 @@ def test_cli_finalizes_done(tmp_path: Path) -> None:
     assert stored["result"]["final_state"] == "done"
     assert stored["result"]["reply_message_id"] == "msg-20260801020000-claude-9999"
     assert stored["result"]["finalizer"] == FINALIZER_PROVENANCE
+
+
+# ── serving runtime at completion ─────────────────────────────────────────
+
+
+def _finalize_done_argv(path: Path, *extra: str) -> list:
+    return [
+        str(path),
+        "--final-state", "done",
+        "--actual-minutes", "20",
+        "--actual-files-touched", "3",
+        "--started-at", "2026-08-01T01:40:00Z",
+        "--completed-at", "2026-08-01T02:00:00Z",
+        "--realized", "creates_or_updates_pr",
+        "--realized", "commits_changes",
+        *extra,
+    ]
+
+
+def test_cli_done_stamps_serving_runtime_from_session_signals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(RUNTIME_MODEL_ENV_VAR, "Claude-Fable-5[1m]")
+    monkeypatch.setenv(RUNTIME_EFFORT_ENV_VAR, "xhigh")
+    path = _write(tmp_path, _record(human_outcome=_human_outcome()))
+    assert main(_finalize_done_argv(path)) == 0
+    stored = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert stored["result"]["runtime"] == {
+        "agent": "claude",
+        "model": "claude-fable-5",
+        "model_source": f"env:{RUNTIME_MODEL_ENV_VAR}",
+        "model_context": "1m",
+        "model_raw": "Claude-Fable-5[1m]",
+        "effort": "xhigh",
+        "effort_source": f"env:{RUNTIME_EFFORT_ENV_VAR}",
+    }
+    # The admission-time block is never backfilled from the terminal stamp.
+    assert "runtime" not in stored
+
+
+def test_cli_done_runtime_flags_win_over_session_signals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(RUNTIME_MODEL_ENV_VAR, "some-other-model")
+    monkeypatch.setenv(RUNTIME_EFFORT_ENV_VAR, "low")
+    path = _write(tmp_path, _record(human_outcome=_human_outcome()))
+    assert main(_finalize_done_argv(path, "--model", "gpt-5", "--effort", "High")) == 0
+    runtime = yaml.safe_load(path.read_text(encoding="utf-8"))["result"]["runtime"]
+    assert runtime["model"] == "gpt-5"
+    assert runtime["model_source"] == "caller"
+    assert runtime["effort"] == "high"
+    assert runtime["effort_source"] == "caller"
+    assert runtime["effort_raw"] == "High"
+
+
+def test_cli_done_without_runtime_signal_stamps_explicit_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(RUNTIME_MODEL_ENV_VAR, raising=False)
+    monkeypatch.delenv(RUNTIME_EFFORT_ENV_VAR, raising=False)
+    path = _write(tmp_path, _record(human_outcome=_human_outcome()))
+    assert main(_finalize_done_argv(path)) == 0
+    runtime = yaml.safe_load(path.read_text(encoding="utf-8"))["result"]["runtime"]
+    assert runtime["model"] is None
+    assert runtime["model_unknown_reason"]
+    assert runtime["effort"] is None
+    assert runtime["effort_unknown_reason"]
+
+
+def test_cli_runtime_flags_refused_outside_terminal_finalization(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    record = _record(decision="auto_accepted", completion_kind="auto_accepted", final_state="pending")
+    path = _write(tmp_path, record)
+    rc = main([
+        str(path),
+        "--checkpoint",
+        "--actual-minutes", "1",
+        "--actual-files-touched", "0",
+        "--started-at", "2026-08-01T01:20:00Z",
+        "--effort", "high",
+    ])
+    assert rc == 2
+    assert "--model and --effort" in capsys.readouterr().err
+    assert yaml.safe_load(path.read_text(encoding="utf-8")) == record
+
+
+def test_checkpoint_and_supersession_stamp_no_terminal_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(RUNTIME_MODEL_ENV_VAR, "gpt-5")
+    live = _record(decision="auto_accepted", completion_kind="auto_accepted", final_state="pending")
+    updated, paused = apply_checkpoint(
+        live,
+        {
+            "actual_minutes": 1,
+            "actual_files_touched": 0,
+            "work_started_at_utc": "2026-08-01T01:20:00Z",
+        },
+    )
+    assert paused is False
+    assert "runtime" not in updated["result"]
+
+    record = _record()
+    path = _write(tmp_path, record)
+    _write_successor(tmp_path)
+    updated, _ = finalize_audit_record(
+        path,
+        record,
+        final_state="superseded",
+        actuals={},
+        superseded_by="eval-0123456789abcdef",
+    )
+    assert "runtime" not in updated["result"]
 
 
 def test_cli_done_without_work_start_fails_without_mutation(tmp_path: Path) -> None:
@@ -3013,3 +3133,708 @@ def test_library_terminal_write_after_a_delayed_clear_derives_to_the_pin(tmp_pat
     assert done["result"]["actual_minutes"] == minutes
     assert done["result"]["threshold_checkpoint"]["action"] == "resumed_after_reauthorization"
     assert validate_audit_record(done) == []
+
+
+# ── reply-only legs, out-of-order clears, and closed-record --replace ─────
+
+
+def _reply_only_envelope() -> Dict[str, Any]:
+    envelope = dict(ENVELOPE)
+    for key in (
+        "external_side_effects", "creates_or_updates_pr", "comments_on_github",
+        "commits_changes", "merges_pr", "files_issues",
+    ):
+        envelope[key] = False
+    envelope["sends_oacp_reply_only"] = True
+    return envelope
+
+
+def test_finalize_done_reply_only_leg_realizing_reply_stays_within_envelope(
+    tmp_path: Path,
+) -> None:
+    record = _record(human_outcome=_human_outcome(), envelope=_reply_only_envelope())
+    path = _write(tmp_path, record)
+    updated, paused = finalize_audit_record(
+        path,
+        record,
+        final_state="done",
+        actuals={
+            "actual_minutes": 18,
+            "actual_files_touched": 2,
+            "work_started_at_utc": "2026-08-01T01:40:00Z",
+            "completed_at_utc": "2026-08-01T01:58:00Z",
+            "side_effects_actual": {"sends_oacp_reply": True},
+        },
+        reply_message_id="msg-20260801015800-claude-0001",
+    )
+    assert paused is False
+    checkpoint = updated["result"]["threshold_checkpoint"]
+    assert checkpoint["breached"] is False
+    assert checkpoint["declaration_errors"] == []
+    assert checkpoint["action"] == "within_declared_envelope"
+    assert checkpoint["side_effects_actual"]["sends_oacp_reply"] is True
+    assert updated["result"]["final_state"] == "done"
+    assert validate_audit_record(updated) == []
+
+
+def test_finalize_done_reply_on_profile_without_reply_only_still_pauses(
+    tmp_path: Path,
+) -> None:
+    record = _record(human_outcome=_human_outcome())
+    path = _write(tmp_path, record)
+    updated, paused = finalize_audit_record(
+        path,
+        record,
+        final_state="done",
+        actuals={
+            "actual_minutes": 18,
+            "actual_files_touched": 2,
+            "work_started_at_utc": "2026-08-01T01:40:00Z",
+            "side_effects_actual": {
+                "creates_or_updates_pr": True,
+                "commits_changes": True,
+                "sends_oacp_reply": True,
+            },
+        },
+    )
+    assert paused is True
+    checkpoint = updated["result"]["threshold_checkpoint"]
+    assert checkpoint["breached_fields"] == ["side_effects_actual.sends_oacp_reply"]
+    assert checkpoint["terminal_time"] is True
+
+
+def test_reconcile_reply_only_envelope_covers_realized_reply(tmp_path: Path) -> None:
+    record = _resolved_checkpoint_record()
+    record["scope_envelope"] = _reply_only_envelope()
+    path = _write(tmp_path, record)
+    updated, paused = finalize_audit_record(
+        path,
+        record,
+        final_state="done",
+        actuals={
+            "actual_minutes": 50,
+            "actual_files_touched": 3,
+            "side_effects_actual": {"sends_oacp_reply": True},
+        },
+    )
+    assert paused is False
+    checkpoint = updated["result"]["threshold_checkpoint"]
+    assert checkpoint["side_effects_actual"]["sends_oacp_reply"] is True
+    assert validate_audit_record(updated) == []
+
+
+def _out_of_order_clear_record(
+    *, final_state: str, completed_at: Optional[str], actual_minutes: int = 18,
+) -> Dict[str, Any]:
+    """The corpus shape: a terminal-time pause whose recorded clear is the
+    admission approval, stamped before the pause it names."""
+    record = _record(
+        human_outcome=_human_outcome("2026-08-01T01:11:50Z"),
+        envelope=_reply_only_envelope(),
+        completion_kind="checkpoint_paused",
+        final_state=final_state,
+    )
+    record["result"].update({
+        "work_started_at_utc": "2026-08-01T01:11:50Z",
+        "actual_minutes": actual_minutes,
+        "actual_files_touched": 2,
+        "completed_at_utc": completed_at,
+        "finalizer": dict(FINALIZER_PROVENANCE),
+        "threshold_checkpoint": {
+            "evaluated": True,
+            "actual_minutes": 18,
+            "actual_files_touched": 2,
+            "side_effects_actual": {
+                "creates_or_updates_pr": False,
+                "comments_on_github": False,
+                "commits_changes": False,
+                "merges_pr": False,
+                "files_issues": False,
+                "sends_oacp_reply": True,
+            },
+            "breached": True,
+            "breached_fields": ["side_effects_actual.sends_oacp_reply"],
+            "declaration_errors": ["side_effects_actual.sends_oacp_reply"],
+            "breach_basis": "realized",
+            "breach_sub_basis": None,
+            "paused_at_utc": "2026-08-01T01:29:03Z",
+            "action": "resumed_after_reauthorization",
+            "predicted_risk_materialized": False,
+            "completed_at_utc": "2026-08-01T01:29:03Z",
+            "reauthorization": {
+                "presented": True,
+                "channel": "receiver_human",
+                "decision": "approved",
+                "decided_at_utc": "2026-08-01T01:11:50Z",
+                "actor": "alice",
+                "source_message_id": None,
+                "requested_scope": {"sends_oacp_reply": True},
+                "scope": {
+                    "creates_or_updates_pr": False,
+                    "comments_on_github": False,
+                    "commits_changes": False,
+                    "merges_pr": False,
+                    "files_issues": False,
+                    "sends_oacp_reply": True,
+                },
+                "disposition": "resumed",
+                "cleared_paused_at_utc": "2026-08-01T01:11:50Z",
+                "advisory": [],
+            },
+            "terminal_time": True,
+        },
+    })
+    return record
+
+
+def test_out_of_order_clear_reads_as_unanswered_and_never_subtracts(
+    tmp_path: Path,
+) -> None:
+    record = _out_of_order_clear_record(final_state="paused", completed_at=None)
+    assert _effective_clear(record["result"]) is None
+    assert _checkpoint_resolved(record) is False
+    # 01:11:50 -> 01:29:03 is 17m13s; the malformed clear excludes nothing
+    # (the writer that read it as a clear reported 35 for these 18).
+    assert _active_minutes(record, "2026-08-01T01:11:50Z", "2026-08-01T01:29:03Z") == 18
+    path = _write(tmp_path, record)
+    with pytest.raises(ValueError, match="clears nothing"):
+        finalize_audit_record(
+            path,
+            record,
+            final_state="done",
+            actuals={
+                "actual_minutes": 18,
+                "actual_files_touched": 2,
+                "side_effects_actual": {"sends_oacp_reply": True},
+            },
+        )
+
+
+def test_cli_out_of_order_clear_repairs_through_fresh_answer(tmp_path: Path) -> None:
+    from record_autonomy_outcome import main as outcome_main
+
+    record = _out_of_order_clear_record(
+        final_state="paused", completed_at=None, actual_minutes=35,
+    )
+    path = _write(tmp_path, record)
+    original = path.read_bytes()
+    finalize_args = [
+        str(path), "--final-state", "done",
+        "--actual-files-touched", "2",
+        "--realized", "sends_oacp_reply",
+        "--reply-message-id", "msg-20260801012900-claude-0001",
+    ]
+    assert main(finalize_args) == 2
+    assert path.read_bytes() == original
+
+    assert outcome_main([
+        str(path), "--decision", "approved",
+        "--decided-at", "2026-08-01T01:35:00Z", "--actor", "alice",
+    ]) == 0
+    stored = yaml.safe_load(path.read_text(encoding="utf-8"))
+    reauth = stored["result"]["threshold_checkpoint"]["reauthorization"]
+    assert reauth["decided_at_utc"] == "2026-08-01T01:35:00Z"
+    assert reauth["cleared_paused_at_utc"] == "2026-08-01T01:35:00Z"
+    assert stored["result"]["human_outcome"]["decided_at_utc"] == "2026-08-01T01:11:50Z"
+
+    assert main(finalize_args) == 0
+    stored = yaml.safe_load(path.read_text(encoding="utf-8"))
+    result = stored["result"]
+    assert result["final_state"] == "done"
+    assert result["completed_at_utc"] == "2026-08-01T01:29:03Z"
+    # Derived from the pinned completion; the inflated 35 never survives.
+    assert result["actual_minutes"] == 18
+    assert result["reply_message_id"] == "msg-20260801012900-claude-0001"
+    assert result["threshold_checkpoint"]["action"] == "resumed_after_reauthorization"
+    assert validate_audit_record(stored) == []
+
+
+def test_validator_flags_done_record_with_out_of_order_clear() -> None:
+    record = _out_of_order_clear_record(
+        final_state="done", completed_at="2026-08-01T01:29:03Z",
+    )
+    codes = sorted(finding["code"] for finding in validate_audit_record(record))
+    assert codes == ["checkpoint_clear_precedes_pause", "terminal_paused_without_outcome"]
+    inflated = _out_of_order_clear_record(
+        final_state="done", completed_at="2026-08-01T01:29:03Z", actual_minutes=35,
+    )
+    codes = sorted(finding["code"] for finding in validate_audit_record(inflated))
+    assert codes == [
+        "actual_minutes_inconsistent",
+        "checkpoint_clear_precedes_pause",
+        "terminal_paused_without_outcome",
+    ]
+
+
+def _legacy_prospective_clear_record() -> Dict[str, Any]:
+    """The shape an older writer stored for a scoped grant decided before the
+    pause it answers: the clear copied from the decision time, earlier than
+    the pause it names — unfinalizable until the answer is re-presented."""
+    record = _record(
+        decision="auto_accepted", completion_kind="auto_accepted", final_state="pending",
+    )
+    record["scope_envelope"] = dict(ENVELOPE, expected_files_touched=3)
+    scope = {"max_actual_minutes": 45, "max_actual_files_touched": 5}
+    record["result"].update({
+        "work_started_at_utc": "2026-08-01T01:37:07Z",
+        "actual_minutes": 7,
+        "actual_files_touched": 4,
+        "threshold_checkpoint": {
+            "evaluated": True,
+            "actual_minutes": 7,
+            "actual_files_touched": 4,
+            "side_effects_actual": {},
+            "breached": True,
+            "breached_fields": ["actual_files_touched"],
+            "declaration_errors": [],
+            "breach_basis": "realized",
+            "breach_sub_basis": None,
+            "paused_at_utc": "2026-08-01T01:44:18Z",
+            "action": "resumed_after_reauthorization",
+            "predicted_risk_materialized": False,
+            "reauthorization": {
+                "presented": True,
+                "channel": "receiver_human",
+                "decision": "approved",
+                "decided_at_utc": "2026-08-01T01:40:34Z",
+                "actor": "alice",
+                "source_message_id": None,
+                "requested_scope": dict(scope),
+                "scope": dict(scope),
+                "disposition": "resumed",
+                "cleared_paused_at_utc": "2026-08-01T01:40:34Z",
+                "advisory": [],
+            },
+        },
+    })
+    return record
+
+
+def test_validator_flags_live_record_with_out_of_order_clear() -> None:
+    # The read-side mirror of the terminal refusal: a live record whose
+    # stored clear precedes its pause is reported before anyone finalizes.
+    record = _out_of_order_clear_record(final_state="paused", completed_at=None)
+    codes = [finding["code"] for finding in validate_audit_record(record)]
+    assert codes == ["checkpoint_clear_precedes_pause"]
+    legacy = _legacy_prospective_clear_record()
+    codes = [finding["code"] for finding in validate_audit_record(legacy)]
+    assert codes == ["checkpoint_clear_precedes_pause"]
+
+
+def test_cli_legacy_prospective_clear_repairs_by_representing_the_answer(
+    tmp_path: Path,
+) -> None:
+    # A scoped grant decided before its pause is prospective: re-running the
+    # checkpoint with the same answer records the clear at the pause stamp,
+    # and the record finalizes with nothing excluded from the work clock.
+    record = _legacy_prospective_clear_record()
+    path = _write(tmp_path, record)
+    config = tmp_path / "config.yaml"
+    config.write_text(POLICY_YAML, encoding="utf-8")
+    actuals = tmp_path / "actuals.yaml"
+    actuals.write_text(
+        yaml.safe_dump({
+            "actual_minutes": 7,
+            "actual_files_touched": 4,
+            "reauthorization": {
+                "receiver_human": {
+                    "decision": "approved",
+                    "decided_at_utc": "2026-08-01T01:40:34Z",
+                    "actor": "alice",
+                    "scope": {"max_actual_minutes": 45, "max_actual_files_touched": 5},
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    done_args = [
+        str(path), "--final-state", "done",
+        "--actual-files-touched", "4",
+        "--completed-at", "2026-08-01T01:44:18Z",
+        "--config", str(config),
+    ]
+    assert main(done_args) == 2
+    assert main([
+        str(path), "--checkpoint", "--actuals", str(actuals), "--config", str(config),
+    ]) == 0
+    stored = yaml.safe_load(path.read_text(encoding="utf-8"))
+    checkpoint = stored["result"]["threshold_checkpoint"]
+    assert checkpoint["action"] == "resumed_after_reauthorization"
+    assert checkpoint["paused_at_utc"] == "2026-08-01T01:44:18Z"
+    reauth = checkpoint["reauthorization"]
+    assert reauth["disposition"] == "resumed"
+    assert reauth["decided_at_utc"] == "2026-08-01T01:40:34Z"
+    assert reauth["cleared_paused_at_utc"] == "2026-08-01T01:44:18Z"
+    assert validate_audit_record(stored) == []
+
+    assert main(done_args) == 0
+    stored = yaml.safe_load(path.read_text(encoding="utf-8"))
+    result = stored["result"]
+    assert result["final_state"] == "done"
+    assert result["completed_at_utc"] == "2026-08-01T01:44:18Z"
+    # 01:37:07 -> 01:44:18 is 7m11s; the zero-length pause excludes nothing.
+    assert result["actual_minutes"] == 8
+    assert validate_audit_record(stored) == []
+
+
+def test_apply_checkpoint_records_scoped_answer_decided_before_unanswered_pause() -> None:
+    # A scoped budget the human granted at work start, presented against
+    # the pause that fired later: prospective — the record carries no
+    # earlier answer, the clear lands at the pause stamp, nothing waited.
+    record = _resolved_checkpoint_record()
+    checkpoint = record["result"]["threshold_checkpoint"]
+    checkpoint["reauthorization"] = {"presented": False, "disposition": "unanswered"}
+    checkpoint["action"] = "paused_for_reauthorization"
+    updated, paused = apply_checkpoint(
+        record,
+        {
+            "actual_minutes": 50,
+            "actual_files_touched": 3,
+            "reauthorization": {
+                "receiver_human": {
+                    "decision": "approved",
+                    "decided_at_utc": "2026-08-01T01:10:00Z",
+                    "actor": "alice",
+                    "scope": {"max_actual_minutes": 60},
+                },
+            },
+        },
+        now_utc="2026-08-01T02:05:00Z",
+    )
+    assert paused is False
+    reauth = updated["result"]["threshold_checkpoint"]["reauthorization"]
+    assert reauth["disposition"] == "resumed"
+    assert reauth["decided_at_utc"] == "2026-08-01T01:10:00Z"
+    assert reauth["cleared_paused_at_utc"] == "2026-08-01T02:00:00Z"
+    assert validate_audit_record(updated) == []
+
+
+def test_apply_checkpoint_refuses_scoped_answer_decided_before_work_start() -> None:
+    # Before work start no checkpoint answer can have been given: an
+    # earlier stamp is the admission approval re-dressed with a scope.
+    record = _resolved_checkpoint_record()
+    checkpoint = record["result"]["threshold_checkpoint"]
+    checkpoint["reauthorization"] = {"presented": False, "disposition": "unanswered"}
+    checkpoint["action"] = "paused_for_reauthorization"
+    with pytest.raises(ValueError, match="precedes the pause it answers"):
+        apply_checkpoint(
+            record,
+            {
+                "actual_minutes": 50,
+                "actual_files_touched": 3,
+                "reauthorization": {
+                    "receiver_human": {
+                        "decision": "approved",
+                        "decided_at_utc": "2026-08-01T01:05:00Z",
+                        "actor": "alice",
+                        "scope": {"max_actual_minutes": 60},
+                    },
+                },
+            },
+            now_utc="2026-08-01T02:05:00Z",
+        )
+
+
+def test_apply_checkpoint_honors_recorded_standing_answer_at_pause_stamp() -> None:
+    scope = {
+        "max_actual_minutes": 60,
+        "creates_or_updates_pr": False,
+        "comments_on_github": False,
+        "commits_changes": False,
+        "merges_pr": False,
+        "files_issues": False,
+    }
+    record = _resolved_checkpoint_record(reauth_scope=scope)
+    record["result"]["threshold_checkpoint"]["reauthorization"].update({
+        "actor": "alice",
+        "requested_scope": {"max_actual_minutes": 60},
+        "cleared_paused_at_utc": "2026-08-01T02:10:00Z",
+    })
+    updated, paused = apply_checkpoint(
+        record,
+        {
+            "actual_minutes": 55,
+            "actual_files_touched": 3,
+            "paused_at_utc": "2026-08-01T02:30:00Z",
+            "reauthorization": {
+                "receiver_human": {
+                    "decision": "approved",
+                    "decided_at_utc": "2026-08-01T02:10:00Z",
+                    "actor": "alice",
+                    "scope": {"max_actual_minutes": 60},
+                },
+            },
+        },
+        now_utc="2026-08-01T02:30:00Z",
+    )
+    assert paused is False
+    checkpoint = updated["result"]["threshold_checkpoint"]
+    assert checkpoint["paused_at_utc"] == "2026-08-01T02:30:00Z"
+    assert checkpoint["reauthorization"]["disposition"] == "resumed"
+    assert checkpoint["reauthorization"]["cleared_paused_at_utc"] == "2026-08-01T02:30:00Z"
+    (retired,) = updated["result"]["pause_intervals"]
+    assert retired["paused_at_utc"] == "2026-08-01T02:00:00Z"
+    assert retired["cleared_paused_at_utc"] == "2026-08-01T02:10:00Z"
+    assert not [f for f in validate_audit_record(updated) if f["severity"] == "error"]
+
+
+def _superseded_answer_record(disposition: str = "resumed") -> Dict[str, Any]:
+    """An auto-accepted record whose checkpoint block carries a scoped answer
+    that did not clear the 02:00 pause — stamped before it, or arbitrated
+    stale, insufficient or declined — and whose pause the recorder's
+    first-answer route then answered with a scope-less human outcome."""
+    from record_autonomy_outcome import record_human_outcome
+
+    scope = {
+        "max_actual_minutes": 80,
+        "creates_or_updates_pr": False,
+        "comments_on_github": False,
+        "commits_changes": False,
+        "merges_pr": False,
+        "files_issues": False,
+    }
+    record = _resolved_checkpoint_record(reauth_scope=scope)
+    reauth = record["result"]["threshold_checkpoint"]["reauthorization"]
+    reauth.update({
+        "actor": "alice",
+        "decided_at_utc": "2026-08-01T01:50:00Z",
+        "disposition": disposition,
+    })
+    if disposition == "resumed":
+        reauth["cleared_paused_at_utc"] = "2026-08-01T01:50:00Z"
+    if disposition == "declined":
+        reauth["decision"] = "declined"
+    return record_human_outcome(
+        record,
+        decision="approved",
+        actor="bob",
+        decided_at_utc="2026-08-01T02:10:00Z",
+        grant_decision="not_requested",
+    )
+
+
+def _revived_answer_actuals(decided_at: str = "2026-08-01T01:50:00Z") -> Dict[str, Any]:
+    return {
+        "actual_minutes": 70,
+        "actual_files_touched": 3,
+        "paused_at_utc": "2026-08-01T02:30:00Z",
+        "reauthorization": {
+            "receiver_human": {
+                "decision": "approved",
+                "decided_at_utc": decided_at,
+                "actor": "alice",
+                "scope": {"max_actual_minutes": 80},
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize("disposition", ["resumed", "stale", "insufficient", "declined"])
+def test_answer_that_did_not_clear_the_pause_is_not_standing(disposition: str) -> None:
+    record = _superseded_answer_record(disposition)
+    # The human outcome, not the stored answer, cleared the 02:00 pause.
+    clear = _effective_clear(record["result"])
+    assert clear is not None and clear["decided_at_utc"] == "2026-08-01T02:10:00Z"
+    assert _governing_checkpoint_answer(record["result"]["threshold_checkpoint"]) is None
+    with pytest.raises(ValueError, match="not the standing answer"):
+        apply_checkpoint(record, _revived_answer_actuals(), now_utc="2026-08-01T02:30:00Z")
+
+
+def test_unstamped_resumed_answer_decided_before_its_pause_is_not_standing() -> None:
+    record = _superseded_answer_record()
+    del record["result"]["threshold_checkpoint"]["reauthorization"]["cleared_paused_at_utc"]
+    assert _governing_checkpoint_answer(record["result"]["threshold_checkpoint"]) is None
+    with pytest.raises(ValueError, match="not the standing answer"):
+        apply_checkpoint(record, _revived_answer_actuals(), now_utc="2026-08-01T02:30:00Z")
+
+
+def test_scope_less_human_outcome_clears_only_its_own_pause() -> None:
+    record = _superseded_answer_record()
+    actuals = _revived_answer_actuals("2026-08-01T02:10:00Z")
+    actuals["reauthorization"]["receiver_human"]["actor"] = "bob"
+    del actuals["reauthorization"]["receiver_human"]["scope"]
+    updated, paused = apply_checkpoint(record, actuals, now_utc="2026-08-01T02:30:00Z")
+    assert paused is True
+    checkpoint = updated["result"]["threshold_checkpoint"]
+    assert checkpoint["paused_at_utc"] == "2026-08-01T02:30:00Z"
+    assert checkpoint["reauthorization"]["disposition"] == "stale"
+    (retired,) = updated["result"]["pause_intervals"]
+    assert retired["paused_at_utc"] == "2026-08-01T02:00:00Z"
+    assert retired["cleared_paused_at_utc"] == "2026-08-01T02:10:00Z"
+    assert _checkpoint_resolved(updated) is False
+
+
+def test_cli_refuses_revived_answer_and_keeps_bytes(tmp_path: Path) -> None:
+    record = _superseded_answer_record()
+    record_path = _write(tmp_path, record)
+    actuals_path = tmp_path / "actuals.yaml"
+    actuals_path.write_text(
+        yaml.safe_dump(_revived_answer_actuals(), sort_keys=False), encoding="utf-8"
+    )
+    original = record_path.read_bytes()
+
+    rc = main([str(record_path), "--checkpoint", "--actuals", str(actuals_path)])
+
+    assert rc == 2
+    assert record_path.read_bytes() == original
+
+    # A fresh answer decided at the new pause clears it; the pause the
+    # human outcome answered retires under that outcome, not under the
+    # revived scope.
+    actuals_path.write_text(
+        yaml.safe_dump(_revived_answer_actuals("2026-08-01T02:30:00Z"), sort_keys=False),
+        encoding="utf-8",
+    )
+    assert main([str(record_path), "--checkpoint", "--actuals", str(actuals_path)]) == 0
+    stored = yaml.safe_load(record_path.read_text(encoding="utf-8"))
+    reauth = stored["result"]["threshold_checkpoint"]["reauthorization"]
+    assert reauth["disposition"] == "resumed"
+    assert reauth["cleared_paused_at_utc"] == "2026-08-01T02:30:00Z"
+    (retired,) = stored["result"]["pause_intervals"]
+    assert retired["decided_at_utc"] == "2026-08-01T02:10:00Z"
+    assert not [f for f in validate_audit_record(stored) if f["severity"] == "error"]
+
+
+@pytest.mark.parametrize("disposition", ["resumed", "stale", "insufficient", "declined"])
+def test_reconcile_reads_scope_only_from_the_governing_answer(
+    tmp_path: Path, disposition: str,
+) -> None:
+    record = _superseded_answer_record(disposition)
+    path = _write(tmp_path, record)
+    original = path.read_bytes()
+    # 01:10 -> 02:30 less the answered 02:00 -> 02:10 pause is 70 active
+    # minutes: clock-consistent, yet 20 beyond the extent the scope-less
+    # outcome cleared. The stored answer's 80-minute budget did not clear
+    # the pause and is no budget.
+    with pytest.raises(
+        ValueError, match=r"exceeds the extent the scope-less approval cleared \(50\)"
+    ):
+        finalize_audit_record(
+            path,
+            record,
+            final_state="done",
+            actuals={
+                "actual_minutes": 70,
+                "actual_files_touched": 3,
+                "completed_at_utc": "2026-08-01T02:30:00Z",
+            },
+        )
+    assert path.read_bytes() == original
+    # The extent the outcome cleared still finalizes.
+    updated, paused = finalize_audit_record(
+        path,
+        record,
+        final_state="done",
+        actuals={
+            "actual_minutes": 50,
+            "actual_files_touched": 3,
+            "completed_at_utc": "2026-08-01T02:10:00Z",
+        },
+    )
+    assert paused is False
+    assert updated["result"]["final_state"] == "done"
+    assert not [f for f in validate_audit_record(updated) if f["severity"] == "error"]
+
+
+def _closed_done_record(envelope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    record = _record(
+        decision="auto_accepted",
+        completion_kind="auto_accepted",
+        final_state="done",
+        envelope=envelope,
+    )
+    record["result"].update({
+        "actual_minutes": 18,
+        "actual_files_touched": 3,
+        "work_started_at_utc": "2026-08-01T01:42:00Z",
+        "completed_at_utc": "2026-08-01T02:00:00Z",
+        "reply_message_id": None,
+    })
+    return record
+
+
+def test_cli_replace_on_closed_record_breaching_fails_closed(tmp_path: Path) -> None:
+    # The corpus shape: a re-stamp adding --realized sends_oacp_reply on a
+    # leg whose profile cannot declare the reply left the record paused and
+    # closed with no tool exit; it now refuses without writing.
+    record = _closed_done_record()
+    path = _write(tmp_path, record)
+    original = path.read_bytes()
+    rc = main([
+        str(path), "--final-state", "done", "--replace",
+        "--actual-files-touched", "3",
+        "--realized", "creates_or_updates_pr", "--realized", "commits_changes",
+        "--realized", "sends_oacp_reply",
+        "--reply-message-id", "msg-20260801020000-claude-0001",
+    ])
+    assert rc == 2
+    assert path.read_bytes() == original
+    with pytest.raises(
+        ValueError, match=r"--replace refused: .*side_effects_actual\.sends_oacp_reply",
+    ):
+        finalize_audit_record(
+            path,
+            record,
+            final_state="done",
+            replace=True,
+            actuals={
+                "actual_minutes": 18,
+                "actual_files_touched": 3,
+                "side_effects_actual": {
+                    "creates_or_updates_pr": True,
+                    "commits_changes": True,
+                    "sends_oacp_reply": True,
+                },
+            },
+            reply_message_id="msg-20260801020000-claude-0001",
+        )
+    assert path.read_bytes() == original
+
+
+def test_cli_replace_on_closed_reply_only_record_adds_reply_and_stays_done(
+    tmp_path: Path,
+) -> None:
+    record = _closed_done_record(envelope=_reply_only_envelope())
+    path = _write(tmp_path, record)
+    rc = main([
+        str(path), "--final-state", "done", "--replace",
+        "--actual-files-touched", "3",
+        "--realized", "sends_oacp_reply",
+        "--reply-message-id", "msg-20260801020000-claude-0001",
+    ])
+    assert rc == 0
+    stored = yaml.safe_load(path.read_text(encoding="utf-8"))
+    result = stored["result"]
+    assert result["final_state"] == "done"
+    assert result["completed_at_utc"] == "2026-08-01T02:00:00Z"
+    assert result["actual_minutes"] == 18
+    assert result["reply_message_id"] == "msg-20260801020000-claude-0001"
+    assert result["threshold_checkpoint"]["breached"] is False
+    assert result["threshold_checkpoint"]["side_effects_actual"]["sends_oacp_reply"] is True
+    assert validate_audit_record(stored) == []
+
+
+def test_replace_on_closed_resolved_record_with_new_effect_fails_closed(
+    tmp_path: Path,
+) -> None:
+    done = _finalized_time_breach_record(tmp_path)
+    closed_dir = tmp_path / "closed"
+    closed_dir.mkdir()
+    path = _write(closed_dir, done)
+    original = path.read_bytes()
+    with pytest.raises(
+        ValueError,
+        match=r"--replace refused: the corrected actuals realize side_effects_actual\.merges_pr",
+    ):
+        finalize_audit_record(
+            path,
+            done,
+            final_state="done",
+            replace=True,
+            actuals={
+                "actual_minutes": 50,
+                "actual_files_touched": 3,
+                "side_effects_actual": {"merges_pr": True},
+            },
+        )
+    assert path.read_bytes() == original
