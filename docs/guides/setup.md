@@ -42,7 +42,8 @@ oacp init <project>
 ```
 
 By default, `oacp init` creates `claude`, `codex`, and `cursor` agents.
-Use `--agents` to include Gemini or custom agent names.
+Use `--agents` to include Gemini or custom agent names, and `--dry-run` to
+preview the plan without writing anything.
 
 Cursor support is scaffold-only until Cursor-owned rules land. Cursor sessions
 must set `OACP_RUNTIME=cursor` or pass `--from` explicitly when sending messages.
@@ -53,12 +54,23 @@ With artifact symlinks from a repo checkout:
 oacp init <project> --repo /path/to/repo
 ```
 
+`workspace.json` is generated in the project workspace directory. Symlink it
+into the repo root so the CLI and runtime hooks discover the workspace from
+inside the repo without `OACP_HOME` set (`oacp init` prints this hint):
+
+```bash
+ln -sf $OACP_HOME/projects/<project>/workspace.json /path/to/repo/.oacp
+```
+
 ## 3) Set up templates (source checkout only)
 
-If you installed from source, copy and customize the templates you need:
+`oacp init` does not create role, guardrail or skills-manifest files, and the
+package does not ship their templates. They are optional project conventions;
+seed them from a source checkout:
 
 ```bash
 # From the oacp repo root:
+mkdir -p $OACP_HOME/projects/<project>/roles $OACP_HOME/projects/<project>/guardrails
 
 # Roles
 cp templates/roles/role_baseline.template.md $OACP_HOME/projects/<project>/roles/baseline.md
@@ -73,15 +85,36 @@ cp templates/skills_manifest.template.yaml $OACP_HOME/projects/<project>/skills_
 
 Edit each file and fill in the `# CUSTOMIZE:` points.
 
-> **Packaged install?** Templates are bundled inside the package. You can find them by running `python3 -c "import oacp; print(oacp.__path__)"` and looking in the `_templates/` directory, or browse them on [GitHub](https://github.com/kiloloop/oacp/tree/main/templates).
+> **Packaged install?** The wheel bundles only the templates the CLI itself
+> uses (inbox message, agent card, agent profile, agent status, receiver config,
+> runtime capabilities, and the Claude role agent) under the package's
+> `_templates/` directory. Browse the rest on
+> [GitHub](https://github.com/kiloloop/oacp/tree/main/templates).
 
-## 4) Claude-specific setup (source checkout only)
+## 4) Runtime setup
 
-For Claude Code projects, copy templates into the repo's `.claude/` directory:
+`oacp setup <runtime>` generates the runtime's configuration files in the repo.
+Run it from the repo the agent works in; the project is read from the `.oacp`
+marker when `--project` is omitted:
+
+```bash
+oacp setup claude --project <project>
+```
+
+For Claude Code this creates `.claude/agents/<project>.md` from the bundled
+role agent template and `.claude/skills/`, and registers the
+`oacp-envelope-hook` PreToolUse hook in `.claude/settings.json`. The agent file
+and skills directory are created only when missing and `settings.json` is
+merged, so re-running after an upgrade is safe. `codex`, `cursor`, and `gemini`
+take the same shape; the [Quick Start](../../QUICKSTART.md#4-connect-your-runtime)
+lists what each writes.
+
+**Source checkout only:** the Claude guardrail rules file is not generated and
+its template is not bundled. Copy it from the repo:
 
 ```bash
 # From the oacp repo root:
-cp templates/claude/agents/role_agent.template.md /path/to/repo/.claude/agents/<role>.md
+mkdir -p /path/to/repo/.claude/rules
 cp templates/claude/rules/guardrail.template.md /path/to/repo/.claude/rules/guardrails.md
 ```
 
@@ -92,9 +125,11 @@ bundles a packet initializer or review, merge-decision and handoff templates.
 See the [migration notes](command-migration.md#packet-and-handoff-templates)
 and [review workflow documentation](../protocol/review_loop.md).
 
-## 6) Update existing workspaces (source checkout only)
+## 6) Update existing workspaces
 
-After pulling new standards, sync your workspace structure:
+`oacp init` refuses an existing workspace (exit 3). After upgrading, bring a
+workspace up to the current directory layout with the idempotent sync script.
+From a source checkout:
 
 ```bash
 make update PROJECT=<project>
@@ -102,12 +137,12 @@ make update PROJECT=<project>
 make update PROJECT=<project> ARGS="--dry-run"
 ```
 
-**Note:** `workspace.json` is generated in the project workspace directory. Runtimes should symlink it into the repo root:
-
-```bash
-ln -sf $OACP_HOME/projects/<project>/workspace.json /path/to/repo/.oacp
-```
+Packaged installs ship the same script as `_scripts/update_workspace.sh` inside
+the installed `oacp` package; run it with `bash <path> <project> [--dry-run]`.
+There is no `oacp` subcommand for it.
 
 ## 7) Wire project-local helpers (optional)
 
-Project-local wrappers can call these scripts using the `OACP_HOME` environment variable (defaults to `$HOME/oacp`).
+Project-local wrappers should resolve the workspace the way the CLI does: an
+explicit `--oacp-dir`, else `OACP_HOME`, else the repo's `.oacp` marker, else
+`$HOME/oacp`.

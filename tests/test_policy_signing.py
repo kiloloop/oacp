@@ -553,3 +553,31 @@ def test_import_resigns_enrolled_trust_root(workspace: dict) -> None:
     assert auth["status"] == POLICY_STATUS_VERIFIED
     pins = load_allowed_signers(workspace["pins_path"])
     assert peer["kid"] in pins
+
+
+def test_sign_policy_leaves_the_files_untouched_when_the_candidate_does_not_verify(
+    workspace: dict,
+) -> None:
+    from unittest.mock import patch
+
+    import policy_signing
+
+    befores = {
+        path: path.read_bytes()
+        for path in (workspace["config_path"], workspace["pins_path"])
+    }
+    rejected = {"status": POLICY_STATUS_INVALID, "reason": "synthetic round-trip failure"}
+    with patch.object(policy_signing, "verify_policy_data", return_value=rejected):
+        exit_code = trust_cli.main(
+            [
+                "sign-policy",
+                "--project", PROJECT,
+                "--agent", "dave",
+                "--oacp-dir", str(workspace["home"]),
+            ]
+        )
+    assert exit_code == 1
+    # The candidate never reached disk and nothing was enrolled.
+    for path, before in befores.items():
+        assert path.read_bytes() == before
+    assert not policy_signing.policy_enrolled(workspace["home"], CONFIG_CTX)

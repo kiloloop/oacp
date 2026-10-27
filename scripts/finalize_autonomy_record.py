@@ -46,6 +46,7 @@ from autonomy_gate import (
     BREACH_BASES,
     BREACH_SUB_BASES,
     CONTINUATION_SIDE_EFFECT_FIELDS,
+    COVERABLE_CONTINUATION_FIELDS,
     DuplicateKeyError,
     FINAL_STATES,
     LEGACY_PROFILE_BOOL_FIELDS,
@@ -105,6 +106,16 @@ CANONICAL_CHECKPOINT_AXES = (
     }
 )
 
+# Effects only a receiver-side human or a continuation grant can authorize.
+# No task profile declares them as such (the completion reply is covered by a
+# `sends_oacp_reply` or reply-only declaration), so realizing one on a record
+# that nothing covers breaches by construction — refused at call time.
+GRANT_ONLY_SIDE_EFFECT_FIELDS = tuple(
+    field
+    for field in CONTINUATION_SIDE_EFFECT_FIELDS
+    if field not in COVERABLE_CONTINUATION_FIELDS
+)
+
 # Validator finding codes, pinned like reason codes. ``error`` findings are
 # integrity violations the fleet drives to zero; ``advisory`` findings are
 # purely historical: legacy receipts flagged without rewriting history. Work
@@ -143,6 +154,11 @@ FINDING_SEVERITIES = {
     "invalid_pause_intervals": "error",
     "checkpoint_clear_precedes_pause": "error",
 }
+# Advisory codes that fire once per byte-preserved legacy record and never
+# clear. A directory sweep reports them in aggregate so the advisories that
+# point at real defects stay visible; the per-record detail stays in the
+# JSON report.
+AGGREGATED_LEGACY_ADVISORIES = ("terminal_missing_work_started_at",)
 
 # Writer-era marker for checkpoint and non-supersession terminal receipts.
 # Historical records have no marker and remain byte-preserved; the validator
@@ -1305,12 +1321,34 @@ def validate_audit_record(
     return findings
 
 
+def aggregate_legacy_advisories(
+    records: Dict[str, List[Dict[str, str]]],
+) -> Dict[str, List[str]]:
+    """Record names per aggregated legacy advisory code, both sorted."""
+    grouped: Dict[str, List[str]] = {}
+    for name, findings in records.items():
+        for finding in findings:
+            if finding["code"] in AGGREGATED_LEGACY_ADVISORIES:
+                grouped.setdefault(finding["code"], []).append(name)
+    return {code: sorted(set(names)) for code, names in sorted(grouped.items())}
+
+
+def _summarize_names(names: List[str], *, limit: int = 3) -> str:
+    shown = ", ".join(names[:limit])
+    if len(names) > limit:
+        shown += f", +{len(names) - limit} more"
+    return shown
+
+
 def sweep_audit_dir(audit_dir: Path) -> Dict[str, Any]:
     """Validate every record in an audit directory plus cross-record checks.
 
     Returns ``{"records": {filename: [findings]}, "duplicate_groups":
-    [...]}``. Duplicate logical IDs count only records not yet closed as
-    ``superseded`` — a superseded stale sibling is the resolved shape.
+    [...], "aggregated_advisories": {code: [filenames]}}``. Duplicate
+    logical IDs count only records not yet closed as ``superseded`` — a
+    superseded stale sibling is the resolved shape. ``aggregated_advisories``
+    names the records carrying each legacy advisory the text report folds
+    into one line; their findings stay in ``records`` unchanged.
     """
     per_file: Dict[str, List[Dict[str, str]]] = {}
     live_by_identity: Dict[Tuple[str, str], List[str]] = {}
@@ -1381,7 +1419,60 @@ def sweep_audit_dir(audit_dir: Path) -> Dict[str, Any]:
                 f"{name}: {len(names)} live evaluations for "
                 f"({receiver}, {message_id}) — supersede the stale ones",
             ))
-    return {"records": per_file, "duplicate_groups": duplicate_groups}
+    return {
+        "records": per_file,
+        "duplicate_groups": duplicate_groups,
+        "aggregated_advisories": aggregate_legacy_advisories(per_file),
+    }
+
+
+def _refuse_uncovered_grant_only_effects(
+    record: Dict[str, Any], actuals: Dict[str, Any]
+) -> None:
+    """Refuse a terminal write realizing a grant-only effect nothing covers.
+
+    ``--realized sends_oacp_reply`` (or either review effect) on an admission
+    record with no continuation-grant scope, no profile declaration and no
+    recorded re-authorization naming the effect would breach into a
+    checkpoint pause that only a human clear lifts — for a completion reply
+    that already rides ``--reply-message-id``. The guard refuses before
+    anything is written; a ``--checkpoint`` still presents such an effect
+    for re-authorization.
+    """
+    realized = [
+        key
+        for key, value in _actual_side_effects(actuals).items()
+        if value and key in GRANT_ONLY_SIDE_EFFECT_FIELDS
+    ]
+    if not realized:
+        return
+    envelope = record.get("scope_envelope")
+    envelope = envelope if isinstance(envelope, dict) else {}
+    grant = _grant_result(record)
+    grant_scope = grant.get("scope") if grant.get("decision") == "accepted" else None
+    grant_scope = grant_scope if isinstance(grant_scope, dict) else {}
+    checkpoint = _checkpoint_block(record)
+    reauth = _governing_checkpoint_answer(checkpoint) or {}
+    reauth_scope = reauth.get("scope")
+    reauth_scope = reauth_scope if isinstance(reauth_scope, dict) else {}
+    paused_effects = checkpoint.get("side_effects_actual")
+    paused_effects = paused_effects if isinstance(paused_effects, dict) else {}
+    uncovered = [
+        key
+        for key in realized
+        if not envelope_covers_effect(envelope, key)
+        and grant_scope.get(key) is not True
+        and reauth_scope.get(key) is not True
+        and paused_effects.get(key) is not True
+    ]
+    if uncovered:
+        raise ValueError(
+            f"--realized {', '.join(uncovered)}: a grant-only effect this "
+            "record's admission does not cover — no continuation-grant scope, "
+            "profile declaration or recorded re-authorization names it; the "
+            "completion reply is recorded with --reply-message-id, not as a "
+            "realized effect"
+        )
 
 
 def _build_actuals(
@@ -2329,9 +2420,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if args.json:
                 print(json.dumps(report, indent=2))
             else:
+                aggregated = report.get("aggregated_advisories") or {}
                 for name, findings in sorted(report["records"].items()):
                     for finding in findings:
+                        if finding["code"] in aggregated:
+                            continue
                         print(f"{finding['severity'].upper()}: {finding['detail']}")
+                for code, names in aggregated.items():
+                    print(
+                        f"ADVISORY: {code} on {len(names)} legacy record(s), "
+                        f"byte-preserved (--json lists each): "
+                        f"{_summarize_names(names)}"
+                    )
                 print(f"{errors} error finding(s)")
             return 2 if errors else 0
 
@@ -2341,6 +2441,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             actuals = _build_actuals(
                 args, record, measured_at_utc=measured_at_utc
             )
+            if not args.checkpoint:
+                _refuse_uncovered_grant_only_effects(record, actuals)
             policy, policy_error = _resolve_policy(record, args.config)
             if policy is None and _presents_sender_reauthorization(actuals):
                 print(

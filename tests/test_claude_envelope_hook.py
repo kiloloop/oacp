@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -813,10 +815,14 @@ def test_source_and_dot_ask() -> None:
     assert bash(". ./disable-envelope.sh").action == "ask"
 
 
-def test_interpreter_inline_code_asks() -> None:
-    py = 'python3 -c "print(1)"'
-    assert bash(py).action == "ask"
+def test_interpreter_inline_code_is_read_by_content() -> None:
+    # A static, write-free body is a read; the ask survives for code the
+    # hook cannot read (the inline-code section below pins the full grammar).
+    assert bash('python3 -c "print(1)"').action == "allow"
     assert bash("node -e 'console.log(1)'").action == "ask"
+    assert bash('python3 -c "$CODE"').action == "ask"
+    assert bash("python3 -c 'import os; os.remove(\"x\")'").action == "ask"
+    assert bash("python3 -c 'from os import remove; remove(\"x\")'").action == "ask"
 
 
 def test_python_module_form_still_classified_not_asked() -> None:
@@ -3578,3 +3584,381 @@ def test_every_exempted_tmpdir_write_lands_in_the_scratchpad(shell, tmpdir_layou
         for path in written:
             assert hook._within(os.path.realpath(path), str(scratch)), (case, path)
     assert exempted == sum(shape[2] for shape in TMPDIR_SHAPES)
+
+
+# ── Ask-branch census: nested read-only programs, BSD sed, finalize reads ─────
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "find . -name '*.py' | xargs wc -l",
+        "xargs -0 grep -n needle",
+        "xargs -n 1 cat",
+        "xargs -I{} grep -l needle {}",
+        "xargs -- jq .name",
+        "find . -name '*.md' -exec grep -l needle {} +",
+        "find . -type f -execdir cat {} \\;",
+        "find . -exec grep -l a {} \\; -exec wc -l {} \\;",
+    ],
+)
+def test_nested_readonly_program_allows(command: str) -> None:
+    assert bash(command).action == "allow", command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "xargs",
+        "xargs -0",
+        "xargs rm",
+        "xargs tee out.txt",
+        "xargs -I{} sh -c '{}'",
+        "xargs rg --pre cat needle",
+        "find . -exec grep a {} \\; -exec rm {} \\;",
+        "find . -exec grep a {}",
+        "find . -ok cat {} \\;",
+        "find . -name '*.tmp' -delete",
+    ],
+)
+def test_nested_other_programs_ask(command: str) -> None:
+    decision = bash(command)
+    assert decision.action == "ask", command
+    assert "cannot classify" in decision.reason
+
+
+def test_nested_readonly_program_redirect_is_still_gated() -> None:
+    assert bash("find . -name '*.py' | xargs wc -l > .env").action == "deny"
+
+
+def test_sed_bsd_empty_suffix_is_not_the_script() -> None:
+    for command in (
+        "sed -i '' 's#^a#b#' notes.md",
+        "sed -i '' -e 's#^a#b#' notes.md",
+        "sed -ni '' 's#^a#b#' notes.md",
+    ):
+        tokens = hook._shell_tokens(command)
+        assert hook._sed_in_place_targets(tokens) == ["notes.md"], command
+    decision = bash("sed -i '' s/a/b/ notes.md")
+    assert decision.action == "allow"
+    assert decision.new_files == ["/repo/notes.md"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "oacp autonomy finalize /h/projects/p/agents/claude/audit/autonomy_decisions/r.yaml --validate",
+        "oacp autonomy finalize r.yaml --validate --sweep --json",
+        "oacp autonomy finalize r.yaml --final-state done --dry-run "
+        "--started-at 2026-01-01T00:00:00Z --actual-files-touched 1",
+    ],
+)
+def test_oacp_autonomy_finalize_write_free_forms_allow(command: str) -> None:
+    assert bash(command).action == "allow", command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "oacp autonomy finalize r.yaml --final-state done --started-at 2026-01-01T00:00:00Z",
+        "oacp autonomy finalize r.yaml --checkpoint --actuals a.yaml",
+        "oacp autonomy finalize r.yaml --valid",
+        "oacp autonomy finalize $REC --validate",
+        "oacp autonomy outcome r.yaml --decision approved --actor alice",
+    ],
+)
+def test_oacp_autonomy_record_writes_ask(command: str) -> None:
+    decision = bash(command)
+    assert decision.action == "ask", command
+    assert "audit record" in decision.reason
+
+
+# ── Decision ledger: one line per non-allow decision ─────────────────────────
+
+
+def _decision_log(tmp_path: Path) -> Path:
+    return (
+        tmp_path / "home" / "projects" / "test-proj" / "agents" / "claude"
+        / "audit" / "envelope_decisions.jsonl"
+    )
+
+
+def test_process_logs_each_non_allow_decision(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    log = _decision_log(tmp_path)
+
+    allowed = hook.process({
+        "tool_name": "Bash", "tool_input": {"command": "git status"},
+        "cwd": str(repo), "session_id": "s-1",
+    })
+    assert allowed.action == "allow"
+    assert not log.exists()
+
+    denied = hook.process({
+        "tool_name": "Bash", "tool_input": {"command": "gh pr merge 1"},
+        "cwd": str(repo), "session_id": "s-1",
+    })
+    asked = hook.process({
+        "tool_name": "Bash", "tool_input": {"command": "bash -c ls"},
+        "cwd": str(repo), "session_id": "s-1",
+    })
+    assert (denied.action, asked.action) == ("deny", "ask")
+    lines = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert [entry["decision"] for entry in lines] == ["deny", "ask"]
+    for entry in lines:
+        assert set(entry) == {"ts", "message_id", "session_id", "tool", "decision", "reason"}
+        assert entry["message_id"] == "msg-1"
+        assert entry["session_id"] == "s-1"
+        assert entry["tool"] == "Bash"
+        assert entry["reason"].startswith("[oacp-envelope]")
+        assert entry["reason"].endswith("[task msg-1]")
+        assert entry["ts"].endswith("Z")
+    assert lines[1]["reason"] == asked.reason
+
+
+def test_process_ledger_failure_never_changes_the_decision(tmp_path: Path) -> None:
+    repo = _make_workspace(tmp_path)
+    _install_envelope(tmp_path, make_envelope())
+    log = _decision_log(tmp_path)
+    log.parent.parent.mkdir(parents=True, exist_ok=True)
+    log.parent.write_text("not a directory", encoding="utf-8")
+
+    denied = hook.process({
+        "tool_name": "Bash", "tool_input": {"command": "gh pr merge 1"},
+        "cwd": str(repo), "session_id": "s-1",
+    })
+    assert denied.action == "deny"
+    assert log.parent.read_text(encoding="utf-8") == "not a directory"
+
+
+def test_trusted_interpreter_binds_the_spelling_and_its_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A bare name resolves through PATH like every other program; a path
+    # must spell a system bin directory and resolve inside the system
+    # trees, so a system-dir name whose symlink left them, a same-named
+    # executable elsewhere, a relative spelling and a `..` escape all keep
+    # the shell-indirection ask.
+    system_bin = tmp_path / "bin"
+    system_bin.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "bash").write_text("#!/bin/sh\n", encoding="utf-8")
+    (system_bin / "bash").symlink_to(elsewhere / "bash")
+    (system_bin / "sh").symlink_to("/bin/sh")
+    monkeypatch.setattr(hook, "INTERPRETER_BIN_DIRS", (str(system_bin),))
+
+    assert hook._trusted_interpreter("bash")
+    assert hook._trusted_interpreter(str(system_bin / "sh"))
+    assert not hook._trusted_interpreter(str(system_bin / "bash"))
+    assert not hook._trusted_interpreter(str(elsewhere / "bash"))
+    assert not hook._trusted_interpreter("bin/bash")
+    assert not hook._trusted_interpreter(f"{system_bin}/../elsewhere/bash")
+
+
+_FUNCTION_BODIES = [
+    "{ gh pr merge 7 --squash; }",
+    "{gh pr merge 7 --squash;}",
+    "(gh pr merge 7 --squash)",
+    "( gh pr merge 7 --squash )",
+    "\n{\n  gh pr merge 7 --squash\n}",
+]
+
+
+def _script_in(tmp_path: Path, relative: str, text: str) -> Path:
+    script = tmp_path / relative
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(text, encoding="utf-8")
+    return script
+
+
+def _decision_with(
+    tmp_path: Path, command: str, **constraint_overrides: object
+) -> hook.Decision:
+    constraints = dict(make_envelope()["constraints"])
+    constraints.update(constraint_overrides)
+    decision = hook.classify_bash(command, str(tmp_path), constraints, {"files_touched": []})
+    return decision if decision is not None else hook.ALLOW
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "scripts/status.sh",
+        ".claude/skills/demo/scripts/status.sh",
+        "tools/status.sh",
+        "scripts/status",
+    ],
+)
+@pytest.mark.parametrize("shell", ["bash", "sh", "/bin/bash"])
+def test_unpinned_literal_script_asks_not_registered(
+    tmp_path: Path, relative: str, shell: str
+) -> None:
+    # Trust in a script is a pin, never a parse: wherever an unpinned script
+    # lives, whatever it does, the ask names the registration step and the
+    # hook never reads its text (a read-only body is not a pass).
+    script = _script_in(tmp_path, relative, "#!/usr/bin/env bash\ngit status --short\n")
+    decision = _decision_with(tmp_path, f"{shell} {script} --anything")
+    assert decision.action == "ask", decision.reason
+    assert "not registered under the receiver's trusted_scripts" in decision.reason
+
+
+def test_unpinned_script_asks_before_a_later_segment_is_judged(tmp_path: Path) -> None:
+    script = _script_in(tmp_path, "scripts/land.sh", "#!/usr/bin/env bash\ngh pr merge 7 --squash\n")
+    decision = _decision_with(tmp_path, f"DEBUG=1 bash {script} && git status")
+    assert decision.action == "ask" and "not registered" in decision.reason
+
+
+def test_pinned_script_passes_while_its_bytes_match(tmp_path: Path) -> None:
+    text = "#!/usr/bin/env bash\noacp autonomy finalize \"$1\" --final-state done\n"
+    script = _script_in(tmp_path, "tools/finish.sh", text)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    pin = {"path": str(script), "sha256": digest, "env": ["OACP_DONE_TYPE"]}
+    passes = _decision_with(tmp_path, f"bash {script} r.yaml", trusted_scripts=[pin])
+    assert passes.action == "allow", passes.reason
+    with_env = _decision_with(
+        tmp_path, f"OACP_DONE_TYPE=follow_up bash {script} r.yaml", trusted_scripts=[pin]
+    )
+    assert with_env.action == "allow", with_env.reason
+    other_env = _decision_with(
+        tmp_path, f"GH_REPO=o/r bash {script} r.yaml", trusted_scripts=[pin]
+    )
+    assert other_env.action == "ask" and "env assignment 'GH_REPO'" in other_env.reason
+    later = _decision_with(
+        tmp_path, f"bash {script} r.yaml && gh pr merge 7 --squash", trusted_scripts=[pin]
+    )
+    assert later.action == "deny" and "merges_pr" in later.reason
+    script.write_text(text + "git push origin main\n", encoding="utf-8")
+    changed = _decision_with(tmp_path, f"bash {script} r.yaml", trusted_scripts=[pin])
+    assert changed.action == "ask" and "pinned sha256" in changed.reason
+
+
+def _inline_decision(tmp_path: Path, command: str) -> hook.Decision:
+    decision = hook.classify_bash(
+        command, str(tmp_path), make_envelope()["constraints"], {"files_touched": []}
+    )
+    return decision if decision is not None else hook.ALLOW
+
+
+@pytest.mark.parametrize("body", _FUNCTION_BODIES)
+@pytest.mark.parametrize("gap", ["", " "])
+@pytest.mark.parametrize("parens", ["", "()", " ()", " ( )"])
+@pytest.mark.parametrize("name", ["land", "land-it"])
+@pytest.mark.parametrize("keyword", ["", "function "])
+def test_every_inline_function_header_spelling_judges_its_body(
+    tmp_path: Path, keyword: str, name: str, parens: str, gap: str, body: str
+) -> None:
+    # The same header grammar at the inline boundary: a definition typed
+    # into a Bash tool call is judged exactly as one in a script.
+    if not keyword and not parens:
+        pytest.skip("the POSIX form needs parentheses")
+    command = f"{keyword}{name}{parens}{gap}{body}\n{name}\n"
+    decision = _inline_decision(tmp_path, command)
+    assert decision.action != "allow", command
+    syntax = subprocess.run(["bash", "-n", "-c", command], capture_output=True, check=False)
+    if syntax.returncode == 0:
+        assert decision.action == "deny" and "merges_pr" in decision.reason, command
+
+
+_COMPOUND_WRAPS = [
+    "if true; then {cmd}; fi",
+    "if {cmd}; then :; fi",
+    "if false; then :; elif {cmd}; then :; fi",
+    "if false; then :; else {cmd}; fi",
+    "while {cmd}; do break; done",
+    "until false; do {cmd}; done",
+    "for n in 1; do {cmd}; done",
+    "select n in 1; do {cmd}; done",
+    "case x in x) {cmd};; esac",
+    "case x in (x) {cmd};; esac",
+    "! {cmd}",
+    "{{ {cmd}; }}",
+    "( {cmd} )",
+    "coproc {cmd}",
+    "coproc land {{ {cmd}; }}",
+    "time {cmd}",
+    "time ! {cmd}",
+    "time if {cmd}; then :; fi",
+    "time while {cmd}; do break; done",
+    "time ( {cmd} )",
+    "time {{ {cmd}; }}",
+    "! time {cmd}",
+    "time time ! {cmd}",
+    "env time ! {cmd}",
+    "time FOO=1 {cmd}",
+    "if true\nthen\n  {cmd}\nfi",
+    "while :\ndo\n  {cmd}\n  break\ndone",
+]
+
+
+@pytest.mark.parametrize("wrap", _COMPOUND_WRAPS)
+def test_every_compound_keyword_wrap_judges_its_command(tmp_path: Path, wrap: str) -> None:
+    # Every compound wrap bash accepts reaches the command inside it: the
+    # forbidden merge denies as it does standalone, a read passes.
+    command = wrap.format(cmd="gh pr merge 7 --squash")
+    assert subprocess.run(["bash", "-n", "-c", command], capture_output=True, check=False).returncode == 0, command
+    decision = _inline_decision(tmp_path, command)
+    assert decision.action == "deny" and "merges_pr" in decision.reason, command
+    control = wrap.format(cmd="git status --short")
+    assert _inline_decision(tmp_path, control).action == "allow", control
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "{gh,pr,merge,7,--squash}",
+        "$(echo gh) pr merge 7 --squash",
+        "g*h pr merge 7 --squash",
+        "$GH pr merge 7 --squash",
+        '"$GH" pr merge 7 --squash',
+        "${GH} pr merge 7 --squash",
+        "if true; then $GH pr merge 7; fi",
+    ],
+)
+def test_expanded_program_name_asks(tmp_path: Path, command: str) -> None:
+    decision = _inline_decision(tmp_path, command)
+    assert decision.action == "ask" and "cannot resolve shell program name" in decision.reason, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "[ -f README.md ] && git status --short",
+        "[[ -n x ]] && git status --short",
+        "(( n = 1 + 2 )) && git status --short",
+        "test -f README.md && git status --short",
+        "echo {a,b} *.md",
+        "if [ -f README.md ]; then cat README.md; fi",
+    ],
+)
+def test_test_builtins_and_operand_expansion_still_pass(tmp_path: Path, command: str) -> None:
+    assert _inline_decision(tmp_path, command).action == "allow", command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "/usr/bin/env gh pr merge 7 --squash",
+        "/usr/bin/env FOO=1 gh pr merge 7 --squash",
+        "/usr/bin/nohup gh pr merge 7 --squash",
+        "/usr/bin/time gh pr merge 7 --squash",
+        "if true; then /usr/bin/env gh pr merge 7 --squash; fi",
+    ],
+)
+def test_wrapper_by_system_path_is_dropped(tmp_path: Path, command: str) -> None:
+    decision = _inline_decision(tmp_path, command)
+    assert decision.action == "deny" and "merges_pr" in decision.reason, command
+
+
+@pytest.mark.parametrize("command", ["./env gh pr merge 7", "/tmp/env gh pr merge 7", "bin/nohup gh pr view 7"])
+def test_wrapper_named_executable_elsewhere_asks(tmp_path: Path, command: str) -> None:
+    decision = _inline_decision(tmp_path, command)
+    assert decision.action == "ask" and "wrapper invocation" in decision.reason, command
+
+
+def test_inline_trap_and_malformed_function_keyword_ask(tmp_path: Path) -> None:
+    trap = _inline_decision(tmp_path, "trap 'gh pr merge 7 --squash' EXIT")
+    assert trap.action == "ask" and "trap runs code" in trap.reason
+    malformed = _inline_decision(tmp_path, "function { gh pr merge 7 --squash; }")
+    assert malformed.action == "ask" and "function definition" in malformed.reason

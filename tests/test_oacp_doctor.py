@@ -559,6 +559,58 @@ class TestAutonomyConfig(unittest.TestCase):
             )
             self.assertIn("msg-demo", advisory.message)
 
+    def test_check_autonomy_audit_sweep_aggregates_legacy_work_clock_advisories(self) -> None:
+        # Legacy terminal receipts without a work clock are byte-preserved and
+        # never clear: one aggregated row per code, and they no longer bury
+        # the per-record advisory row that points at real defects.
+        with tempfile.TemporaryDirectory() as td:
+            project_dir = Path(td)
+            audit_dir = project_dir / "agents" / "codex" / "audit" / "autonomy_decisions"
+            audit_dir.mkdir(parents=True)
+            for index in range(3):
+                _write(
+                    audit_dir / f"20260512T13232{index}Z_msg-legacy-{index}.yaml",
+                    (
+                        "schema_version: 2\n"
+                        "receiver: codex\n"
+                        f"message_id: msg-legacy-{index}\n"
+                        "decision: auto_accepted\n"
+                        "result:\n"
+                        "  final_state: done\n"
+                        "  completion_kind: auto_accepted\n"
+                        "  actual_minutes: 5\n"
+                        "  actual_files_touched: 1\n"
+                        "  completed_at_utc: '2026-05-12T14:00:00Z'\n"
+                    ),
+                )
+            _write(
+                audit_dir / "20260512T132330Z_msg-born-done.yaml",
+                (
+                    "schema_version: 2\n"
+                    "receiver: codex\n"
+                    "message_id: msg-born-done\n"
+                    "decision: auto_accepted\n"
+                    "result:\n"
+                    "  final_state: done\n"
+                    "  completion_kind: auto_accepted\n"
+                    "  completed_at_utc: null\n"
+                ),
+            )
+            import yaml
+
+            cat = check_autonomy(project_dir, yaml_loader=yaml.safe_load)
+            aggregated = next(
+                r for r in cat.results if "legacy-advisories" in r.name
+            )
+            self.assertEqual(aggregated.severity, Severity.warn)
+            self.assertIn("3 legacy record(s)", aggregated.message)
+            self.assertIn("terminal_missing_work_started_at", aggregated.message)
+            advisory = next(
+                r for r in cat.results if "advisory findings" in r.message
+            )
+            self.assertIn("msg-born-done", advisory.message)
+            self.assertNotIn("msg-legacy", advisory.message)
+
     def test_check_autonomy_audit_sweep_flags_duplicate_live_records(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             project_dir = Path(td)
@@ -1306,6 +1358,69 @@ class TestApplyFixes(unittest.TestCase):
             cats2 = run_doctor(project="test", oacp_dir=oacp_dir)
             fixed2 = apply_fixes(cats2, oacp_dir, "test")
             self.assertEqual(len(fixed2), 0)
+
+
+class TestTrustedScriptPins(unittest.TestCase):
+    """The envelope.trusted_scripts block: malformed entries error, a missing
+    or changed pinned file warns, a current pin is ok, an absent block adds
+    nothing."""
+
+    def _results(self, td: str, config: str) -> list:
+        import hashlib
+        import yaml
+
+        project_dir = Path(td) / "proj"
+        agent_dir = project_dir / "agents" / "claude"
+        (agent_dir / "audit" / "autonomy_decisions").mkdir(parents=True)
+        script = Path(td) / "tools" / "finish.sh"
+        script.parent.mkdir()
+        script.write_text("#!/usr/bin/env bash\ngit status\n", encoding="utf-8")
+        digest = hashlib.sha256(script.read_bytes()).hexdigest()
+        _write(agent_dir / "config.yaml", config.format(script=script, digest=digest, td=td))
+        cat = check_autonomy(project_dir, yaml_loader=yaml.safe_load)
+        return [r for r in cat.results if r.name.startswith("claude/envelope.trusted_scripts")]
+
+    def test_current_pin_is_ok(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            results = self._results(
+                td,
+                "autonomy:\n  default_mode: always_pause\n"
+                "envelope:\n  trusted_scripts:\n"
+                "    - path: {script}\n      sha256: {digest}\n      env: [OACP_DONE_TYPE]\n",
+            )
+        self.assertEqual([(r.severity, r.message) for r in results],
+                         [(Severity.ok, "claude/envelope.trusted_scripts — 1 of 1 pin(s) current")])
+
+    def test_stale_and_missing_pins_warn(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            results = self._results(
+                td,
+                "envelope:\n  trusted_scripts:\n"
+                "    - path: {script}\n      sha256: '" + "0" * 64 + "'\n"
+                "    - path: {td}/tools/gone.sh\n      sha256: '" + "1" * 64 + "'\n",
+            )
+        self.assertEqual(results[0].severity, Severity.warn)
+        self.assertIn("0 of 2 pin(s) current", results[0].message)
+        self.assertEqual([r.severity for r in results[1:]], [Severity.warn, Severity.warn])
+        self.assertIn("stale pin", results[1].message)
+        self.assertIn("oacp trust pin-script", results[1].fix_hint or "")
+        self.assertIn("pinned script missing", results[2].message)
+
+    def test_malformed_block_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            results = self._results(
+                td,
+                "envelope:\n  trusted_scripts:\n"
+                "    - path: scripts/relative.sh\n      sha256: {digest}\n",
+            )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].severity, Severity.error)
+        self.assertIn("trusted_scripts[0].path", results[0].message)
+
+    def test_absent_block_adds_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            results = self._results(td, "autonomy:\n  default_mode: always_pause\n")
+        self.assertEqual(results, [])
 
 
 if __name__ == "__main__":

@@ -60,7 +60,12 @@ edited: signing strips any existing trailer and signs the current content,
 so re-signing after a policy edit is the normal flow. Policy WRITERS that
 re-render an enrolled file (trust import/revoke) must re-sign atomically or
 refuse the mutation — a writer must never strip an enrolled file's
-signature as a side effect.
+signature as a side effect. The config writers (`sign-policy`,
+`pin-script`) hold the file's `policy_file_lock` from their read to their
+replace and commit only a candidate that already verifies
+(`signed_policy_bytes` → `verify_policy_data` → `replace_policy_file`), so
+overlapping edits serialize instead of the later one discarding the
+earlier, and a failed run leaves the previous bytes on disk.
 
 `load_authorized_policy` is the single authorized read path: it reads the
 file once into a bounded snapshot, verifies THOSE bytes, and parses the
@@ -74,8 +79,9 @@ import json
 import os
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 _scripts_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(_scripts_dir))
@@ -580,27 +586,42 @@ def load_authorized_policy(
     return loaded, policy_auth, raw
 
 
-def sign_policy_file(
-    path: Path,
-    signers: Sequence[FileKeySigner],
-    *,
-    context: Dict[str, str],
-) -> Dict[str, Any]:
-    """Sign (or re-sign) one policy file in place, atomically.
+class PolicyWriteError(RuntimeError):
+    """A policy-file write refused before any byte reached the file."""
+
+
+@contextmanager
+def policy_file_lock(path: Path) -> Iterator[None]:
+    """Serialize every writer of one policy file.
+
+    A policy writer (``sign-policy``, ``pin-script``, any editor of a config
+    or trust root) holds this from before its read until after its atomic
+    replace, so two writers never plan from one snapshot and the later
+    commit never discards the earlier. The lock lives on the stable sibling
+    ``<name>.lock`` (`locked_audit`): the policy file's own inode changes on
+    every atomic replace, so waiters on it would each "win". flock is not
+    reentrant — inside the lock, write through `signed_policy_bytes` and
+    `replace_policy_file`, never `sign_policy_file` (which takes it itself).
+    """
+    with locked_audit(Path(path)):
+        yield
+
+
+def signed_policy_bytes(
+    raw: bytes, signers: Sequence[FileKeySigner], *, context: Dict[str, str]
+) -> Tuple[bytes, bool]:
+    """The signed form of one policy file's bytes; nothing is written.
 
     An existing trailer is stripped and the current content signed — policy
     files are edited over their lifetime, so re-signing is the normal flow.
     A missing final newline is normalized before signing (the trailer needs
     a complete final line to attach to). *context* is the signed
-    ``{project, receiver, kind}`` target binding; enrollment recording is
-    the caller's step (`record_policy_enrollment`) so that multi-file
-    signing can enroll only after every file round-trips.
+    ``{project, receiver, kind}`` target binding. Returns the signed bytes
+    and whether a trailer was replaced.
     """
     context = policy_context(
         context["project"], context["receiver"], context["kind"]
     )
-    path = Path(path)
-    raw = path.read_bytes()
     prefix, existing = split_signed_message(raw)
     payload = prefix if existing is not None else raw
     if not payload.endswith(b"\n"):
@@ -612,32 +633,89 @@ def sign_policy_file(
         domain=POLICY_SIG_DOMAIN,
         extra_oacp={POLICY_OACP_CLAIM: context},
     )
-    signed = payload + render_auth_line(auth_value).encode("ascii")
+    return payload + render_auth_line(auth_value).encode("ascii"), existing is not None
 
-    mode = path.stat().st_mode
+
+def _require_unchanged(path: Path, expected: Optional[bytes]) -> None:
+    if expected is not None and path.read_bytes() != expected:
+        raise PolicyWriteError(
+            f"{path} changed underneath this write; nothing was written — re-run"
+        )
+
+
+def replace_policy_file(
+    path: Path, content: bytes, *, expected: Optional[bytes] = None
+) -> None:
+    """Replace one policy file in a single atomic step, preserving its mode.
+
+    The caller holds `policy_file_lock` and has verified *content*; the
+    loaders' bound applies here too (a candidate over ``MAX_POLICY_BYTES``
+    is refused, since no reader could load it). With *expected*, the file's
+    bytes must still be the snapshot the caller planned from, checked once
+    before staging and again at the commit boundary — after the staged
+    candidate is durable, immediately before the replace — so an editor
+    that bypassed the lock is refused when either check sees its write.
+    That is best-effort detection, not compare-and-swap: a portable
+    ``os.replace`` offers none, so a bypassing write that lands between the
+    final check and the replace is lost. The lock is the contract between
+    writers. A refusal or a failed replace leaves the file untouched.
+    """
+    path = Path(path)
+    if len(content) > MAX_POLICY_BYTES:
+        raise PolicyWriteError(
+            f"{path}: the new policy would exceed {MAX_POLICY_BYTES} bytes; "
+            "nothing was written"
+        )
+    _require_unchanged(path, expected)
+    mode = path.stat().st_mode if path.exists() else None
     temp_path: Optional[Path] = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="wb",
             dir=str(path.parent),
             prefix=f".{path.name}.",
-            suffix=".sign.tmp",
+            suffix=".policy.tmp",
             delete=False,
         ) as handle:
-            handle.write(signed)
+            handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
             temp_path = Path(handle.name)
-        os.chmod(temp_path, mode)
+        if mode is not None:
+            os.chmod(temp_path, mode)
+        _require_unchanged(path, expected)
         os.replace(temp_path, path)
         temp_path = None
     finally:
         if temp_path is not None and temp_path.exists():
             temp_path.unlink()
 
+
+def sign_policy_file(
+    path: Path,
+    signers: Sequence[FileKeySigner],
+    *,
+    context: Dict[str, str],
+) -> Dict[str, Any]:
+    """Sign (or re-sign) one policy file in place, atomically, under its lock.
+
+    Holds `policy_file_lock` from the read to the replace. Enrollment
+    recording is the caller's step (`record_policy_enrollment`) so that
+    multi-file signing can enroll only after every file round-trips. A
+    caller that verifies the candidate before committing it (the CLI
+    writers) composes `signed_policy_bytes`, `verify_policy_data` and
+    `replace_policy_file` under the lock instead of calling this.
+    """
+    path = Path(path)
+    with policy_file_lock(path):
+        raw = path.read_bytes()
+        signed, resigned = signed_policy_bytes(raw, signers, context=context)
+        replace_policy_file(path, signed, expected=raw)
     return {
         "path": str(path),
-        "resigned": existing is not None,
-        "context": context,
+        "resigned": resigned,
+        "context": policy_context(
+            context["project"], context["receiver"], context["kind"]
+        ),
         "signer_kids": [signer.kid for signer in signers],
     }

@@ -9,3 +9,6 @@ tests/conformance/signing/messages/** -text
 tests/conformance/signing/messages/tamper_crlf_trailer.yaml whitespace=-trailing-space
 tests/conformance/signing/messages/tamper_trailing_space.yaml whitespace=-trailing-space
 tests/conformance/signing/messages/tamper_trailing_blank_line.yaml whitespace=-blank-at-eof
+
+# Not part of source exports; the sdist excludes it in pyproject.toml.
+tests/dev_only export-ignore

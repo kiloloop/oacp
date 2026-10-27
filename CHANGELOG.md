@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-10-27
+
+Scripts run under an envelope by sha256 pin only, and the Claude envelope hook judges more shell shapes instead of asking on them or passing them unjudged.
+
+### Added
+
+- Receiver config `envelope.trusted_scripts` pins the scripts the envelope hook may run ([config](docs/protocol/autonomy.md#receiver-config)).
+- `oacp trust pin-script` records a script's pin and re-signs the receiver config ([signing](docs/protocol/message_signing.md#policy-file-signing)).
+- `oacp doctor --project <name>` reports malformed, missing and stale script pins ([config](docs/protocol/autonomy.md#receiver-config)).
+- The envelope hook logs asks and denies to `envelope_decisions.jsonl` ([adapter](docs/protocol/autonomy.md#delivery-static-shim-dynamic-envelope)).
+
+### Changed
+
+- The envelope hook runs a pinned script and asks on an unpinned one ([adapter](docs/protocol/autonomy.md#delivery-static-shim-dynamic-envelope)).
+- The envelope hook judges an App-token `gh` chain by its final command ([adapter](docs/protocol/autonomy.md#delivery-static-shim-dynamic-envelope)).
+- The envelope hook passes more read-only shell forms as reads ([adapter](docs/protocol/autonomy.md#delivery-static-shim-dynamic-envelope)).
+- The envelope hook stops denying a destructive word in a search pattern ([adapter](docs/protocol/autonomy.md#delivery-static-shim-dynamic-envelope)).
+- The envelope hook allows `--attach-audit` stamps on the task's record ([adapter](docs/protocol/autonomy.md#delivery-static-shim-dynamic-envelope)).
+- `oacp verify --attach-audit` refuses another message's record ([spec](docs/protocol/message_signing.md#receiver-audit-stamping---attach-audit)).
+- The finalizer refuses an uncovered `--realized` grant-only effect ([contract](docs/protocol/autonomy.md#terminal-finalization-and-audit-integrity)).
+- Audit sweeps report the legacy work-clock advisory as one line ([validation](docs/protocol/autonomy.md#terminal-finalization-and-audit-integrity)).
+
+### Fixed
+
+- `oacp trust sign-policy` locks the policy and keeps it whole when a run fails ([signing](docs/protocol/message_signing.md#policy-file-signing)).
+- The envelope hook judges commands nested in shell compound commands ([adapter](docs/protocol/autonomy.md#delivery-static-shim-dynamic-envelope)).
+- The envelope hook asks on a program name built by shell expansion ([adapter](docs/protocol/autonomy.md#delivery-static-shim-dynamic-envelope)).
+- The envelope hook judges `/usr/bin/env gh …` like `env gh …` ([adapter](docs/protocol/autonomy.md#delivery-static-shim-dynamic-envelope)).
+
 ## [0.5.3] - 2026-10-20
 
 Kernel commands regroup under `agent`, `trust`, and `autonomy`, and the retired memory, packet, and findings surfaces leave the kernel.
@@ -959,6 +988,7 @@ The central debrief store is the headline change: every agent's full end-of-sess
 - Checkout step in github-release workflow job (#19)
 - Pre-release audit fixes: SHA-pinned actions, dangling doc refs (#15, #16)
 
+[0.5.4]: https://github.com/kiloloop/oacp/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/kiloloop/oacp/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/kiloloop/oacp/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/kiloloop/oacp/compare/v0.5.0...v0.5.1

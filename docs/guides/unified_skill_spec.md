@@ -89,7 +89,7 @@ One-line summary.
 
 ## Learned from Runs
 
-- Dated entries capturing bugs and fixes discovered during use
+See [references/learned-from-runs.md](references/learned-from-runs.md).
 ```
 
 ## Conventions
@@ -150,12 +150,20 @@ Safety rules (user confirmation, scope gates, delete-only-after-processing) appl
 
 ### 6. Learned from Runs section
 
-Both runtimes should append to the same `## Learned from Runs` section with dated, tagged entries:
+The SKILL.md body loads on every trigger, so dated run notes do not live in it. Both runtimes record what a run taught in the same way:
 
-```markdown
-- **Feb 14 (claude)**: Haiku subagent can't sleep in sandbox. Use background Bash.
-- **Feb 14 (codex)**: gh auth requires escalated sandbox permissions.
-```
+1. The entry goes to `references/learned-from-runs.md` beside the skill, dated and tagged with the runtime that hit it:
+
+   ```markdown
+   - **Feb 14 (claude)**: subagents can't sleep in the sandbox; wait with a background Bash poll instead.
+   - **Feb 14 (codex)**: gh auth requires escalated sandbox permissions.
+   ```
+
+2. `## Learned from Runs` in SKILL.md keeps a one-line link to that file and nothing else.
+
+3. The lasting rule behind the entry is folded into `## Instructions` (or the relevant `## Runtime Adapters` subsection) as a present-tense statement — "Wait with a background Bash poll; subagents cannot sleep in the sandbox" — so the skill carries the rule without the history. The reference file keeps the dated provenance.
+
+An entry that does not yield a durable rule stays in the reference file only.
 
 ## Migration Path
 

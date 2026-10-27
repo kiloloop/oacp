@@ -214,6 +214,13 @@ inference), so pass the record's canonical runtime path — audit records
 live under `$OACP_HOME`, not the source checkout. The record must already
 exist: write the autonomy decision record first, then stamp it.
 
+The stamp binds to the record's accepted snapshot: when the record carries
+a `message_sha256`, the message file being verified must hash to it, or
+the attach is refused (`attach-audit failed: message bytes do not match the
+audit record's accepted snapshot`, exit 2) and the record is left as it
+was. Verify the bytes the gate admitted, never a re-read of a file that may
+have changed since.
+
 This is the one supported stamping path. It writes the block under the
 shared audit lock, atomically, and refuses to overwrite a recorded block —
 hand-writing a `message_auth` block (or free-text prose about the
@@ -282,6 +289,25 @@ can never authenticate a message.
   verifies them. Unlike messages (append-once, immutable), policy files
   are long-lived and edited: signing strips any existing trailer and signs
   the current content — run it again after every policy edit.
+- **Pin a script** the runtime adapter may run under an envelope:
+
+  ```bash
+  oacp trust pin-script <path> --project <name> --agent <receiver> [--env NAME] [--all-projects]
+  ```
+
+  records the script under the receiver's `envelope.trusted_scripts` — the
+  path as spelled (absolute or `~/`-rooted), the sha256 of the file's bytes
+  and the `--env` names a caller may prefix — appending the entry or
+  refreshing the one that names the same file, validates the block with the
+  envelope compiler's loader, writes `config.yaml` with every other key
+  unchanged, and re-signs it as `sign-policy` would (enrolling the config
+  target). A signed or enrolled config is never written while the
+  receiver's key is unavailable; an unsigned bootstrap config is written
+  unsigned. The pin is the human's review of those bytes: run it once per
+  script version, and again after every edit to a pinned file, or the
+  adapter asks `does not match its pinned sha256` until it is refreshed.
+  `oacp doctor --project <name>` reports a malformed block, a missing file
+  or a stale digest.
 - **Enrollment (downgrade resistance)**: the first successful
   `sign-policy` run enrolls each target in the machine-local registry
   `$OACP_HOME/keys/policy_enrollment.json` (part of the keystore trust
@@ -298,6 +324,17 @@ can never authenticate a message.
   written — a writer never strips an enrolled file's signature as a side
   effect, and a fleet-wide revoke either fully lands signed or leaves
   zero pins changed.
+- **Writers lock, then commit only what verifies**: `sign-policy` and
+  `pin-script` hold a policy file's sibling lock (`<name>.lock`) from
+  their read to their atomic replace, so overlapping runs serialize
+  instead of the later one discarding the earlier, and a signed
+  candidate is verified against the keystore before it replaces the
+  file, so a failed run leaves the previous bytes on disk — an enrolled
+  file is never on disk with a stale signature. An editor that bypasses
+  the lock is refused when the compare before staging or the one at the
+  commit boundary sees its write; that is best-effort detection, not
+  compare-and-swap (a portable replace offers none), so the lock is the
+  contract between writers.
 - **One authorized read path**: consumers load policy files through a
   single loader that reads the file once (bounded at 1 MiB), verifies
   those bytes, and parses the policy from the same snapshot — the bytes

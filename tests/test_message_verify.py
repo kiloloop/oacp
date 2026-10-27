@@ -11,6 +11,7 @@ per-test fixtures — no key material outside temp dirs.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import tempfile
@@ -595,6 +596,30 @@ class TestAttachMessageAuth(unittest.TestCase):
         self.audit_path.write_text("schema_version: 2\nresult: nope\n")
         with self.assertRaises(ValueError):
             attach_message_auth(self.audit_path, self.block)
+
+    def test_attach_binds_to_the_records_accepted_snapshot(self) -> None:
+        import yaml
+
+        accepted = hashlib.sha256(b"id: msg-1\n").hexdigest()
+        self.audit_path.write_text(
+            "schema_version: 2\n"
+            f"message_sha256: \"{accepted}\"\n"
+            "decision: auto_accepted\n"
+            "result:\n"
+            "  final_state: pending\n"
+        )
+        other = hashlib.sha256(b"id: msg-1\nbody: edited\n").hexdigest()
+        with self.assertRaises(ValueError):
+            attach_message_auth(self.audit_path, self.block, message_sha256=other)
+        self.assertNotIn(
+            "message_auth", yaml.safe_load(self.audit_path.read_text())["result"]
+        )
+        attach_message_auth(self.audit_path, self.block, message_sha256=accepted)
+        loaded = yaml.safe_load(self.audit_path.read_text())
+        self.assertEqual(loaded["result"]["message_auth"]["status"], STATUS_VERIFIED)
+
+    def test_attach_without_a_recorded_digest_has_no_binding(self) -> None:
+        attach_message_auth(self.audit_path, self.block, message_sha256="0" * 64)
 
     def test_eight_process_attach_yields_exactly_one_winner(self) -> None:
         # the lock must live on a stable sibling lockfile;

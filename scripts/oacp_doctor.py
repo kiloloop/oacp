@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -613,6 +615,82 @@ def validate_autonomy_config_data(data: Any) -> List[str]:
     return errors
 
 
+def _trusted_script_results(agent_name: str, data: Any) -> List[DoctorResult]:
+    """Diagnose the receiver's ``envelope.trusted_scripts`` block.
+
+    A malformed entry is an error (the compiler fails the envelope closed on
+    it); a pinned file that is missing, unreadable or no longer hashes to
+    its pin is a warning (the runtime adapter asks on every run until the
+    pin is refreshed with ``oacp trust pin-script``). An absent block adds
+    nothing. Doctor diagnoses; the compiler and the adapter are the
+    enforcement.
+    """
+    if not isinstance(data, dict) or data.get("envelope") is None:
+        return []
+    name = f"{agent_name}/envelope.trusted_scripts"
+    try:
+        import envelope_compiler
+    except ImportError:  # pragma: no cover - packaging guard
+        return [DoctorResult(
+            name=name,
+            severity=Severity.skip,
+            message=f"{name} — check skipped; envelope_compiler unavailable",
+        )]
+    try:
+        pins = envelope_compiler.trusted_scripts(data)
+    except envelope_compiler.EnvelopeCompileError as exc:
+        return [DoctorResult(
+            name=name,
+            severity=Severity.error,
+            message=f"{name} — {exc}",
+            fix_hint=(
+                "Fix the entry, then re-sign: oacp trust sign-policy "
+                f"--project <name> --agent {agent_name}"
+            ),
+        )]
+    findings: List[DoctorResult] = []
+    current = 0
+    for pin in pins:
+        label = f"{name}[{pin['path']}]"
+        repin = f"oacp trust pin-script {pin['path']} --project <name> --agent {agent_name}"
+        path = Path(os.path.expanduser(pin["path"]))
+        if not path.is_file():
+            findings.append(DoctorResult(
+                name=label,
+                severity=Severity.warn,
+                message=f"{name} — pinned script missing: {pin['path']}",
+                fix_hint=f"Restore the file and re-pin ({repin}), or drop the entry",
+            ))
+            continue
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as exc:
+            findings.append(DoctorResult(
+                name=label,
+                severity=Severity.warn,
+                message=f"{name} — pinned script unreadable: {pin['path']} ({exc})",
+            ))
+            continue
+        if digest != pin["sha256"]:
+            findings.append(DoctorResult(
+                name=label,
+                severity=Severity.warn,
+                message=(
+                    f"{name} — stale pin: {pin['path']} no longer matches its "
+                    "sha256; the adapter asks on every run"
+                ),
+                fix_hint=f"Review the change, then re-pin: {repin}",
+            ))
+            continue
+        current += 1
+    summary = DoctorResult(
+        name=name,
+        severity=Severity.ok if not findings else Severity.warn,
+        message=f"{name} — {current} of {len(pins)} pin(s) current",
+    )
+    return [summary, *findings]
+
+
 def check_autonomy(
     project_dir: Path,
     yaml_loader: Optional[Any] = None,
@@ -687,6 +765,7 @@ def check_autonomy(
                         f"{agent_name}/config.yaml — valid{autonomy_suffix}"
                     ),
                 ))
+                cat.results.extend(_trusted_script_results(agent_name, data))
 
         # Policy-file authorization status: doctor diagnoses, the
         # authorized loaders are the enforcement. An invalid signature is
@@ -801,8 +880,16 @@ def check_autonomy(
             record_count = len(report["records"])
             error_files: List[str] = []
             advisory_files: List[str] = []
+            # Legacy advisories the sweep aggregates are reported once per
+            # code below; a record carrying only those stays out of the
+            # per-record advisory row so real defects are not buried.
+            aggregated = report.get("aggregated_advisories") or {}
             for name, findings in sorted(report["records"].items()):
-                severities = {finding["severity"] for finding in findings}
+                severities = {
+                    finding["severity"]
+                    for finding in findings
+                    if finding["code"] not in aggregated
+                }
                 if "error" in severities:
                     error_files.append(name)
                 elif "advisory" in severities:
@@ -867,6 +954,16 @@ def check_autonomy(
                         f"{agent_name}/autonomy audit — "
                         f"{len(advisory_files)} record(s) with advisory "
                         f"findings: {_summarize_paths(advisory_files)}"
+                    ),
+                ))
+            for code, names in aggregated.items():
+                cat.results.append(DoctorResult(
+                    name=f"{agent_name}/autonomy-audit-legacy-advisories",
+                    severity=Severity.warn,
+                    message=(
+                        f"{agent_name}/autonomy audit — {len(names)} legacy "
+                        f"record(s) flagged {code} (aggregated; byte-preserved, "
+                        "never rewritten)"
                     ),
                 ))
 
