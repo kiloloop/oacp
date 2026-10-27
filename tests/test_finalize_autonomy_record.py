@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pytest
+import json
+
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -3838,3 +3840,155 @@ def test_replace_on_closed_resolved_record_with_new_effect_fails_closed(
             },
         )
     assert path.read_bytes() == original
+
+
+# ── Grant-only realized effects are refused at call time ──────────────────
+
+
+def _done_args(path: Path, *realized: str):
+    args = [
+        str(path),
+        "--final-state", "done",
+        "--actual-files-touched", "1",
+        "--started-at", "2026-08-01T01:40:00Z",
+        "--completed-at", "2026-08-01T02:00:00Z",
+        "--reply-message-id", "msg-20260801020000-claude-9999",
+    ]
+    for effect in realized:
+        args += ["--realized", effect]
+    return args
+
+
+def test_cli_refuses_uncovered_grant_only_realized_effect(tmp_path: Path, capsys) -> None:
+    record = _record(human_outcome=_human_outcome())
+    path = _write(tmp_path, record)
+    before = path.read_text(encoding="utf-8")
+    rc = main(_done_args(path, "commits_changes", "sends_oacp_reply"))
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "sends_oacp_reply" in err
+    assert "--reply-message-id" in err
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_cli_refuses_uncovered_grant_only_effect_from_actuals_file(tmp_path: Path) -> None:
+    record = _record(human_outcome=_human_outcome())
+    path = _write(tmp_path, record)
+    actuals = tmp_path / "actuals.yaml"
+    actuals.write_text(
+        "actual_files_touched: 1\n"
+        "work_started_at_utc: \"2026-08-01T01:40:00Z\"\n"
+        "completed_at_utc: \"2026-08-01T02:00:00Z\"\n"
+        "side_effects_actual:\n"
+        "  commits_changes: true\n"
+        "  submits_github_review: true\n",
+        encoding="utf-8",
+    )
+    rc = main([
+        str(path), "--final-state", "done", "--actuals", str(actuals),
+        "--reply-message-id", "msg-20260801020000-claude-9999",
+    ])
+    assert rc == 2
+    stored = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert stored["result"]["final_state"] == "paused"
+
+
+@pytest.mark.parametrize("declaration", ["sends_oacp_reply_only", "sends_oacp_reply"])
+def test_cli_accepts_declared_reply_effect(tmp_path: Path, declaration: str) -> None:
+    if declaration == "sends_oacp_reply_only":
+        envelope = _reply_only_envelope()
+    else:
+        envelope = {**ENVELOPE, "sends_oacp_reply": True}
+    record = _record(human_outcome=_human_outcome(), envelope=envelope)
+    path = _write(tmp_path, record)
+    rc = main(_done_args(path, "sends_oacp_reply"))
+    assert rc == 0
+    stored = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert stored["result"]["final_state"] == "done"
+    checkpoint = stored["result"]["threshold_checkpoint"]
+    assert checkpoint["side_effects_actual"]["sends_oacp_reply"] is True
+
+
+def test_cli_checkpoint_still_presents_grant_only_effect(tmp_path: Path) -> None:
+    record = _record(human_outcome=_human_outcome())
+    path = _write(tmp_path, record)
+    rc = main([
+        str(path), "--checkpoint", "--actual-files-touched", "1",
+        "--started-at", "2026-08-01T01:40:00Z", "--realized", "sends_oacp_reply",
+    ])
+    assert rc == 4
+    stored = yaml.safe_load(path.read_text(encoding="utf-8"))
+    checkpoint = stored["result"]["threshold_checkpoint"]
+    assert "side_effects_actual.sends_oacp_reply" in checkpoint["declaration_errors"]
+
+
+# ── Sweep aggregates the legacy work-clock advisory ───────────────────────
+
+
+def _legacy_done_record(message_id: str, *, with_clock: bool) -> Dict[str, Any]:
+    record = _record(
+        decision="auto_accepted", completion_kind="auto_accepted",
+        final_state="done", message_id=message_id,
+    )
+    record["result"].update({
+        "actual_minutes": 20,
+        "actual_files_touched": 3,
+        "completed_at_utc": "2026-08-01T02:00:00Z",
+    })
+    if with_clock:
+        record["result"]["work_started_at_utc"] = "2026-08-01T01:40:00Z"
+    return record
+
+
+def test_sweep_aggregates_legacy_work_clock_advisories(tmp_path: Path, capsys) -> None:
+    legacy_names = [f"20260801T01000{index}Z_legacy.yaml" for index in range(3)]
+    for index, name in enumerate(legacy_names):
+        _write(
+            tmp_path,
+            _legacy_done_record(f"msg-20260801010000-alice-000{index}", with_clock=False),
+            name=name,
+        )
+    actuals_missing = _legacy_done_record("msg-20260801010000-alice-0009", with_clock=True)
+    del actuals_missing["result"]["actual_minutes"]
+    del actuals_missing["result"]["actual_files_touched"]
+    path = _write(tmp_path, actuals_missing, name="20260801T010009Z_actuals.yaml")
+
+    report = sweep_audit_dir(tmp_path)
+    assert report["aggregated_advisories"] == {
+        "terminal_missing_work_started_at": legacy_names,
+    }
+    for name in legacy_names:
+        assert {f["code"] for f in report["records"][name]} == {"terminal_missing_work_started_at"}
+    assert {f["code"] for f in report["records"]["20260801T010009Z_actuals.yaml"]} == {
+        "terminal_missing_actuals",
+    }
+
+    rc = main([str(path), "--validate", "--sweep"])
+    assert rc == 0
+    lines = capsys.readouterr().out.splitlines()
+    work_clock = [line for line in lines if "terminal_missing_work_started_at" in line]
+    assert len(work_clock) == 1
+    assert work_clock[0].startswith("ADVISORY: terminal_missing_work_started_at on 3 legacy record(s)")
+    assert "--json lists each" in work_clock[0]
+    legacy_receipt_lines = [line for line in lines if "legacy receipt" in line]
+    assert len(legacy_receipt_lines) == 2
+    assert all("actual_" in line for line in legacy_receipt_lines)
+    assert not any("work_started_at_utc" in line for line in legacy_receipt_lines)
+    assert lines[-1] == "0 error finding(s)"
+
+    rc = main([str(path), "--validate", "--sweep", "--json"])
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert len(data["records"]) == 4
+    assert data["aggregated_advisories"]["terminal_missing_work_started_at"] == legacy_names
+    assert len(data["records"][legacy_names[0]]) == 1
+
+
+def test_single_record_validate_prints_legacy_advisory_unaggregated(tmp_path: Path, capsys) -> None:
+    record = _legacy_done_record("msg-20260801010000-alice-0001", with_clock=False)
+    path = _write(tmp_path, record)
+    rc = main([str(path), "--validate"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ADVISORY: " + path.name + ": completed record has no result.work_started_at_utc" in out
+    assert "legacy record(s)" not in out

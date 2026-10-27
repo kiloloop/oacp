@@ -358,10 +358,110 @@ CONSTRAINT_KEYS = (
 )
 
 
+# Environment names an env-assignment prefix may never carry in front of a
+# pinned script: each selects code or a target other than the pinned bytes
+# — the startup files and function or module search paths of the script
+# shells (ENV, BASH_ENV, ZDOTDIR, FPATH, MODULE_PATH, BASH_LOADABLES_PATH,
+# EXECIGNORE, CDPATH, IFS, PS4, SHELLOPTS), the dynamic loader (LD_*,
+# DYLD_*), interpreter search paths and options (PYTHON*, PERL*, RUBY*,
+# NODE_*, GEM_*), the programs a tool execs (PAGER, EDITOR, VISUAL, LESS*,
+# *_ASKPASS, SSH_*), and where a tool reads its configuration, identity or
+# home (HOME, PATH, TMPDIR, TEMP, TMP, XDG_*, GH_*, GIT_*, GITHUB_*, OP_*,
+# CLAUDE_*, OACP_HOME, OACP_ENVELOPE_RECEIVER, AGENT_MEMORY_HOME). A pin
+# that listed one would no longer pin the bytes the human reviewed; the
+# pin's env is for data the script reads (OACP_DONE_TYPE). The list is a
+# floor under a human-written, policy-signed pin, not a proof.
+RETARGETING_ENV_NAMES = frozenset(
+    {
+        "AGENT_MEMORY_HOME", "BASHOPTS", "CDPATH", "EDITOR", "ENV",
+        "EXECIGNORE", "FPATH", "HOME", "IFS", "MODULE_PATH",
+        "OACP_ENVELOPE_RECEIVER", "OACP_HOME", "PAGER", "PATH", "PS4",
+        "SHELLOPTS", "TEMP", "TMP", "TMPDIR", "VISUAL", "ZDOTDIR",
+    }
+)
+RETARGETING_ENV_PREFIXES = (
+    "BASH_", "CLAUDE_", "DYLD_", "GEM_", "GH_", "GIT_", "GITHUB_", "LD_",
+    "LESS", "NODE_", "OP_", "PERL", "PYTHON", "RUBY", "SSH_", "XDG_", "ZSH_",
+)
+
+
+def retargets_script(name: str) -> bool:
+    """Whether a pin's ``env`` may not list ``name`` (RETARGETING_ENV_NAMES)."""
+    return (
+        name in RETARGETING_ENV_NAMES
+        or name.startswith(RETARGETING_ENV_PREFIXES)
+        or name.endswith("_ASKPASS")
+    )
+
+
+ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
+SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}\Z")
+TRUSTED_SCRIPT_KEYS = {"path", "sha256", "env"}
+
+
 class EnvelopeCompileError(ValueError):
     """Raised when a task_profile cannot be compiled into an envelope."""
 
     reason_code = ENVELOPE_COMPILE_ERROR
+
+
+def trusted_scripts(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The receiver's ``envelope.trusted_scripts`` pins, validated.
+
+    Each entry names a script by absolute or ``~/``-rooted ``path`` and the
+    ``sha256`` of its bytes, optionally with ``env``: the assignment names a
+    caller may prefix (``OACP_DONE_TYPE=… bash <script>``). The adapter runs
+    a pinned script under an active envelope without escalation while the
+    file still hashes to its pin. A malformed entry raises
+    :class:`EnvelopeCompileError`: the envelope fails closed rather than
+    carrying a pin it cannot enforce.
+    """
+    section = config.get("envelope")
+    if section is None:
+        return []
+    if not isinstance(section, dict):
+        raise EnvelopeCompileError("receiver config malformed: envelope must be a mapping")
+    raw = section.get("trusted_scripts")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise EnvelopeCompileError(
+            "receiver config malformed: envelope.trusted_scripts must be a list"
+        )
+    pins: List[Dict[str, Any]] = []
+    for index, entry in enumerate(raw):
+        label = f"receiver config malformed: envelope.trusted_scripts[{index}]"
+        if not isinstance(entry, dict):
+            raise EnvelopeCompileError(f"{label} must be a mapping")
+        unknown = sorted(set(entry) - TRUSTED_SCRIPT_KEYS)
+        if unknown:
+            raise EnvelopeCompileError(f"{label} has unknown key(s): {', '.join(unknown)}")
+        path = entry.get("path")
+        if not isinstance(path, str) or not (
+            path.startswith("/") or path.startswith("~/")
+        ):
+            raise EnvelopeCompileError(f"{label}.path must be an absolute or ~/ path")
+        if re.search(r"[$`*?\[\]{}]", path):
+            raise EnvelopeCompileError(f"{label}.path carries shell expansion syntax")
+        digest = entry.get("sha256")
+        if not isinstance(digest, str) or not SHA256_HEX_RE.match(digest):
+            raise EnvelopeCompileError(f"{label}.sha256 must be 64 lowercase hex digits")
+        env = entry.get("env")
+        if env is None:
+            env = []
+        if not isinstance(env, list):
+            raise EnvelopeCompileError(f"{label}.env must be a list of variable names")
+        names: List[str] = []
+        for name in env:
+            if not isinstance(name, str) or not ENV_NAME_RE.match(name):
+                raise EnvelopeCompileError(f"{label}.env entries must be variable names")
+            if retargets_script(name):
+                raise EnvelopeCompileError(
+                    f"{label}.env must not list {name}: it retargets the script"
+                )
+            names.append(name)
+        pins.append({"path": path, "sha256": digest, "env": names})
+    return pins
 
 
 def _parse_message_snapshot(raw: bytes, path: Path) -> Dict[str, Any]:
@@ -420,6 +520,7 @@ def build_envelope(
 
     constraints = {key: scope[key] for key in CONSTRAINT_KEYS}
     constraints["private_repo_allowlist"] = list(policy["private_repo_allowlist"])
+    constraints["trusted_scripts"] = trusted_scripts(config)
 
     message_id = str(message.get("id") or "")
     if not message_id:

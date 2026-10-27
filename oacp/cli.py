@@ -46,6 +46,7 @@ Examples:
   oacp trust keygen --agent claude
   oacp trust import /path/to/<kid>.pub.json --project my-project --agent claude
   oacp trust revoke <kid> --project my-project --agent claude
+  oacp trust pin-script ~/tools/finish.sh --project my-project --agent claude
   oacp autonomy outcome /path/to/audit.yaml --decision approved
   oacp autonomy finalize /path/to/audit.yaml --final-state done --started-at 2026-08-30T10:05:00Z --actual-files-touched 3
   oacp envelope compile /path/to/message.yaml --receiver claude
@@ -86,6 +87,11 @@ COMMAND_GROUPS = {
         "list": ("trust_cli.py", ("list",), "List project catalog entries and receiver pins"),
         "revoke": ("trust_cli.py", ("revoke",), "Revoke a receiver pin"),
         "sign-policy": ("trust_cli.py", ("sign-policy",), "Sign receiver policy files"),
+        "pin-script": (
+            "trust_cli.py",
+            ("pin-script",),
+            "Pin a script under a receiver's envelope.trusted_scripts and re-sign",
+        ),
     },
     "autonomy": {
         "outcome": ("record_autonomy_outcome.py", (), "Record a human approval or decline"),

@@ -39,7 +39,35 @@ autonomy:
     - example-org/private-repo
   continuation_grants:
     enabled: false
+envelope:
+  trusted_scripts:
+    - path: ~/skills/example/scripts/finish_task.sh
+      sha256: <sha256 of the file's bytes>
+      env: [OACP_DONE_TYPE]
 ```
+
+`envelope.trusted_scripts` (optional) pins scripts the receiver's runtime
+adapter may run as `bash <script>` under an active envelope without
+escalating. Each entry names a script by absolute or `~/`-rooted `path`, the
+`sha256` of its bytes, and optionally `env`, the assignment names a caller
+may prefix (`OACP_DONE_TYPE=… bash <script>`); names that retarget a script
+are refused: the script shells' startup files and function or module paths
+(`ENV`, `BASH_ENV`, `ZDOTDIR`, `FPATH`, `MODULE_PATH`, …), loader and
+interpreter paths (`LD_*`, `DYLD_*`, `PYTHON*`, …), the programs a tool execs
+(`PAGER`, `EDITOR`, `*_ASKPASS`, …) and the homes, identities and
+configuration a tool reads (`PATH`, `HOME`, `TMPDIR`, `XDG_*`, `GH_*`,
+`GIT_*`, `OACP_HOME`, …; the compiler's `RETARGETING_ENV_NAMES` and
+`RETARGETING_ENV_PREFIXES` are the list). A pin is the human's review of
+those exact bytes: the compiler carries the list into the envelope, the
+adapter allows the call only while the file still hashes to its pin, and a
+malformed entry fails compilation (`envelope_compile_error`). A literal
+script that carries no pin asks as not registered: the adapter never reads
+an unpinned script's text, so the pin is the one review a script version
+gets, and `oacp trust pin-script <path> --project <p> --agent <r>` records
+it (appending or refreshing the entry) and re-signs the config. The
+admission gate ignores the block; `oacp doctor --project <p>` reports a
+malformed entry, a pinned file that is missing, and a pin whose digest no
+longer matches the file.
 
 When config is absent, receivers behave as `always_pause`. A present config
 that omits the `autonomy` block entirely, such as a signing-only config,
@@ -934,6 +962,15 @@ oacp autonomy finalize <audit.yaml> --final-state done \
   --reply-message-id <msg-id>
 ```
 
+`--realized` names only effects the record's admission covers. A grant-only
+effect — `sends_oacp_reply`, `submits_github_review`,
+`writes_findings_packet` — is refused at call time (exit 2, nothing
+written) unless the scope envelope declares it, an accepted continuation
+grant or a recorded re-authorization scope names it, or an answered
+checkpoint already recorded it realized; the completion reply is recorded
+through `--reply-message-id`. A `--checkpoint` still presents such an
+effect for re-authorization.
+
 Hand-edited terminal blocks are what produced off-enum vocabulary,
 duplicate live evaluations, and terminal records still carrying a paused
 checkpoint action; the finalizer enforces the pinned enums and
@@ -1154,7 +1191,11 @@ reports pinned finding codes (`off_enum_completion_kind`,
 `noncanonical_checkpoint_axis`, `terminal_missing_actuals`,
 `terminal_missing_work_started_at`, `legacy_born_done_unfinalized`), and
 `oacp doctor` sweeps every receiver's audit directory with the same
-checks. Duplicate YAML keys are refused
+checks. A directory sweep (`--sweep`, and doctor) reports the repeated
+legacy `terminal_missing_work_started_at` advisories as one aggregated
+line per code — the records stay byte-preserved and `--json` keeps the
+per-record detail — so advisories of every other code surface
+individually. Duplicate YAML keys are refused
 outright — plain YAML loading silently keeps the later value. The
 fixture set lives in `tests/conformance/autonomy/records/`.
 
@@ -1756,7 +1797,8 @@ The envelope is written to
     "touches_auth_config_or_secrets": false,
     "touches_dependencies": false,
     "public_visibility": false,
-    "private_repo_allowlist": ["example-org/private-repo"]
+    "private_repo_allowlist": ["example-org/private-repo"],
+    "trusted_scripts": []
   },
   "counters": {"files_touched": []},
   "enforcement": "hooks",
@@ -1780,8 +1822,9 @@ Compilation rules:
   reason code `envelope_compile_error` instead of executing unenforced.
 - The compiler reuses the gate evaluator's normalization and pattern
   constants directly, so admission spec and runtime enforcement cannot drift.
-- The receiver-side `private_repo_allowlist` is embedded at compile time;
-  runtime enforcement never trusts sender declarations alone.
+- The receiver-side `private_repo_allowlist` and `envelope.trusted_scripts`
+  pins are embedded at compile time; runtime enforcement never trusts sender
+  declarations alone.
 - Granular side-effect fields absent from a legacy profile compile to
   `false`. `counters` are runtime state and always start empty.
 - **Adapter detection.** `enforcement` is earned, not assumed. The
@@ -1854,7 +1897,15 @@ abbreviations and help flags, while unknown options continue to fail closed.
 Runtime decisions:
 
 - **deny** — the call breaches a declared-false capability (destructive
-  tokens, undeclared commits/pushes/PR mutations, undeclared merges or
+  tokens — except one inside a literal quoted pattern operand of `grep`,
+  `rg`, `awk` or `sed -n` (single quotes, or double quotes carrying no live
+  expansion), directly or under `xargs` / `find -exec`, judged at that
+  operand's own position: data the program matches against its input. The
+  token in command position, in an unquoted word, in a heredoc body, inside
+  a `$(…)` within the quotes, in an awk program with a redirect, pipe,
+  `system`, `getline` or `@` directive, in a sed script outside the
+  print-only grammar, or in any other program's operand still denies —
+  undeclared commits/pushes/PR mutations, undeclared merges or
   issue filing, secret-class or dependency-manifest writes — including
   determinable Bash write targets such as redirects and common writer
   programs), targets a repo outside the embedded allowlist or pinned
@@ -1888,7 +1939,65 @@ Runtime decisions:
   review; unenforceable never silently degrades to allowed. The read-only
   `gh` verbs (`view`, `list`, `status`, `checks`, `diff`, `download`), `gh api`
   GET requests, and the `gh search` group (a read in every subcommand) pass
-  without escalation.
+  without escalation. So do `xargs` and `find -exec`/`-execdir` runs whose
+  nested program is a plain read-only utility (`cat`, `grep`, `hash`, `head`,
+  `jq`, `ls`, `pwd`, `rg` without `--pre`, `stat`, `tail`, `test`, `type`,
+  `wc`, `which`), the lookups `command -v NAME` / `command -V NAME` (they run
+  nothing; any other wrapper flag still asks), and the write-free
+  `oacp autonomy finalize` forms (`--validate`, `--dry-run`); every other
+  `oacp autonomy` invocation edits the task's own audit record and is
+  escalated. Inline Python code (`python3 -c`) is admitted through a
+  positive read-only grammar judged on its syntax tree: every free name a
+  listed builtin or a name the code binds, every import a listed module and
+  member, every attribute of a module alias in that module's member set,
+  every other attribute in the read-only attribute set, every open-like
+  call carrying a literal read mode — behind read-only interpreter options,
+  in a static segment (no `$` or backtick outside single quotes anywhere in
+  it) that redirects to no file. Otherwise the ask names the first construct
+  outside the grammar (a module, an attribute, a mode, an option, a shell
+  expansion inside the code, a redirect, …). `node -e`, `perl -e` and
+  `ruby -e` bodies have no read-only grammar and keep the ask.
+  `oacp verify <message> --attach-audit <record>` passes exactly when the
+  record is the active envelope's own admission record — a `.yaml` directly
+  inside the canonical `audit/autonomy_decisions/` directory whose
+  `message_id`, `receiver` and `message_sha256` match the envelope — and the
+  message file named on the command hashes to that `message_sha256`, in a
+  standalone command with no `OACP_HOME=` override and with selectors that
+  match the envelope; it is the canonical writer of the receiver's own
+  verification stamp (the `--attach-audit` grammar of `message_signing.md`,
+  which refuses other message bytes on its own). Any other record, other
+  message bytes, `--quarantine` or an abbreviation keeps the ask.
+  A literal `bash <script>` (or `sh`, `zsh`, `dash`, `ksh`) is trusted by
+  pin when the shell is named bare or by a path in a system bin directory
+  (`/bin`, `/usr/bin`, `/usr/local/bin`, Homebrew's or MacPorts' `bin`)
+  that resolves inside the system trees: a path pinned in the receiver's
+  `envelope.trusted_scripts` passes with any arguments while the file
+  hashes to its pin, under an env prefix limited to the pin's `env` names;
+  any other literal script asks as not registered under `trusted_scripts`,
+  wherever it lives and whatever it does — the adapter never reads an
+  unpinned script's text, so the pin (the human's review of the bytes,
+  recorded in the signed receiver config) is the one review a script
+  version gets, once, at registration. A shell flag, a `-c` body, a
+  variable path, an executable elsewhere that merely shares a shell's
+  name, or a changed pinned file keeps the ask. A
+  parenthesised subshell group (`( gh pr merge 7 )`), inline or in a script,
+  is judged by the words inside it, and so is the command after shell
+  syntax at a segment's head — a keyword (`if true; then gh pr merge 7;
+  fi`, `! gh …`, `{ gh …; }`), a function header (`f() { gh …; }`), a
+  `case WORD in pattern)` opener, a `coproc` — with the syntax and the
+  wrappers dropped in turns until the head is a program (`time ! git
+  commit` drops `time`, then `!`); a program name the shell
+  would produce by brace expansion, a glob, a variable or a command
+  substitution (`{gh,pr,merge,7}`, `$(echo gh) pr …`) asks, while `[`,
+  `[[` and an arithmetic command head a segment without naming a program;
+  a wrapper spelled by its system path (`/usr/bin/env gh …`) is dropped
+  like the bare wrapper, and a wrapper-named executable elsewhere asks.
+  The App-identity token-minting
+  compound — `T=$(<path>/<token-helper> <app>) && GH_TOKEN="$T" gh …`,
+  every earlier segment such a mint and every join `&&` — is judged as the
+  standalone `gh` command it ends in, under the allow classes and repository
+  gate above; a `;`, a `cd`, any other assignment or helper keeps the
+  compound ask.
 - **allow** — emitted as *no output*: the envelope can only narrow the
   harness's own permission surface, never widen or bypass it.
 - Every emitted **ask** or **deny** reason starts with the stable
@@ -1896,6 +2005,13 @@ Runtime decisions:
   the reason also includes `[task <message-id>]`; operators can therefore
   distinguish an envelope decision from the harness's native permission
   prompt and identify the task that caused it.
+- Every emitted **ask** or **deny** under an active envelope is also
+  appended as one JSON line to
+  `agents/<receiver>/audit/envelope_decisions.jsonl` — `ts`, `message_id`,
+  `session_id`, `tool`, `decision`, `reason` — so a receiver can count the
+  escalations a task cost. The ledger is best-effort instrumentation beside
+  the audit records (never a record itself: sweeps read only `*.yaml`), and
+  a write failure never changes the decision.
 - Compound Bash classification is quote-aware: separators inside quoted
   arguments remain argument data, backslash-newline continuations stay in the
   same segment, and top-level or command-substitution segments are still
@@ -1955,9 +2071,10 @@ Runtime decisions:
   and mutator operands or Bash write targets bearing shell expansion syntax
   escalate to **ask** — the shell expands patterns after classification, so
   a literal spelling proves nothing about the effective target. The
-  canonical audit writers (`oacp autonomy finalize`,
-  `oacp autonomy outcome`, `oacp verify --attach-audit`) reach the record
-  as classified commands that escalate for review, never as file writes.
+  canonical audit writers reach the record as classified commands, never as
+  file writes: `oacp autonomy finalize` and `oacp autonomy outcome` escalate
+  for review, and `oacp verify --attach-audit` passes only against the
+  envelope's own admission record (above).
   The boundary is deliberately scoped to the session the envelope binds: it
   is the *self*-authorization path that must close, and a concurrent
   session is already outside that envelope's reach.

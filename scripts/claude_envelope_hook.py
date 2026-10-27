@@ -45,16 +45,83 @@ opposite of exempt: the active envelope lives there, and writing, removing,
 or relocating it from inside the session is denied as self-modification.
 Trust roots (receiver pins and the project catalog) are authority-bearing
 auth config, gated by ``touches_auth_config_or_secrets``.
+
+Every ``ask`` and ``deny`` emitted under an active envelope is also appended
+as one JSON line to ``agents/<receiver>/audit/envelope_decisions.jsonl``
+(time, task, session, tool, decision, reason), so the escalations a leg
+costs can be counted. The ledger is best-effort and never changes a decision.
+
+Ask-branch census for a reply-only research leg (every mutation flag false).
+Shapes that are provably reads pass under any profile; the rest keep the
+fail-closed ``ask``, each for the reason given:
+
+- ``gh search …`` (a read in every subcommand) and a single-pipeline write
+  to ``$TMPDIR/…`` that resolves inside the runtime scratchpad: allowed.
+- ``… | xargs <utility> …`` and ``find … -exec <utility> … ;`` / ``+``
+  where the nested program is one of the plain read-only utilities the
+  degraded fallback trusts: allowed — the program is visible in argv and
+  stays a read whatever operands it receives. ``xargs`` with no program
+  (its ``echo`` default), a nested shell, ``-ok``/``-okdir``/``-delete``,
+  or any other nested program keeps the ask.
+- ``sed -i '' …`` (the BSD empty backup suffix): the suffix is no longer
+  read as the script, so only the file operands are gated.
+- ``oacp autonomy finalize … --validate`` / ``--dry-run``: allowed, they
+  persist nothing (the dry run only takes the record lock). Every other
+  ``oacp autonomy`` form — a terminal write, a checkpoint, ``outcome`` —
+  edits the task's own audit record, the authority this hook reads to
+  widen the live envelope: an ask by design, never self-sanctioned.
+- ``oacp verify <message> --attach-audit <record>`` where the record is the
+  active envelope's own admission record (content identity inside the
+  canonical ``audit/autonomy_decisions/`` directory, standalone command,
+  selectors matching the envelope) and the message hashes to the record's
+  ``message_sha256``: allowed — it is the canonical writer of the receiver's
+  verification stamp, the same class as ``oacp autonomy finalize``. Any
+  other record, other message bytes, ``--quarantine`` or an abbreviation:
+  ask.
+- ``command -v NAME`` / ``-V`` (and ``type``, ``which``, ``hash``): allowed —
+  a lookup runs nothing. Every other wrapper flag (``env -i …``) still asks.
+- ``python3 -c`` whose code parses into the positive read-only grammar
+  (listed builtins and modules, read-only attributes, literal read modes on
+  every open-like call), behind read-only interpreter options, in a static
+  segment that redirects to no file: allowed. Otherwise the ask names the
+  first construct outside the grammar (a module, an attribute, a mode, a
+  shell expansion inside the code, a redirect, …). ``node -e``, ``perl -e``
+  and ``ruby -e`` bodies have no read-only grammar here and ask.
+- A deny-listed destructive token inside a literal quoted pattern operand of
+  ``grep`` / ``rg`` / ``awk`` / ``sed -n`` (directly or under ``xargs`` /
+  ``find -exec``), judged at that operand's own position, is data and no
+  longer denies; the token in command position, in an unquoted word, in a
+  heredoc body, inside a ``$(…)`` within the quotes, in an awk or sed script
+  that can run a command or write a file, or in any other program's operand
+  still does.
+- ``bash <script> …`` with a literal script path is trusted by pin, never by
+  its text. A path the receiver pinned by digest (``envelope.trusted_scripts``
+  in its config, carried into the envelope) passes with any arguments while
+  the file hashes to its pin, under an env prefix limited to the names the
+  pin lists. Any other literal script asks as not registered: the pin is the
+  human's review of the script's bytes, so the ask happens once per script
+  version, at registration, instead of a parse of the text at every run.
+- ``T=$(<path>/<token-helper> <app>) && GH_TOKEN="$T" gh …`` (the App-identity
+  recipe): every earlier segment is such a mint and every join is ``&&``, so
+  nothing can retarget gh — the final segment is judged as the standalone
+  ``gh`` command, under the allow classes and the repository gate. A ``;``,
+  a ``cd``, any other assignment or helper keeps the compound ask.
+- ``sh -c``, ``eval``, a shell flag, a variable script path, a changed
+  pinned file, and wrappers carrying other flags run code the classifier
+  cannot see: ask. Run the underlying commands directly, or pin the script.
 """
 
 from __future__ import annotations
 
+import ast
+import hashlib
 import json
 import os
 import re
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -69,6 +136,10 @@ from envelope_compiler import (
 )
 
 SESSION_CLAIM_STEM = SESSION_CLAIM_FILENAME.rsplit(".", 1)[0]
+# One JSON line per non-allow decision under an active envelope: the
+# receiver's own ask/deny ledger beside the autonomy records. Never read as
+# a record — the audit sweeps glob ``*.yaml``.
+DECISION_LOG_FILENAME = "envelope_decisions.jsonl"
 
 REASON_PREFIX = "[oacp-envelope]"
 BLOCKED_OPENER = f"{REASON_PREFIX} Blocked: autonomy threshold exceeded"
@@ -110,16 +181,381 @@ SHELL_INDIRECTION = {
     "sh", "bash", "zsh", "dash", "ksh", "fish", "eval", "exec", "xargs",
     "source", ".",
 }
+# Shells that run the script file named as their first operand. A literal
+# script the receiver pinned by digest passes and any other literal script
+# asks as not registered (_classify_script_invocation); a `-c` body, a
+# shell flag, a variable path or any other program in SHELL_INDIRECTION
+# keeps the ask.
+SCRIPT_SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
+# Where a script shell may be named by path: the system and package-manager
+# bin directories (the spelling, after `..` normalization) and the trees
+# those resolve into through symlinks (a Homebrew `bin/bash` links into its
+# Cellar). A bare name resolves through PATH like every program the hook
+# classifies; a path anywhere else — a scratch or repository file that
+# merely shares a shell's name, a relative spelling — keeps the ask.
+INTERPRETER_BIN_DIRS = (
+    "/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin",
+)
+INTERPRETER_REAL_PREFIXES = (
+    "/bin/", "/usr/", "/opt/homebrew/", "/opt/local/", "/nix/store/",
+)
+# Bytes of a script the hook reads to hash against its pin; a larger file is
+# not a skill wrapper and keeps the ask.
+SCRIPT_READ_LIMIT = 1024 * 1024
+# Shell syntax words a segment may start with:
+# they carry no command of their own, so they are dropped and the words
+# after them are judged (_strip_syntax_head).
+SCRIPT_SYNTAX_WORDS = {
+    "if", "elif", "then", "else", "do", "while", "until", "!", "{", "}",
+    "(", ")", "fi", "done", "esac", ";;",
+}
+# Keywords whose remaining words are data, never a command: the list a loop
+# or a case iterates (a substitution inside it is judged as its own
+# segment). A `function` line is a definition: its name is dropped and the
+# body judged, on the same line or the next ones.
+SCRIPT_DATA_KEYWORDS = {"for", "select", "case"}
+# Builtins that head a segment without naming a program: a test evaluates
+# its operands and runs nothing (a substitution inside it is judged as its
+# own segment), so its brackets are not an expanded program name.
+TEST_BUILTINS = {"[", "[["}
+# A function name is any word free of shell metacharacters (bash allows more
+# than identifiers); the glued form carries `()` and whatever follows it in
+# one token (`f()`, `f(){`, `f()(`, `f(){cmd`).
+FUNCTION_NAME_RE = re.compile(r"[^\s()$`'\"{}|&;<>]+\Z")
+GLUED_FUNCTION_HEADER_RE = re.compile(r"[^\s()$`'\"{}|&;<>]+\(\)(.*)\Z")
+# One mint of the App-identity recipe: `NAME=$(<path>/<token-helper> <app>)`,
+# optionally double-quoted. The helper's basename is fixed; its directory
+# is any path free of shell operators and expansion.
+MINT_ASSIGNMENT_RE = re.compile(
+    r"^([A-Za-z_][A-Za-z0-9_]*)=(\"?)\$\((?:[^\s()$`;|&<>\"']*/)?gh-app-token"
+    r"[ \t]+[A-Za-z0-9][A-Za-z0-9_.-]*\)\2$"
+)
 # Known runners whose nested command is visible in argv: recursively
 # classified instead of escalated (F-007: `uv run oacp envelope clear`).
 RUNNER_VERBS = {"uv": "run", "poetry": "run", "pipx": "run", "npm": "exec",
                 "pnpm": "exec", "yarn": "exec"}
 DIRECT_RUNNERS = {"npx", "uvx"}
-# Interpreter inline-code flags execute uninspectable nested code (F-007).
+# Bytes of a message file the attach-audit check hashes; a larger file is
+# not a protocol message and keeps the ask (the verifier bounds reads too).
+MESSAGE_HASH_LIMIT = 4 * 1024 * 1024
+# Interpreter inline-code flags: the code is one argv token, so the hook can
+# read it. Python code is admitted through the positive grammar below; node,
+# perl and ruby bodies have no read-only grammar here and keep the ask, so no
+# inline body reaches the plain-program path unread.
 INTERPRETER_CODE_FLAGS = {
     "python": {"-c"}, "python2": {"-c"}, "python3": {"-c"},
-    "node": {"-e", "--eval", "-p"}, "nodejs": {"-e", "--eval", "-p"},
+    "node": {"-e", "--eval", "-p", "--print"},
+    "nodejs": {"-e", "--eval", "-p", "--print"},
     "ruby": {"-e"}, "perl": {"-e", "-E"},
+}
+INLINE_CODE_FAMILY = {
+    "python": "python", "python2": "python", "python3": "python",
+    "node": "node", "nodejs": "node", "ruby": "ruby", "perl": "perl",
+}
+# Short-option clusters that end in the code flag (`python3 -Ic …`,
+# `perl -ne …`): the code is the next token. Letters other than the code flag
+# are the interpreter's own single-letter options.
+INLINE_CODE_CLUSTER_RE = {
+    "python": re.compile(r"^-[BbdEIOPqRsSuvx]*c$"),
+    "perl": re.compile(r"^-[0aCcdDFiIlMmnpstTuUvwWX]*[eE]$"),
+    "ruby": re.compile(r"^-[0aCdEFhiIlnpsSTvwWx]*e$"),
+}
+# Python options that may precede `-c` and change no file: single-letter
+# clusters from this set, `-W <filter>`, and `-X <option>` for the listed
+# implementation options (`-X pycache_prefix=…` writes bytecode). Anything
+# else — `-i`, an unknown spelling — asks; `-m` or a script path before `-c`
+# means the argv runs no inline code.
+PY_INLINE_OPTION_RE = re.compile(r"^-[BbdEIOPqRsSuvx]+$")
+PY_INLINE_X_OPTION_RE = re.compile(
+    r"^(?:utf8|dev|faulthandler|importtime|tracemalloc|warn_default_encoding|"
+    r"no_debug_ranges|int_max_str_digits=\d+|frozen_modules=(?:on|off))$"
+)
+# The positive read-only grammar for `python3 -c` code, judged on its syntax
+# tree: every free name is one of these builtins or a name the code binds,
+# every import names a module below and one of its listed members (every
+# set is explicit: a module that exposed the modules it imports would hand
+# out `os` through `glob.os`), every attribute of a module alias is in that
+# module's member set,
+# every other attribute is in PY_READONLY_ATTRIBUTES, and every call to an
+# open-like name carries only a literal read mode. Nothing admitted can run a
+# process, import outside the table, reach a dunder, or open a file for
+# writing; the ask names the first construct outside the grammar.
+PY_READONLY_BUILTINS = frozenset("""
+    abs all any ascii bin bool bytes callable chr classmethod dict divmod
+    enumerate filter float format frozenset hasattr hash hex id int isinstance
+    issubclass iter len list map max min next oct open ord pow print property
+    range repr reversed round set slice sorted staticmethod str sum tuple zip
+    exit quit __name__
+    BaseException Exception ArithmeticError AssertionError AttributeError
+    FileNotFoundError IndexError IOError IsADirectoryError KeyError
+    KeyboardInterrupt LookupError NameError NotADirectoryError
+    NotImplementedError OSError PermissionError RuntimeError StopIteration
+    SystemExit TypeError UnicodeDecodeError UnicodeEncodeError UnicodeError
+    ValueError ZeroDivisionError
+""".split())
+PY_READONLY_MODULES: Dict[str, frozenset] = {
+    "ast": frozenset("""
+        AST And Assert Assign AsyncFor AsyncFunctionDef AsyncWith Attribute
+        AugAssign Await BinOp BitAnd BitOr BitXor BoolOp Break Call ClassDef
+        Compare Constant Continue Del Delete Dict DictComp Div Eq ExceptHandler
+        Expr Expression FloorDiv For FormattedValue FunctionDef GeneratorExp
+        Global Gt GtE If IfExp Import ImportFrom In Interactive Invert Is IsNot
+        JoinedStr LShift Lambda List ListComp Load Lt LtE MatMult Match Mod
+        Module Mult Name NodeTransformer NodeVisitor Nonlocal Not NotEq NotIn
+        Or Pass Pow RShift Raise Return Set SetComp Slice Starred Store Sub
+        Subscript Try Tuple UAdd USub UnaryOp While With Yield YieldFrom alias
+        arg arguments comprehension dump get_docstring iter_child_nodes
+        iter_fields keyword literal_eval match_case parse unparse walk withitem
+    """.split()),
+    "base64": frozenset("""
+        a85decode a85encode b16decode b16encode b32decode b32encode b64decode
+        b64encode b85decode b85encode decodebytes encodebytes
+        standard_b64decode standard_b64encode urlsafe_b64decode
+        urlsafe_b64encode
+    """.split()),
+    "binascii": frozenset("""
+        Error a2b_base64 a2b_hex b2a_base64 b2a_hex crc32 hexlify unhexlify
+    """.split()),
+    "bisect": frozenset("""
+        bisect bisect_left bisect_right insort insort_left insort_right
+    """.split()),
+    "calendar": frozenset("""
+        Calendar TextCalendar day_abbr day_name isleap leapdays month
+        month_abbr month_name monthrange timegm weekday weekheader
+    """.split()),
+    "codecs": frozenset({"decode", "encode", "open"}),
+    "collections": frozenset("""
+        ChainMap Counter OrderedDict defaultdict deque namedtuple
+    """.split()),
+    "configparser": frozenset({"ConfigParser", "Error", "RawConfigParser"}),
+    "copy": frozenset({"Error", "copy", "deepcopy"}),
+    "csv": frozenset("""
+        DictReader DictWriter Error QUOTE_ALL QUOTE_MINIMAL QUOTE_NONE
+        QUOTE_NONNUMERIC Sniffer excel excel_tab field_size_limit
+        list_dialects reader unix_dialect writer
+    """.split()),
+    "dataclasses": frozenset("""
+        FrozenInstanceError asdict astuple dataclass field fields
+        is_dataclass make_dataclass replace
+    """.split()),
+    "datetime": frozenset("""
+        MAXYEAR MINYEAR UTC date datetime time timedelta timezone tzinfo
+    """.split()),
+    "decimal": frozenset("""
+        Context Decimal DivisionByZero InvalidOperation ROUND_CEILING
+        ROUND_DOWN ROUND_FLOOR ROUND_HALF_EVEN ROUND_HALF_UP ROUND_UP
+        getcontext localcontext
+    """.split()),
+    "difflib": frozenset("""
+        Differ HtmlDiff SequenceMatcher context_diff get_close_matches ndiff
+        restore unified_diff
+    """.split()),
+    "enum": frozenset({"Enum", "Flag", "IntEnum", "IntFlag", "StrEnum", "auto", "unique"}),
+    "fnmatch": frozenset({"filter", "fnmatch", "fnmatchcase", "translate"}),
+    "fractions": frozenset({"Fraction"}),
+    "functools": frozenset("""
+        cache cmp_to_key lru_cache partial reduce total_ordering wraps
+    """.split()),
+    "glob": frozenset({"escape", "glob", "has_magic", "iglob"}),
+    "hashlib": frozenset("""
+        algorithms_available algorithms_guaranteed blake2b blake2s
+        file_digest md5 new sha1 sha224 sha256 sha384 sha3_256 sha3_512
+        sha512
+    """.split()),
+    "heapq": frozenset("""
+        heapify heappop heappush heappushpop heapreplace merge nlargest
+        nsmallest
+    """.split()),
+    "html": frozenset({"escape", "unescape"}),
+    "io": frozenset({"BytesIO", "StringIO"}),
+    "itertools": frozenset("""
+        accumulate batched chain combinations combinations_with_replacement
+        compress count cycle dropwhile filterfalse groupby islice pairwise
+        permutations product repeat starmap takewhile tee zip_longest
+    """.split()),
+    "json": frozenset("""
+        JSONDecodeError JSONDecoder JSONEncoder dump dumps load loads
+    """.split()),
+    "math": frozenset("""
+        acos asin atan atan2 ceil comb copysign cos cosh degrees dist e exp
+        fabs factorial floor fmod frexp fsum gcd hypot inf isclose isfinite
+        isinf isnan isqrt lcm ldexp log log10 log2 modf nan perm pi pow prod
+        radians sin sinh sqrt tan tanh tau trunc
+    """.split()),
+    "operator": frozenset({"itemgetter"}),
+    "os.path": frozenset("""
+        abspath altsep basename commonpath commonprefix curdir devnull dirname
+        exists expanduser expandvars extsep getatime getctime getmtime getsize
+        isabs isdir isfile islink ismount join lexists normcase normpath
+        pardir pathsep realpath relpath samefile sep split splitdrive splitext
+    """.split()),
+    "pathlib": frozenset("""
+        Path PosixPath PurePath PurePosixPath PureWindowsPath
+    """.split()),
+    "plistlib": frozenset("""
+        FMT_BINARY FMT_XML InvalidFileException UID dump dumps load loads
+    """.split()),
+    "pprint": frozenset("""
+        PrettyPrinter isreadable isrecursive pformat pp pprint saferepr
+    """.split()),
+    "random": frozenset("""
+        Random SystemRandom choice choices gauss getrandbits randint random
+        randrange sample seed shuffle uniform
+    """.split()),
+    "re": frozenset("""
+        A ASCII DOTALL I IGNORECASE M MULTILINE Match Pattern S U UNICODE
+        VERBOSE X compile error escape findall finditer fullmatch match purge
+        search split sub subn
+    """.split()),
+    "secrets": frozenset("""
+        SystemRandom choice compare_digest randbelow token_bytes token_hex
+        token_urlsafe
+    """.split()),
+    "shlex": frozenset({"join", "quote", "split"}),
+    "statistics": frozenset("""
+        NormalDist StatisticsError fmean geometric_mean harmonic_mean mean
+        median median_high median_low mode multimode pstdev pvariance
+        quantiles stdev variance
+    """.split()),
+    "string": frozenset("""
+        Formatter Template ascii_letters ascii_lowercase ascii_uppercase
+        capwords digits hexdigits octdigits printable punctuation whitespace
+    """.split()),
+    "struct": frozenset("""
+        Struct calcsize error iter_unpack pack unpack unpack_from
+    """.split()),
+    "sys": frozenset("""
+        argv byteorder executable exit hexversion maxsize platform stderr
+        stdin stdout version version_info
+    """.split()),
+    "tarfile": frozenset({"is_tarfile", "open"}),
+    "textwrap": frozenset({"TextWrapper", "dedent", "fill", "indent", "shorten", "wrap"}),
+    "time": frozenset("""
+        gmtime localtime mktime monotonic perf_counter sleep strftime strptime
+        time time_ns
+    """.split()),
+    "tomllib": frozenset({"TOMLDecodeError", "load", "loads"}),
+    "typing": frozenset("""
+        TYPE_CHECKING Any Callable ClassVar Dict Final FrozenSet Generic
+        Iterable Iterator List Literal Mapping MutableMapping NamedTuple
+        Optional Protocol Sequence Set Tuple TypeVar TypedDict Union cast
+        overload
+    """.split()),
+    "unicodedata": frozenset("""
+        bidirectional category combining decimal decomposition digit
+        east_asian_width is_normalized lookup mirrored name normalize numeric
+        unidata_version
+    """.split()),
+    "urllib.parse": frozenset("""
+        ParseResult SplitResult parse_qs parse_qsl quote quote_plus unquote
+        unquote_plus urldefrag urlencode urljoin urlparse urlsplit urlunparse
+        urlunsplit
+    """.split()),
+    "uuid": frozenset("""
+        NAMESPACE_DNS NAMESPACE_OID NAMESPACE_URL NAMESPACE_X500 UUID uuid1
+        uuid3 uuid4 uuid5
+    """.split()),
+    "xml.etree.ElementTree": frozenset("""
+        Element ElementTree ParseError SubElement XMLParser dump fromstring
+        indent iterparse parse tostring
+    """.split()),
+    "yaml": frozenset("""
+        YAMLError dump safe_dump safe_dump_all safe_load safe_load_all
+    """.split()),
+    "zipfile": frozenset({"ZipFile", "is_zipfile"}),
+    "zoneinfo": frozenset({"ZoneInfo", "ZoneInfoNotFoundError", "available_timezones"}),
+}
+# Attribute names that are reads or in-memory operations on every object the
+# modules above can hand back (str, bytes, containers, read handles, paths,
+# matches, dates, digests, archive members, syntax nodes). `write`,
+# `truncate`, `unlink`, `rename`, `extractall`, `system`, `load`, … are
+# absent by construction, so a handle, path or archive opened for reading
+# cannot be turned into a write, and an aliased module cannot be reached
+# through a container.
+PY_READONLY_ATTRIBUTES = frozenset("""
+    _asdict _fields _make _replace
+    add anchor append appendleft args as_integer_ratio as_posix as_uri
+    astimezone bit_length block_size body buffer capitalize casefold center
+    clear close closed col_offset colno combine comment compress_type
+    conjugate copy count cwd date date_time day days decode denominator
+    difference digest digest_size discard doc drive elements encode encoding
+    end endswith errno exists expandtabs expanduser extend extractfile
+    fieldnames file_size filename filename2 find flags flush format
+    format_map from_bytes fromisoformat fromkeys fromtimestamp fullmatch func
+    get getinfo getmember getmembers getnames getvalue glob group groupdict
+    groups hex hexdigest home hour id imag index infolist insert intersection
+    is_absolute is_dir is_file is_integer is_relative_to is_symlink isalnum
+    isalpha isatty isdecimal isdigit isdir isdisjoint isfile isidentifier
+    islower isnumeric isocalendar isoformat isoweekday isspace issubset
+    issuperset istitle isupper items iterdir join joinpath keys keywords
+    lastgroup lastindex line_num lineno ljust lower lstat lstrip major match
+    maketrans max microsecond micro min minor minute mode month most_common
+    msg mtime name namelist now numerator owner parent parents partition
+    parts pattern pop popitem popleft pos read read_bytes read_text readable
+    readline readlines readlink real relative_to releaselevel remove
+    removeprefix removesuffix resolve reverse rfind rglob rindex rjust rotate
+    rpartition rsplit rstrip safe_substitute samefile search second seek
+    seekable serial setdefault size sort span split splitlines st_atime
+    st_ctime st_dev st_gid st_ino st_mode st_mtime st_nlink st_size st_uid
+    start startswith stat stem string strftime strip strptime sub subn
+    substitute subtract suffix suffixes swapcase symmetric_difference tell
+    template testzip time timestamp timetuple title to_bytes toordinal total
+    total_seconds translate tzinfo tzname union update upper utc
+    utcfromtimestamp utcnow utcoffset value values walk weekday with_name
+    with_stem with_suffix writable writeheader writerow writerows year zfill
+    attrib dialect findtext getroot iter itertext set tag tail text
+""".split())
+# Attribute names a `pathlib` object uses to rename or copy a file
+# (`Path.replace`; `Path.copy` on 3.14) and that are reads on strings, dates
+# and containers: they pass only while `pathlib` is not imported.
+PY_PATHLIB_CONFLICTS = frozenset({"copy", "replace"})
+# Callables that open a file: admitted only as the callee of a call whose
+# mode, positional or `mode=`, is a literal read mode (or absent).
+PY_OPEN_LIKE = frozenset({
+    "open", "ZipFile", "TarFile", "GzipFile", "BZ2File", "LZMAFile", "FileIO",
+    "fdopen",
+})
+PY_READ_MODE_RE = re.compile(r"^(?:r[bt]?|[bt]r|rU|U|r:(?:\*|gz|bz2|xz)?)$")
+PY_PRIVATE_ATTRIBUTES_ALLOWED = frozenset({"_asdict", "_fields", "_make", "_replace"})
+# `command -v NAME` / `command -V NAME` (optionally `-p`) look a name up and
+# run nothing. Any other wrapper flag keeps the ask (F-002).
+COMMAND_LOOKUP_FLAG_RE = re.compile(r"^-[pvV]+$")
+# Programs whose quoted operands are patterns or scripts the program matches
+# against its input: a deny-listed destructive token quoted there is data,
+# not a command. awk and sed scripts can run commands or write files, so their
+# operands count only when the script is extracted from argv and proves inert:
+# an awk program with no redirect, pipe, `system`, `getline` or `@` directive;
+# a sed script under `-n` built only from addresses and print-class commands.
+PATTERN_OPERAND_PROGRAMS = {"grep", "egrep", "fgrep", "rg", "awk", "gawk", "mawk", "nawk", "sed"}
+AWK_SCRIPT_ESCAPE_RE = re.compile(r"\bsystem\s*\(|\bgetline\b|[|>@]")
+AWK_VALUE_OPTIONS = {"-F", "-v", "-W", "--field-separator", "--assign"}
+AWK_PLAIN_OPTIONS = {
+    "--posix", "--traditional", "-c", "-C", "--copyright", "-O", "--optimize",
+    "-S", "--sandbox", "-n", "--non-decimal-data", "-N", "--use-lc-numeric",
+    "-b", "--characters-as-bytes", "-M", "--bignum", "-t", "--lint-old",
+    "-r", "--re-interval", "-L", "--lint",
+}
+SED_PLAIN_OPTIONS = {
+    "-E", "-r", "--regexp-extended", "-s", "--separate", "-u", "--unbuffered",
+    "-z", "--null-data", "--posix", "--debug", "--sandbox",
+}
+SED_CLUSTER_LETTERS = frozenset("nErsuz")
+# sed commands that print, delete or shuffle the pattern/hold space and touch
+# no file: p = l d h H g G x n N q Q z F. `s` and `y` are parsed with their
+# delimited fields; `w`, `W`, `e`, `r`, `R`, `a`, `i`, `c`, branches and
+# labels are outside the grammar.
+SED_SIMPLE_COMMANDS = frozenset("p=ldhHgGxnNqQzF")
+# A `$` that the shell would expand inside double quotes, or a backtick. A
+# trailing `$`, `$)` or `$"` is literal (a regex anchor), so only these spellings
+# disqualify a double-quoted operand from being pattern data.
+LIVE_EXPANSION_RE = re.compile(r"\$[A-Za-z_{(@*#?!$0-9-]|`")
+# xargs options whose value is the NEXT argv token; attached spellings
+# (`-I{}`, `-n1`, `--replace={}`) are single tokens and skip naturally.
+# `-e`, `-i` and `-l` take only attached values in GNU xargs.
+XARGS_VALUE_OPTIONS = {
+    "-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s",
+    "--arg-file", "--delimiter", "--eof", "--replace", "--max-lines",
+    "--max-args", "--max-procs", "--max-chars", "--process-slot-var",
 }
 PROTECTED_BRANCHES = {"main", "master"}
 # git push flags that can update refs far beyond a single PR branch.
@@ -336,6 +772,9 @@ class WorkspaceContext:
     def state_dir(self) -> Path:
         return self.agent_dir() / "state"
 
+    def decision_log_path(self) -> Path:
+        return self.agent_dir() / "audit" / DECISION_LOG_FILENAME
+
     def authority_roots(self) -> List[Tuple[str, Path]]:
         """Receiver surfaces the enveloped session may never modify itself.
 
@@ -363,6 +802,39 @@ class WorkspaceContext:
         agent_dir = self.agent_dir()
         return [str(agent_dir / name) for name in BOOKKEEPING_AGENT_SUBDIRS]
 
+
+def _record_decision(
+    context: WorkspaceContext,
+    decision: Decision,
+    payload: Dict[str, Any],
+    session_id: str,
+) -> None:
+    """Append one JSON line per non-allow decision to the receiver's ledger.
+
+    Without it an approved ``ask`` leaves no trace anywhere — not in the
+    transcript, the audit record, or any log — so the escalations a leg
+    costs cannot be counted. The line carries the time, the active task,
+    the harness session, the tool, the decision and the operator-visible
+    reason (which already quotes the offending segment where one exists).
+    Best effort: a ledger that cannot be written never changes the outcome.
+    """
+    if decision.action == "allow":
+        return
+    entry = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "message_id": context.message_id or None,
+        "session_id": session_id or None,
+        "tool": str(payload.get("tool_name") or ""),
+        "decision": decision.action,
+        "reason": decision.reason,
+    }
+    try:
+        path = context.decision_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, sort_keys=True) + "\n")
+    except OSError:
+        pass
 
 # ── Workspace discovery ───────────────────────────────────────────────────────
 
@@ -735,7 +1207,11 @@ def _strip_wrappers(tokens: List[str]) -> Tuple[List[str], bool, List[str]]:
 
     needs_ask is True when a wrapper carries its own flags (`env -i gh ...`):
     flag/value consumption differs per wrapper, so the real program cannot be
-    identified reliably — escalate instead of guessing (F-002). The stripped
+    identified reliably — escalate instead of guessing (F-002) — and when a
+    wrapper is spelled by a path outside the system bin directories
+    (`/tmp/env gh …`): an executable that merely shares a wrapper's name
+    (_trusted_interpreter). A wrapper spelled bare or by its system path
+    (`/usr/bin/env gh …`) is dropped like any other. The stripped
     assignments are preserved because they change the wrapped program's
     behavior (`OACP_HOME=… oacp envelope clear` retargets the clear) and the
     classifier must be able to see that.
@@ -749,7 +1225,13 @@ def _strip_wrappers(tokens: List[str]) -> Tuple[List[str], bool, List[str]]:
             assignments.append(token)
             index += 1
             continue
-        if token in WRAPPER_COMMANDS:
+        if token.rsplit("/", 1)[-1] in WRAPPER_COMMANDS:
+            if not _trusted_interpreter(token):
+                return tokens[index:], True, assignments
+            if token == "command" and _is_command_lookup(tokens[index:]):
+                # `command -v NAME` is a lookup, not a wrapper around NAME:
+                # it runs nothing. Hand it on as its own program.
+                return tokens[index:], False, assignments
             saw_wrapper = True
             index += 1
             continue
@@ -757,6 +1239,19 @@ def _strip_wrappers(tokens: List[str]) -> Tuple[List[str], bool, List[str]]:
             return tokens[index:], True, assignments
         break
     return tokens[index:], False, assignments
+
+
+def _is_command_lookup(tokens: List[str]) -> bool:
+    """``command -v NAME…`` / ``command -V NAME…`` (``-p`` may ride along).
+
+    The lookup prints where a name resolves and executes nothing, whatever
+    the operands. ``command -p NAME`` without ``-v``/``-V`` runs NAME under
+    the default PATH and stays a wrapper carrying a flag (ask).
+    """
+    if len(tokens) < 2 or tokens[0] != "command":
+        return False
+    flag = tokens[1]
+    return bool(COMMAND_LOOKUP_FLAG_RE.match(flag)) and ("v" in flag or "V" in flag)
 
 
 def _flag_value(tokens: List[str], *flags: str) -> Optional[str]:
@@ -1239,16 +1734,28 @@ def _classify_envelope_clear(
     )
 
 
-def _classify_oacp_verify(tokens: List[str]) -> Decision:
-    """Allow only the verifier's known read-only argv grammar.
+def _classify_oacp_verify(
+    tokens: List[str],
+    context: Optional[WorkspaceContext] = None,
+    cwd: str = "",
+    env_assignments: Optional[List[str]] = None,
+    standalone: bool = False,
+) -> Decision:
+    """Allow the verifier's read-only argv grammar and its one canonical write.
 
-    Quarantine writes beside the input, and audit attachment accepts an
-    arbitrary destination (including authority records). Neither is a blanket
-    bookkeeping exemption. Unknown options, including argparse abbreviations,
-    keep the existing ask rather than silently opening a write path.
+    Quarantine writes beside the input and keeps the ask. ``--attach-audit``
+    writes ``result.message_auth`` into an audit record under that record's
+    lock: it is the canonical writer of the receiver's own verification
+    stamp, the same class as ``oacp autonomy finalize``, so it passes exactly
+    when the record is the active envelope's bound admission record and the
+    message being verified is that record's accepted snapshot (see
+    _classify_verify_attach_audit). Any other destination keeps the ask.
+    Unknown options, including argparse abbreviations, keep the existing ask
+    rather than silently opening a write path.
     """
     value_flags = {"--pins", "--project", "--receiver", "--oacp-dir"}
-    positionals = 0
+    positionals: List[str] = []
+    attach_values: List[str] = []
     index = 2
     while index < len(tokens):
         token = tokens[index]
@@ -1258,7 +1765,7 @@ def _classify_oacp_verify(tokens: List[str]) -> Decision:
             index += 1
             continue
         flag, separator, value = token.partition("=")
-        if flag in value_flags:
+        if flag in value_flags or flag == "--attach-audit":
             if not separator:
                 index += 1
                 if index >= len(tokens):
@@ -1266,17 +1773,123 @@ def _classify_oacp_verify(tokens: List[str]) -> Decision:
                 value = tokens[index]
             if not value or value.startswith("-") or re.search(r"[$`*?\[\]{}~]", value):
                 return _ask("cannot resolve oacp verify option value")
+            if flag == "--attach-audit":
+                attach_values.append(value)
         elif token.startswith("-"):
             return _ask(
                 "only read-only oacp verify is exempt; audit attachment, "
                 "quarantine and unknown options require review"
             )
         else:
-            positionals += 1
-            if positionals > 1:
+            positionals.append(token)
+            if len(positionals) > 1:
                 return _ask("cannot classify oacp verify arguments")
         index += 1
+    if not attach_values:
+        return ALLOW
+    if len(attach_values) > 1 or len(positionals) != 1:
+        return _ask(
+            "only read-only oacp verify is exempt; --attach-audit takes one "
+            "record beside one message"
+        )
+    return _classify_verify_attach_audit(
+        tokens, attach_values[0], positionals[0], context, cwd, env_assignments, standalone
+    )
+
+
+def _classify_verify_attach_audit(
+    tokens: List[str],
+    record_arg: str,
+    message_arg: str,
+    context: Optional[WorkspaceContext],
+    cwd: str,
+    env_assignments: Optional[List[str]],
+    standalone: bool,
+) -> Decision:
+    """Sanction ``oacp verify --attach-audit`` against the bound record only.
+
+    The stamp is allowed when the record is the active envelope's own
+    admission record — its resolved path is a ``.yaml`` directly inside the
+    canonical ``audit/autonomy_decisions/`` directory and its content
+    identity (``message_id`` + ``receiver`` + ``message_sha256``) matches the
+    envelope, never the filename — and the message file named on the command
+    hashes to that same ``message_sha256``: the stamp binds to the record's
+    accepted snapshot, never to other bytes. Like the completion clear, it is
+    judged only as a standalone simple command with no ``OACP_HOME=``
+    override and with project/receiver/home selectors matching the envelope,
+    so an earlier segment cannot retarget it after validation. Everything
+    else — another record, a record elsewhere, an unreadable one, other
+    message bytes, a compound command — keeps the ask.
+    """
+    prefix = (
+        "only read-only oacp verify is exempt; --attach-audit passes only "
+        "against the active envelope's own admission record"
+    )
+    if context is None or not context.message_id or not context.message_sha256:
+        return _ask(f"{prefix} (no resolved workspace)")
+    if not standalone:
+        return _ask(f"{prefix} (compound command; run it standalone)")
+    for assignment in env_assignments or []:
+        if assignment.startswith("OACP_HOME="):
+            return _ask(f"{prefix} (OACP_HOME override)")
+    target_project = _last_flag_value(tokens, "--project") or context.project
+    target_receiver = _last_flag_value(tokens, "--receiver") or context.receiver
+    if target_project != context.project or target_receiver != context.receiver:
+        return _ask(
+            f"{prefix} (targets {target_project}/{target_receiver}, not "
+            f"{context.project}/{context.receiver})"
+        )
+    oacp_dir = _last_flag_value(tokens, "--oacp-dir")
+    if oacp_dir is not None:
+        declared = os.path.realpath(_normalize_file_path(oacp_dir, cwd))
+        if declared != os.path.realpath(str(context.oacp_root)):
+            return _ask(f"{prefix} (different OACP home)")
+    resolved = os.path.realpath(_normalize_file_path(record_arg, cwd))
+    audit_dir = os.path.realpath(str(context.audit_dir()))
+    if (
+        os.path.dirname(resolved) != audit_dir
+        or not resolved.endswith(".yaml")
+        or not os.path.isfile(resolved)
+    ):
+        return _ask(
+            f"{prefix} ({record_arg!r} is not a record in the canonical "
+            "audit directory)"
+        )
+    try:
+        from _oacp_constants import locked_audit
+
+        with locked_audit(Path(resolved)):
+            record = load_yaml_file(Path(resolved))
+    except Exception as exc:
+        return _ask(f"{prefix} (unreadable record: {exc})")
+    if (
+        not isinstance(record, dict)
+        or str(record.get("message_id") or "") != context.message_id
+        or str(record.get("receiver") or "") != context.receiver
+        or str(record.get("message_sha256") or "") != context.message_sha256
+    ):
+        return _ask(f"{prefix} (record identity does not match the envelope)")
+    message_path = os.path.realpath(_normalize_file_path(message_arg, cwd))
+    try:
+        with open(message_path, "rb") as handle:
+            digest = hashlib.sha256(handle.read(MESSAGE_HASH_LIMIT + 1)).hexdigest()
+    except OSError as exc:
+        return _ask(f"{prefix} (unreadable message: {exc})")
+    if digest != context.message_sha256:
+        return _ask(f"{prefix} (message bytes are not the record's accepted snapshot)")
     return ALLOW
+
+
+def _oacp_finalize_is_readonly(tokens: List[str]) -> bool:
+    """``oacp autonomy finalize`` forms that persist nothing.
+
+    ``--validate`` only reads (``--sweep`` reads the directory); ``--dry-run``
+    evaluates under the record lock and writes no record. Exact spellings
+    only — an argparse abbreviation or any expansion syntax keeps the ask.
+    """
+    if any(re.search(r"[$`*?\[\]{}~]", token) for token in tokens):
+        return False
+    return "--validate" in tokens or "--dry-run" in tokens
 
 
 def _classify_oacp(
@@ -1304,7 +1917,9 @@ def _classify_oacp(
     if sub == "verify":
         if len(tokens) < 2 or tokens[1] != "verify":
             return _ask("cannot classify oacp verify invocation")
-        return _classify_oacp_verify(tokens)
+        return _classify_oacp_verify(
+            tokens, context, cwd, env_assignments, standalone
+        )
     if sub == "envelope":
         if action == "show":
             return ALLOW
@@ -1319,6 +1934,15 @@ def _classify_oacp(
         )
     if sub == "agent" and action in ("show", "list"):
         return ALLOW
+    if sub == "autonomy":
+        if action == "finalize" and _oacp_finalize_is_readonly(tokens):
+            return ALLOW
+        return _ask(
+            f"cannot classify oacp autonomy {action} under an active "
+            "envelope; it edits the task's own audit record — the authority "
+            "the envelope overlay reads — so it is reviewed, never "
+            "self-sanctioned (--validate and --dry-run are exempt)"
+        )
     return _ask(
         f"cannot classify oacp {sub} under an active envelope; only send and "
         "read-only subcommands are exempt"
@@ -1480,8 +2104,16 @@ def _sed_in_place_targets(tokens: List[str]) -> Optional[List[str]]:
             continue
         for position, letter in enumerate(token[1:]):
             if letter == "i":
-                # The rest of the cluster is the optional backup suffix.
+                # The rest of the cluster is the optional backup suffix. BSD
+                # sed takes the suffix as a separate argument, and its empty
+                # spelling (`-i ''`) is that suffix, not the script.
                 in_place = True
+                if (
+                    position == len(token) - 2
+                    and index < len(tokens)
+                    and tokens[index] == ""
+                ):
+                    index += 1
                 break
             if letter in ("e", "f", "l"):
                 # Value is the rest of the cluster, or the next token.
@@ -1855,18 +2487,31 @@ def _split_shell_segments(command: str) -> List[str]:
     line continuations, and rejects unterminated quoting/substitution instead
     of guessing. Separator characters inside quoted arguments stay data.
     """
+    return [
+        segment for segment, _operator in _split_shell_segments_with_operators(command)
+    ]
+
+
+def _split_shell_segments_with_operators(command: str) -> List[Tuple[str, str]]:
+    """Segments paired with the operator that ends each one.
+
+    The operator is ``&&``, ``||``, ``|``, ``|&``, ``&`` or ``;`` (a newline
+    reads as ``;``), and ``""`` for the final segment. Empty segments (a
+    ``;;`` case terminator, a leading operator) are dropped with their
+    operator, so a recorded operator always follows real text.
+    """
     _reject_unsupported_shell_words(command)
-    segments: List[str] = []
+    segments: List[Tuple[str, str]] = []
     current: List[str] = []
     quote: Optional[str] = None
     in_backticks = False
     substitution_depth = 0
     index = 0
 
-    def flush() -> None:
+    def flush(operator: str) -> None:
         segment = "".join(current).strip()
         if segment:
-            segments.append(segment)
+            segments.append((segment, operator))
         current.clear()
 
     while index < len(command):
@@ -1930,10 +2575,14 @@ def _split_shell_segments(command: str) -> List[str]:
             index += 1
             continue
         if char in (";", "\n", "|"):
-            flush()
+            operator = ";"
             index += 1
-            if char == "|" and index < len(command) and command[index] in ("|", "&"):
-                index += 1
+            if char == "|":
+                operator = "|"
+                if index < len(command) and command[index] in ("|", "&"):
+                    operator += command[index]
+                    index += 1
+            flush(operator)
             continue
         if char == "&":
             # `2>&1`, `<&0`, and `&>file` are redirections, not command
@@ -1942,10 +2591,12 @@ def _split_shell_segments(command: str) -> List[str]:
                 current.append(char)
                 index += 1
                 continue
-            flush()
+            operator = "&"
             index += 1
             if index < len(command) and command[index] == "&":
+                operator = "&&"
                 index += 1
+            flush(operator)
             continue
 
         current.append(char)
@@ -1953,7 +2604,7 @@ def _split_shell_segments(command: str) -> List[str]:
 
     if quote is not None or in_backticks or substitution_depth:
         raise ValueError("unterminated shell quote or command substitution")
-    flush()
+    flush("")
     return segments
 
 
@@ -2087,6 +2738,7 @@ DEGRADED_READONLY_COMMANDS = {
     "cmp",
     "diff",
     "grep",
+    "hash",
     "head",
     "jq",
     "ls",
@@ -2095,7 +2747,9 @@ DEGRADED_READONLY_COMMANDS = {
     "stat",
     "tail",
     "test",
+    "type",
     "wc",
+    "which",
 }
 
 
@@ -2115,12 +2769,918 @@ def _degraded_readonly_segment(segment: str) -> bool:
         words.pop(0)
     if not words or words[0].startswith("-"):
         return False
+    return _is_readonly_program(words)
+
+
+def _is_readonly_program(words: List[str]) -> bool:
+    """Whether an argv names one of the plain read-only utilities.
+
+    One vocabulary for the degraded fallback and for nested programs
+    (``xargs``, ``find -exec``): a nested invocation is a read exactly when
+    its direct spelling would be. Ripgrep's command-executing ``--pre``
+    mode is excluded.
+    """
+    if not words or not words[0]:
+        return False
     program = Path(words[0]).name
     if program == "rg" and any(
         word == "--pre" or word.startswith("--pre=") for word in words[1:]
     ):
         return False
     return program in DEGRADED_READONLY_COMMANDS
+
+
+def _inline_code_bodies(prog: str, tokens: List[str]) -> Optional[List[str]]:
+    """The inline code operands of a node / perl / ruby argv, or None without any.
+
+    Exact flags (``-e``, ``--eval``, ``-p``), ``--eval=CODE`` / ``--print=CODE``,
+    short clusters ending in the code flag (``-ne``) and the attached spelling
+    (``-e'print 1'``) all count, so no inline body reaches the plain-program
+    path unread. Python argv is read by _python_inline_invocation instead.
+    """
+    flags = INTERPRETER_CODE_FLAGS[prog]
+    cluster = INLINE_CODE_CLUSTER_RE.get(INLINE_CODE_FAMILY[prog])
+    bodies: List[str] = []
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            break
+        if token in flags or (cluster is not None and cluster.match(token)):
+            bodies.append(tokens[index + 1] if index + 1 < len(tokens) else "")
+            index += 2
+            continue
+        if token.startswith("--eval=") or token.startswith("--print="):
+            if prog in ("node", "nodejs"):
+                bodies.append(token.split("=", 1)[1])
+        elif (
+            token.startswith("-")
+            and not token.startswith("--")
+            and cluster is not None
+            and len(token) > 2
+        ):
+            for split in range(2, len(token)):
+                if cluster.match(token[:split]):
+                    bodies.append(token[split:])
+                    break
+        index += 1
+    return bodies or None
+
+
+def _python_inline_invocation(tokens: List[str]) -> Optional[Tuple[str, Optional[str]]]:
+    """``(code, option_problem)`` for a ``python -c`` argv, or None.
+
+    None means the argv runs no inline code: a script path, ``-m`` or ``--``
+    comes before any ``-c``, and the plain-program path classifies it. Every
+    option before the code flag must come from the read-only option grammar;
+    the first that does not is returned as the problem. The exact flag
+    (``-c``), a cluster ending in it (``-Ic``) and the attached spelling
+    (``-cCODE``) all yield the code; a flag with no operand yields "".
+    """
+    cluster = INLINE_CODE_CLUSTER_RE["python"]
+    problem: Optional[str] = None
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--" or not token.startswith("-") or token.startswith("-m"):
+            return None
+        if token == "-c" or cluster.match(token):
+            return (tokens[index + 1] if index + 1 < len(tokens) else ""), problem
+        if token in ("-W", "-X"):
+            value = tokens[index + 1] if index + 1 < len(tokens) else ""
+            if not value or value.startswith("-") or (
+                token == "-X" and not PY_INLINE_X_OPTION_RE.match(value)
+            ):
+                problem = problem or f"{token} {value}".strip()
+            index += 2
+            continue
+        if token.startswith("-W") and len(token) > 2:
+            index += 1
+            continue
+        if token.startswith("-X") and len(token) > 2:
+            if not PY_INLINE_X_OPTION_RE.match(token[2:]):
+                problem = problem or token
+            index += 1
+            continue
+        if PY_INLINE_OPTION_RE.match(token):
+            index += 1
+            continue
+        if not token.startswith("--") and len(token) > 2:
+            for split in range(2, len(token)):
+                if cluster.match(token[:split]):
+                    return token[split:], problem
+        problem = problem or token
+        index += 1
+    return None
+
+
+def _inline_code_decision(prog: str, tokens: List[str], segment: str) -> Optional[Decision]:
+    """Classify an interpreter argv that may carry inline code.
+
+    None: the argv runs no inline code (a script file, ``-m``), so the
+    plain-program path applies. ALLOW: Python code inside the positive
+    read-only grammar, in a static segment (no ``$`` or backtick outside
+    single quotes — a value spliced into the code is code the hook never
+    saw) that redirects to no file. Otherwise an ask naming the construct:
+    an interpreter option outside the grammar, the first node of the code
+    outside it, or a node / perl / ruby body, for which no grammar exists.
+    """
+    family = INLINE_CODE_FAMILY[prog]
+    if family != "python":
+        if _inline_code_bodies(prog, tokens) is None:
+            return None
+        return _ask(
+            f"cannot classify inline interpreter code (no read-only grammar "
+            f"for {family}; run a script file, or compute in python3 -c): "
+            f"{segment!r}"
+        )
+    invocation = _python_inline_invocation(tokens)
+    if invocation is None:
+        return None
+    code, option_problem = invocation
+    if not code.strip():
+        return _ask(
+            f"cannot classify inline interpreter code (no code operand): "
+            f"{segment!r}"
+        )
+    if not _inline_code_is_static(segment):
+        return _ask(
+            "cannot classify inline interpreter code (shell expansion inside "
+            f"the code; pass values via argv or the environment): {segment!r}"
+        )
+    redirect = _segment_file_redirect(segment)
+    if redirect is not None:
+        return _ask(
+            f"cannot classify inline interpreter code (output redirect to "
+            f"{redirect!r}): {segment!r}"
+        )
+    if option_problem is not None:
+        return _ask(
+            f"cannot classify inline interpreter code (interpreter option "
+            f"{option_problem!r} is outside the read-only option grammar): "
+            f"{segment!r}"
+        )
+    problem = _python_code_problem(code)
+    if problem is not None:
+        return _ask(f"cannot classify inline interpreter code ({problem}): {segment!r}")
+    return ALLOW
+
+
+def _py_member_allowed(module: str, member: str) -> bool:
+    members = PY_READONLY_MODULES.get(module)
+    return members is not None and member in members
+
+
+def _py_read_mode(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and PY_READ_MODE_RE.match(node.value) is not None
+    )
+
+
+def _py_open_call_problem(call: ast.Call, method: bool) -> Optional[str]:
+    """Why a call to an open-like callee is not a literal read, or None.
+
+    For the function form (``open(path, mode, …)``, ``codecs.open``,
+    ``zipfile.ZipFile``) the mode is the second positional; for the method
+    form (``Path.open(mode)``, ``ZipFile.open(name, mode)``) the receiver's
+    type is unknown, so every positional must read as a mode. A mode must be
+    a string literal matching the read grammar; ``*args`` / ``**kwargs``
+    hide the mode and ask.
+    """
+    for arg in call.args:
+        if isinstance(arg, ast.Starred):
+            return "starred argument to a file-opening call"
+    modes = list(call.args if method else call.args[1:2])
+    for keyword in call.keywords:
+        if keyword.arg is None:
+            return "** argument to a file-opening call"
+        if keyword.arg == "mode":
+            modes.append(keyword.value)
+    for mode in modes:
+        if _py_read_mode(mode):
+            continue
+        if isinstance(mode, ast.Constant) and isinstance(mode.value, str):
+            return f"file open for writing ({mode.value!r})"
+        return "file open mode is not a literal read mode"
+    return None
+
+
+class _PythonReadOnlyGrammar(ast.NodeVisitor):
+    """Judge a parsed ``python -c`` body against the positive grammar.
+
+    ``aliases`` maps a bound name to the module it imports; ``bound`` holds
+    every name the code binds (collected flat, without scope analysis — a
+    superset is safe because every capability still enters through a checked
+    import or builtin). The first construct outside the grammar is recorded
+    in ``problem`` and the walk stops.
+    """
+
+    def __init__(self, aliases: Dict[str, str], bound: set, modules: set) -> None:
+        self.aliases = aliases
+        self.bound = bound
+        self.pathlib = "pathlib" in modules
+        self.problem: Optional[str] = None
+
+    def fail(self, text: str) -> None:
+        if self.problem is None:
+            self.problem = text
+
+    def visit(self, node: ast.AST) -> None:
+        if self.problem is None:
+            super().visit(node)
+
+    def _is_module_alias(self, node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and node.id in self.aliases
+        )
+
+    def _is_sys_stream(self, node: ast.AST) -> bool:
+        if isinstance(node, ast.Attribute) and node.attr == "buffer":
+            node = node.value
+        return (
+            isinstance(node, ast.Attribute)
+            and node.attr in ("stdout", "stderr")
+            and self._is_module_alias(node.value)
+            and self.aliases[node.value.id] == "sys"
+        )
+
+    def visit_AsyncFunctionDef(self, node: ast.AST) -> None:
+        self.fail("async code")
+
+    visit_AsyncFor = visit_AsyncWith = visit_Await = visit_AsyncFunctionDef
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if not isinstance(node.ctx, ast.Load):
+            return
+        if node.id in self.aliases:
+            self.fail(f"module alias {node.id!r} used as a value")
+        elif node.id.startswith("__") and node.id != "__name__":
+            self.fail(f"dunder name {node.id!r}")
+        elif node.id in PY_OPEN_LIKE:
+            self.fail(f"{node.id!r} referenced without being called")
+        elif node.id not in PY_READONLY_BUILTINS and node.id not in self.bound:
+            self.fail(f"name {node.id!r} is outside the read-only grammar")
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        attr = node.attr
+        if attr.startswith("_") and attr not in PY_PRIVATE_ATTRIBUTES_ALLOWED:
+            self.fail(f"private attribute {attr!r}")
+            return
+        if attr in PY_OPEN_LIKE:
+            # Only visit_Call reaches an open-like callee, and it never visits
+            # the callee node itself: any open-like attribute seen here is a
+            # value (`f = codecs.open`, `Z = zipfile.ZipFile`) whose later call
+            # would escape the mode check.
+            self.fail(f"{attr!r} referenced without being called")
+            return
+        if self._is_module_alias(node.value):
+            module = self.aliases[node.value.id]
+            if not _py_member_allowed(module, attr):
+                self.fail(
+                    f"attribute {attr!r} of module {module!r} is outside the "
+                    "read-only grammar"
+                )
+            return
+        if attr == "write" and self._is_sys_stream(node.value):
+            self.visit(node.value)
+            return
+        if attr in PY_PATHLIB_CONFLICTS:
+            if self.pathlib:
+                self.fail(f"attribute {attr!r} with pathlib imported")
+                return
+        elif attr not in PY_READONLY_ATTRIBUTES:
+            self.fail(f"attribute {attr!r} is outside the read-only grammar")
+            return
+        self.visit(node.value)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in PY_OPEN_LIKE:
+            problem = _py_open_call_problem(node, method=False)
+            if problem is not None:
+                self.fail(problem)
+                return
+        elif isinstance(func, ast.Attribute) and func.attr in PY_OPEN_LIKE:
+            module_function = self._is_module_alias(func.value)
+            problem = _py_open_call_problem(node, method=not module_function)
+            if problem is not None:
+                self.fail(problem)
+                return
+            if module_function:
+                module = self.aliases[func.value.id]
+                if not _py_member_allowed(module, func.attr):
+                    self.fail(
+                        f"attribute {func.attr!r} of module {module!r} is "
+                        "outside the read-only grammar"
+                    )
+                    return
+            else:
+                self.visit(func.value)
+        else:
+            self.visit(func)
+        for arg in node.args:
+            self.visit(arg)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
+
+
+def _python_code_problem(code: str) -> Optional[str]:
+    """The first construct of ``code`` outside the read-only grammar, or None."""
+    try:
+        tree = ast.parse(code, mode="exec")
+    except (SyntaxError, ValueError) as exc:
+        return f"code does not parse: {getattr(exc, 'msg', None) or exc}"
+    aliases: Dict[str, str] = {}
+    bound: set = set()
+    modules: set = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name not in PY_READONLY_MODULES:
+                    return f"module {alias.name!r} is outside the read-only grammar"
+                modules.add(alias.name)
+                name = alias.asname or alias.name
+                if "." in name:
+                    return (
+                        f"import binds {name.split('.')[0]!r}; use "
+                        f"'import {alias.name} as <alias>'"
+                    )
+                aliases[name] = alias.name
+        elif isinstance(node, ast.ImportFrom):
+            if node.level or not node.module:
+                return "relative import"
+            if node.module not in PY_READONLY_MODULES:
+                return f"module {node.module!r} is outside the read-only grammar"
+            modules.add(node.module)
+            for alias in node.names:
+                if alias.name == "*":
+                    return "wildcard import"
+                if not _py_member_allowed(node.module, alias.name):
+                    return (
+                        f"attribute {alias.name!r} of module {node.module!r} is "
+                        "outside the read-only grammar"
+                    )
+                if alias.name in PY_OPEN_LIKE and alias.asname not in (None, alias.name):
+                    return f"import renames {alias.name!r}"
+                bound.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            bound.add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.ClassDef, ast.AsyncFunctionDef)):
+            bound.add(node.name)
+        elif isinstance(node, ast.arg):
+            bound.add(node.arg)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            bound.update(node.names)
+        elif type(node).__name__ in ("MatchAs", "MatchStar", "MatchMapping"):
+            for field in ("name", "rest"):
+                value = getattr(node, field, None)
+                if isinstance(value, str):
+                    bound.add(value)
+    rebound = sorted(set(aliases) & bound)
+    if rebound:
+        return f"module alias {rebound[0]!r} is rebound"
+    grammar = _PythonReadOnlyGrammar(aliases, bound, modules)
+    grammar.visit(tree)
+    return grammar.problem
+
+
+def _inline_code_is_static(segment: str) -> bool:
+    """No ``$`` or backtick outside single quotes anywhere in the segment.
+
+    Judged on the whole segment rather than the code word alone: the shell
+    expands before the interpreter runs, and a word boundary the hook infers
+    from quoting can differ from the one the shell applies.
+    """
+    quote: Optional[str] = None
+    index = 0
+    while index < len(segment):
+        char = segment[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            continue
+        if quote is not None:
+            if char == quote:
+                quote = None
+        elif char in ("'", '"'):
+            quote = char
+        if quote != "'" and char in ("$", "`"):
+            return False
+        index += 1
+    return True
+
+
+def _segment_file_redirect(segment: str) -> Optional[str]:
+    """The first output redirect target that is a real file, if any.
+
+    Descriptor duplication (``2>&1``) and ``/dev/null`` / ``/dev/stdout`` /
+    ``/dev/stderr`` are not file writes. Process substitution is a segment
+    of its own and is classified there.
+    """
+    for match in REDIRECT_TARGET_RE.finditer(_shell_syntax_view(segment)):
+        raw_word = segment[match.start("word"):match.end("word")]
+        if raw_word.startswith((">(", "<(")):
+            continue
+        try:
+            words = _shell_tokens(raw_word)
+        except ValueError:
+            return raw_word
+        if not words or not words[0]:
+            continue
+        word = words[0]
+        if match.group("dup") and (word.isdigit() or word == "-"):
+            continue
+        if word in ("/dev/null", "/dev/stdout", "/dev/stderr"):
+            continue
+        return word
+    return None
+
+
+def _quoted_spans(segment: str) -> List[Tuple[int, int]]:
+    """Offsets of every complete quoted string in a segment, quotes included.
+
+    Backslash escapes outside single quotes are honoured; an unterminated
+    quote yields no span (the segment has already failed the quote-aware
+    scanner by then).
+    """
+    spans: List[Tuple[int, int]] = []
+    quote: Optional[str] = None
+    start = 0
+    index = 0
+    while index < len(segment):
+        char = segment[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            continue
+        if quote is None:
+            if char in ("'", '"'):
+                quote = char
+                start = index
+        elif char == quote:
+            spans.append((start, index + 1))
+            quote = None
+        index += 1
+    return spans
+
+
+def _pattern_operand_programs(tokens: List[str]) -> Optional[List[List[str]]]:
+    """The argv of every read-only pattern program a segment runs, or None.
+
+    Direct (``grep …``, after wrappers), under ``xargs``, or as every
+    ``find -exec`` action — any other program in the chain disqualifies the
+    segment. ``rg --pre`` executes a command and is excluded. awk and sed are
+    admitted here and judged for inert scripts by the caller.
+    """
+    tokens, needs_ask, _assignments = _strip_wrappers(tokens)
+    if needs_ask or not tokens:
+        return None
+    prog = Path(tokens[0]).name
+    if prog == "xargs":
+        nested = _xargs_nested_command(tokens)
+        return _pattern_operand_programs(nested) if nested else None
+    if prog == "find":
+        actions = _find_action_commands(tokens)
+        if not actions:
+            return None
+        programs: List[List[str]] = []
+        for action in actions:
+            nested = _pattern_operand_programs(action)
+            if nested is None:
+                return None
+            programs.extend(nested)
+        return programs
+    if prog not in PATTERN_OPERAND_PROGRAMS:
+        return None
+    if prog == "rg" and any(
+        word == "--pre" or word.startswith("--pre=") for word in tokens[1:]
+    ):
+        return None
+    return [tokens]
+
+
+def _awk_program(argv: List[str]) -> Optional[str]:
+    """The awk program text from argv, or None when it comes from a file.
+
+    ``-f`` / ``-e`` read the program elsewhere, ``-i`` / ``-l`` load code,
+    ``-o`` / ``-d`` / ``-p`` write files, and an unknown option is not
+    proven: all return None (not inert).
+    """
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            return argv[index + 1] if index + 1 < len(argv) else None
+        if token in AWK_VALUE_OPTIONS:
+            index += 2
+            continue
+        if (token.startswith(("-F", "-v")) and len(token) > 2) or token.startswith(
+            ("--field-separator=", "--assign=")
+        ):
+            index += 1
+            continue
+        if token in AWK_PLAIN_OPTIONS or token.startswith("--lint="):
+            index += 1
+            continue
+        if token.startswith("-"):
+            return None
+        return token
+    return None
+
+
+def _sed_scripts(argv: List[str]) -> Optional[Tuple[bool, List[str]]]:
+    """``(quiet, scripts)`` from a sed argv, or None when not provable.
+
+    None covers a script read from a file (``-f``), in-place editing
+    (``-i``), and every option outside the plain set. The first positional
+    is the script unless ``-e`` / ``--expression`` supplied one.
+    """
+    quiet = False
+    expressions = False
+    scripts: List[str] = []
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            if not expressions and not scripts and index + 1 < len(argv):
+                scripts.append(argv[index + 1])
+            break
+        if token in ("-e", "--expression"):
+            if index + 1 >= len(argv):
+                return None
+            scripts.append(argv[index + 1])
+            expressions = True
+            index += 2
+            continue
+        if token.startswith("--expression="):
+            scripts.append(token.split("=", 1)[1])
+            expressions = True
+            index += 1
+            continue
+        if token in ("-n", "--quiet", "--silent"):
+            quiet = True
+            index += 1
+            continue
+        if token in SED_PLAIN_OPTIONS:
+            index += 1
+            continue
+        if token in ("-l", "--line-length"):
+            index += 2
+            continue
+        if token.startswith("--line-length=") or (token.startswith("-l") and token[2:].isdigit()):
+            index += 1
+            continue
+        if token.startswith("--"):
+            return None
+        if token.startswith("-") and len(token) > 1:
+            letters = token[1:]
+            if letters.endswith("e") and set(letters[:-1]) <= SED_CLUSTER_LETTERS:
+                if index + 1 >= len(argv):
+                    return None
+                quiet = quiet or "n" in letters
+                scripts.append(argv[index + 1])
+                expressions = True
+                index += 2
+                continue
+            if set(letters) <= SED_CLUSTER_LETTERS:
+                quiet = quiet or "n" in letters
+                index += 1
+                continue
+            return None
+        if not expressions and not scripts:
+            scripts.append(token)
+        index += 1
+    if not scripts:
+        return None
+    return quiet, scripts
+
+
+def _sed_delimited_end(script: str, start: int, delimiter: str) -> Optional[int]:
+    """Index just past the closing ``delimiter`` of a field starting at ``start``."""
+    index = start
+    while index < len(script):
+        char = script[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == delimiter:
+            return index + 1
+        index += 1
+    return None
+
+
+def _sed_script_is_inert(script: str) -> bool:
+    """Whether a sed script is built only from addresses and inert commands.
+
+    Addresses (numbers, ``$``, ``/regex/`` with ``I``/``M`` flags, ranges,
+    steps, ``!``), groups, the print-class commands in SED_SIMPLE_COMMANDS,
+    ``s`` with ``g p i I m M`` and numeric flags, ``y``, and comments pass.
+    ``w``/``W`` (write), ``e``/``E`` (execute), ``r``/``R`` (read a file),
+    ``a``/``i``/``c`` (text), branches, labels and custom-delimiter addresses
+    are outside the grammar, as is anything the scanner cannot place.
+    """
+    index = 0
+    length = len(script)
+    while index < length:
+        char = script[index]
+        if char in " \t\n;{}!,$~" or char.isdigit():
+            index += 1
+            continue
+        if char == "#":
+            newline = script.find("\n", index)
+            index = length if newline == -1 else newline + 1
+            continue
+        if char == "/":
+            end = _sed_delimited_end(script, index + 1, "/")
+            if end is None:
+                return False
+            index = end
+            while index < length and script[index] in "IM":
+                index += 1
+            continue
+        if char in SED_SIMPLE_COMMANDS:
+            index += 1
+            continue
+        if char in "sy":
+            if index + 1 >= length:
+                return False
+            delimiter = script[index + 1]
+            if delimiter.isalnum() or delimiter in " \t\n\\":
+                return False
+            end = _sed_delimited_end(script, index + 2, delimiter)
+            if end is None:
+                return False
+            end = _sed_delimited_end(script, end, delimiter)
+            if end is None:
+                return False
+            index = end
+            if char == "s":
+                while index < length and script[index] in "gpiImM0123456789":
+                    index += 1
+            continue
+        return False
+    return True
+
+
+def _pattern_scripts_are_inert(argv: List[str]) -> bool:
+    """Whether a pattern program's script operand can run nothing and write nothing."""
+    prog = Path(argv[0]).name
+    if prog in ("awk", "gawk", "mawk", "nawk"):
+        program = _awk_program(argv)
+        return program is not None and not AWK_SCRIPT_ESCAPE_RE.search(program)
+    if prog == "sed":
+        parsed = _sed_scripts(argv)
+        if parsed is None:
+            return False
+        quiet, scripts = parsed
+        return quiet and all(_sed_script_is_inert(script) for script in scripts)
+    return True
+
+
+def _inert_pattern_spans(segment: str) -> List[Tuple[int, int]]:
+    """Segment-local offsets of quoted operands that are inert pattern data.
+
+    The segment must run a read-only pattern program (directly or nested)
+    whose awk / sed script, extracted from argv, proves inert. A quoted
+    operand counts when it is literal — single quotes, or double quotes with
+    no live expansion or backtick (a ``$(…)`` inside the quotes executes to
+    form the argument and is not data) — and is not part of a shell word
+    that is an environment assignment (``X='rm'"…"`` is one word). Offsets
+    are exact, so the same text elsewhere in the command earns nothing from
+    this segment.
+    """
+    try:
+        tokens = _shell_tokens(segment)
+    except ValueError:
+        return []
+    programs = _pattern_operand_programs(tokens)
+    if not programs or not all(_pattern_scripts_are_inert(argv) for argv in programs):
+        return []
+    # Word separators are whitespace the shell sees as syntax; whitespace inside
+    # a quoted piece of the same word (`X=' '"pattern"`) separates nothing.
+    separators = [
+        start
+        for start, end, kind in _shell_spans(segment)
+        if kind == "syntax" and segment[start:end].isspace()
+    ]
+    spans: List[Tuple[int, int]] = []
+    for start, end in _quoted_spans(segment):
+        text = segment[start:end]
+        if text[0] == '"' and LIVE_EXPANSION_RE.search(text):
+            continue
+        word_start = max([0] + [sep + 1 for sep in separators if sep < start])
+        if re.match(r"^\w+=", segment[word_start:start]):
+            continue
+        spans.append((start, end))
+    return spans
+
+
+def _destructive_token_deny(label: str) -> Decision:
+    return _deny(
+        f"destructive command token {label!r} is outside the "
+        "envelope (destructive_ops: false)"
+    )
+
+
+def _destructive_token_decision(command: str) -> Optional[Decision]:
+    """The destructive-token deny, skipping tokens that are pattern data.
+
+    Every match of a deny-listed token is judged exactly once, in the
+    innermost shell segment that contains it directly (a match inside a
+    command or process substitution belongs to that substitution's own
+    segment). It passes only when it lies inside an inert quoted pattern
+    operand of that segment (``grep``, ``rg``, ``awk``, ``sed -n``; directly
+    or under ``xargs`` / ``find -exec``). A match the segmenter never sees —
+    a heredoc body — denies through the count: every match in the raw
+    command must have been judged.
+    """
+    hits = [label for label, pattern in DESTRUCTIVE_PATTERNS for _m in pattern.finditer(command)]
+    if not hits:
+        return None
+    try:
+        segments = _segments_of(_strip_heredoc_bodies(command))
+    except ValueError:
+        return _destructive_token_deny(hits[0])
+    judged = 0
+    for segment in segments:
+        opaque = [
+            (start, end)
+            for start, end, kind in _shell_spans(segment)
+            if kind in ("substitution", "process")
+        ]
+        inert = _inert_pattern_spans(segment)
+        for label, pattern in DESTRUCTIVE_PATTERNS:
+            for match in pattern.finditer(segment):
+                if any(start <= match.start() and match.end() <= end for start, end in opaque):
+                    continue
+                judged += 1
+                if not any(start <= match.start() and match.end() <= end for start, end in inert):
+                    return _destructive_token_deny(label)
+    if judged != len(hits):
+        return _destructive_token_deny(hits[0])
+    return None
+
+
+def _xargs_nested_command(tokens: List[str]) -> Optional[List[str]]:
+    """The argv xargs will run, or None when it falls back to ``echo``."""
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            return tokens[index + 1:] or None
+        if not token.startswith("-"):
+            return tokens[index:]
+        index += 2 if token in XARGS_VALUE_OPTIONS else 1
+    return None
+
+
+def _find_action_commands(tokens: List[str]) -> Optional[List[List[str]]]:
+    """The argv of every ``-exec`` / ``-execdir`` predicate.
+
+    None when a predicate the classifier cannot see through is present:
+    ``-ok`` / ``-okdir`` (interactive), ``-delete``, or an ``-exec`` with no
+    ``;`` / ``+`` terminator.
+    """
+    commands: List[List[str]] = []
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token in ("-ok", "-okdir", "-delete"):
+            return None
+        if token in ("-exec", "-execdir"):
+            end = index + 1
+            while end < len(tokens) and tokens[end] not in (";", "+"):
+                end += 1
+            if end >= len(tokens):
+                return None
+            commands.append(tokens[index + 1:end])
+            index = end + 1
+            continue
+        index += 1
+    return commands
+
+
+def _strip_subshell_parens(tokens: List[str]) -> List[str]:
+    """Drop the parentheses of a subshell group around a segment.
+
+    ``( cmd )``, ``(cmd)`` and the halves of a group split at an operator
+    run the words inside them, so those words are judged: a ``(`` that
+    opens a group is dropped whether it stands alone or is glued to the
+    first word, and a ``)`` that closes one likewise. ``$(``, ``<(``, the
+    arithmetic ``((`` and a function name's ``()`` are not groups and keep
+    their tokens.
+    """
+    while tokens and tokens[0] == "(":
+        tokens = tokens[1:]
+    if tokens and tokens[0].startswith("(") and not tokens[0].startswith("(("):
+        tokens = [tokens[0][1:]] + tokens[1:]
+    while tokens and tokens[-1] == ")":
+        tokens = tokens[:-1]
+    if (
+        tokens
+        and tokens[-1].endswith(")")
+        and not tokens[-1].endswith("))")
+        and "(" not in tokens[-1]
+    ):
+        tokens = tokens[:-1] + [tokens[-1][:-1]]
+    return tokens
+
+
+def _strip_syntax_head(tokens: List[str]) -> Tuple[List[str], Optional[str]]:
+    """Drop the shell syntax at a segment's head; the words after it run.
+
+    Shell syntax words carry no command of their own (``if cmd``, ``then
+    cmd``, ``! cmd``, ``{ cmd``, ``do cmd``, a case pattern ``word)``, the
+    ``case WORD in`` opener), and neither does a function header. The header
+    grammar is ``[function] NAME [()] [BODY]``: NAME is any word free of
+    shell metacharacters, the parentheses may be glued to NAME or spaced
+    (``f()``, ``f ()``, ``f ( )``), BODY is a ``{`` or ``(`` group that may
+    be glued to the parentheses (``f(){ cmd``, ``f()(cmd``) or follow later,
+    and the keyword form takes a body without parentheses (``function f {
+    cmd``). ``coproc`` runs its command, named or not. A ``{`` glued to a
+    word that closes within the token (``{gh,pr}``) is a brace expansion,
+    not a group, and stays for the program-name check. Returns the remaining
+    tokens and, for a ``function`` keyword followed by anything the grammar
+    cannot place, the reason to ask. The inline classifier and the script
+    rule share this one grammar.
+    """
+    while tokens:
+        head = tokens[0]
+        if head == "function":
+            # `function NAME`, `function NAME()`, `function NAME(){cmd`,
+            # `function NAME()(cmd`: drop the keyword and the name, keep
+            # whatever the name token carries after its `()`; the
+            # following iterations place `(`, `)`, `{` and glued openers.
+            name = tokens[1] if len(tokens) > 1 else ""
+            glued = GLUED_FUNCTION_HEADER_RE.match(name)
+            bare, opener, body = name.partition("(")
+            if glued:
+                rest = glued.group(1)
+                tokens = ([rest] if rest else []) + tokens[2:]
+            elif FUNCTION_NAME_RE.match(name):
+                tokens = tokens[2:]
+            elif opener and FUNCTION_NAME_RE.match(bare):
+                # `function NAME(cmd …)`: a subshell body glued to the
+                # name, which bash accepts without parentheses.
+                tokens = [opener + body] + tokens[2:]
+            else:
+                return tokens, "cannot classify function definition"
+            continue
+        if head == "coproc":
+            # `coproc cmd …` runs cmd; `coproc NAME { cmd; }` names the
+            # coprocess and runs the group.
+            if (
+                len(tokens) > 2
+                and FUNCTION_NAME_RE.match(tokens[1])
+                and tokens[2][0] in "{("
+            ):
+                tokens = tokens[2:]
+            else:
+                tokens = tokens[1:]
+            continue
+        if head == "case" and len(tokens) > 2 and tokens[2] == "in":
+            # `case WORD in pattern) cmd`: the opener is data, the pattern a
+            # syntax word, the command after it runs.
+            tokens = tokens[3:]
+            continue
+        glued = GLUED_FUNCTION_HEADER_RE.match(head)
+        if glued:
+            # `name()`, `name(){`, `name()(`, `name(){cmd`: the header
+            # ends at the `()`; whatever is glued after it is judged.
+            rest = glued.group(1)
+            tokens = ([rest] if rest else []) + tokens[1:]
+            continue
+        if (
+            len(tokens) > 1
+            and FUNCTION_NAME_RE.match(head)
+            and tokens[1].startswith("(")
+            and not tokens[1].startswith("$(")
+        ):
+            # `name () body` and `name (){ body`: the parens belong to
+            # the header, whatever they are glued to.
+            tokens = [tokens[1].lstrip("()")] + tokens[2:]
+            if not tokens[0]:
+                tokens = tokens[1:]
+            continue
+        if (
+            len(head) > 1
+            and head[0] in "{()"
+            and not head.startswith(("$(", "((", "<(", ">("))
+            and not (head[0] == "{" and "}" in head)
+        ):
+            # `{cmd` / `(cmd` / `){`: a group delimiter glued to the
+            # word after it.
+            tokens = [head[1:]] + tokens[1:]
+            continue
+        if head in SCRIPT_SYNTAX_WORDS or (head.endswith(")") and "(" not in head):
+            tokens = tokens[1:]
+            continue
+        break
+    return tokens, None
 
 
 def _classify_segment(
@@ -2141,19 +3701,57 @@ def _classify_segment(
     gate (F-005). Known runners recurse into their nested command (F-007).
     Env assignments stripped from the segment (or inherited from an outer
     runner) accumulate so target-sensitive classification can inspect them.
+    A subshell group's parentheses are dropped first: ``( gh pr merge 7 )``
+    runs the words inside them. Shell syntax at the head — a keyword, a
+    function header, a case pattern — is dropped next and the words after
+    it judged (_strip_syntax_head), in turns with the wrappers until the
+    head is a program (``time ! git commit`` drops ``time``, then ``!``),
+    so ``if true; then gh pr merge 7; fi`` denies as ``gh pr merge 7``
+    does; a program name the shell would produce by expansion or
+    substitution asks.
     """
     if depth > 3:
         return _ask(f"cannot classify deeply nested command: {segment!r}")
 
-    tokens, wrapper_needs_ask, stripped = _strip_wrappers(tokens)
-    env_assignments = list(env_assignments or []) + stripped
-    if wrapper_needs_ask:
-        return _ask(f"cannot classify wrapper invocation: {segment!r}")
-    if not tokens:
-        return None
+    tokens = _strip_subshell_parens(tokens)
+    env_assignments = list(env_assignments or [])
+    while True:
+        # Syntax and wrappers compose — `time ! git commit`, `time if cmd;
+        # …`, `! time cmd` — so the two strips take turns until neither
+        # removes anything and the head is the program itself.
+        tokens, head_problem = _strip_syntax_head(tokens)
+        if head_problem is not None:
+            return _ask(f"{head_problem}: {segment!r}")
+        if not tokens or tokens[0] in SCRIPT_DATA_KEYWORDS:
+            # A `for`/`select`/`case` opener iterates data (a substitution
+            # in its list is judged as its own segment); the command it
+            # guards is a later segment, judged there.
+            return None
+        if tokens[0] == "trap":
+            return _ask(f"trap runs code the classifier cannot see: {segment!r}")
+        before = len(tokens)
+        tokens, wrapper_needs_ask, stripped = _strip_wrappers(tokens)
+        env_assignments += stripped
+        if wrapper_needs_ask:
+            return _ask(f"cannot classify wrapper invocation: {segment!r}")
+        if not tokens:
+            return None
+        if len(tokens) == before:
+            break
 
-    if stripped and re.search(r"[$`(){}*?\[\]]", tokens[0]):
-        return _ask(f"cannot resolve shell program name: {tokens[0]!r}")
+    head = tokens[0]
+    if (
+        head not in TEST_BUILTINS
+        and not head.startswith(("((", "<(", ">("))
+        and re.search(r"[$`(){}*?\[\]]", head)
+    ):
+        # The shell produces this program name by expansion or substitution
+        # after classification, so its literal spelling names no program the
+        # hook can judge. A test or an arithmetic command runs nothing but
+        # its own evaluation, and a process-substitution fragment (the
+        # segment splitter divides `<(a | b)` at its pipe) is a filename
+        # argument whose body is judged as its own segment.
+        return _ask(f"cannot resolve shell program name: {head!r}")
 
     # Redirect targets are a property of the segment, writer-program targets
     # of the argv — both must be gated regardless of which branch handles
@@ -2166,12 +3764,37 @@ def _classify_segment(
 
     if prog == "sudo":
         return _ask(f"cannot classify privileged command: {segment!r}")
-    if prog in SHELL_INDIRECTION:
+    if prog == "xargs":
+        # The program xargs runs is visible in argv; a plain read-only
+        # utility stays a read whatever operands stdin supplies. No program
+        # (the echo default) or any other program keeps the ask.
+        nested = _xargs_nested_command(tokens)
+        if nested is not None and _is_readonly_program(nested):
+            return None
         return _ask(f"cannot classify shell indirection: {segment!r}")
+    if prog in SHELL_INDIRECTION:
+        if prog in SCRIPT_SHELLS:
+            script_decision = _classify_script_invocation(
+                tokens, cwd, constraints, env_assignments
+            )
+            if script_decision is not None:
+                if script_decision.action == "allow":
+                    return None
+                return script_decision
+        return _ask(f"cannot classify shell indirection: {segment!r}")
+    if prog == "command":
+        # Only the lookup form survives _strip_wrappers with `command` as
+        # the program; it resolves a name and runs nothing.
+        if _is_command_lookup(tokens):
+            return None
+        return _ask(f"cannot classify wrapper invocation: {segment!r}")
 
-    code_flags = INTERPRETER_CODE_FLAGS.get(prog)
-    if code_flags and any(token in code_flags for token in tokens[1:]):
-        return _ask(f"cannot classify inline interpreter code: {segment!r}")
+    if prog in INTERPRETER_CODE_FLAGS:
+        inline = _inline_code_decision(prog, tokens, segment)
+        if inline is ALLOW:
+            return None
+        if inline is not None:
+            return inline
 
     runner_verb = RUNNER_VERBS.get(prog)
     nested: Optional[List[str]] = None
@@ -2251,11 +3874,15 @@ def _classify_segment(
                             "outside the envelope (authority-bearing auth "
                             "config; touches_auth_config_or_secrets: false)"
                         )
-    if prog == "find" and any(
-        token in ("-exec", "-execdir", "-ok", "-okdir", "-delete")
-        for token in tokens[1:]
-    ):
-        return _ask(f"cannot classify find with action predicates: {segment!r}")
+    if prog == "find":
+        # An action predicate runs a nested program per match: a plain
+        # read-only utility stays a read; a shell, a mutator, and the
+        # interactive and delete forms ask.
+        actions = _find_action_commands(tokens)
+        if actions is None or not all(_is_readonly_program(a) for a in actions):
+            return _ask(
+                f"cannot classify find with action predicates: {segment!r}"
+            )
     if prog == "git":
         subcommand, args, git_dir = _git_subcommand(tokens)
         base_dir = git_dir or cwd
@@ -2290,6 +3917,151 @@ def _classify_segment(
     return None
 
 
+def _read_script(path: str) -> Optional[bytes]:
+    """The bytes of a script up to SCRIPT_READ_LIMIT; None when unreadable
+    or larger than that."""
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(SCRIPT_READ_LIMIT + 1)
+    except OSError:
+        return None
+    if len(data) > SCRIPT_READ_LIMIT:
+        return None
+    return data
+
+
+def _trusted_interpreter(token: str) -> bool:
+    """Whether the program ``token`` names — a shell for the script rule, a
+    wrapper for _strip_wrappers — is spelled where the hook may trust it.
+
+    A bare name (``bash``) resolves through PATH like every other program
+    the hook classifies. A path must spell a system bin directory
+    (INTERPRETER_BIN_DIRS, after ``..`` normalization) and resolve, through
+    any symlinks, inside the system trees (INTERPRETER_REAL_PREFIXES): a
+    scratch, repository or relative ``bin/bash`` is an executable that
+    merely shares a shell's name, and a pin on the script says nothing
+    about it.
+    """
+    if "/" not in token:
+        return True
+    if not token.startswith("/"):
+        return False
+    spelled = os.path.normpath(token)
+    if os.path.dirname(spelled) not in INTERPRETER_BIN_DIRS:
+        return False
+    return os.path.realpath(spelled).startswith(INTERPRETER_REAL_PREFIXES)
+
+
+def _classify_script_invocation(
+    tokens: List[str],
+    cwd: str,
+    constraints: Dict[str, Any],
+    env_assignments: Optional[List[str]],
+) -> Optional[Decision]:
+    """``<shell> <literal script> [args…]``: a pinned script passes, any
+    other literal script asks as not registered.
+
+    Returns None when the call is not that shape — an interpreter named by
+    a path outside the system bin directories (_trusted_interpreter), a
+    ``-c`` body, a shell flag, a variable or missing path — so the caller
+    keeps the shell-indirection ask. The receiver's ``trusted_scripts`` pins
+    (path + sha256, carried into the envelope by the compiler) pass whatever
+    the script does, with any arguments, under an env-assignment prefix
+    limited to the names the pin lists: the pin is the human's review of
+    those exact bytes, and a changed file asks to be re-pinned. The hook
+    never reads an unpinned script's text: registering the pin is the one
+    review a script version gets (the receiver config is the human's to
+    edit and sign), so the unpinned ask names that step rather than the
+    first construct a parse could not follow.
+    """
+    if len(tokens) < 2 or not _trusted_interpreter(tokens[0]):
+        return None
+    operand = tokens[1]
+    if operand.startswith("-") or "$" in operand or "`" in operand:
+        return None
+    if EXPANSION_SYNTAX_RE.search(operand):
+        return None
+    script = os.path.realpath(_normalize_file_path(operand, cwd))
+    if not os.path.isfile(script):
+        return None
+    prefix = f"script {operand!r}"
+
+    for entry in constraints.get("trusted_scripts") or []:
+        if not isinstance(entry, dict):
+            continue
+        pinned = os.path.realpath(os.path.expanduser(str(entry.get("path") or "")))
+        if pinned != script:
+            continue
+        data = _read_script(script)
+        if data is None:
+            return _ask(
+                f"{prefix} is pinned but unreadable or over {SCRIPT_READ_LIMIT} bytes"
+            )
+        if hashlib.sha256(data).hexdigest() != str(entry.get("sha256") or ""):
+            return _ask(
+                f"{prefix} does not match its pinned sha256; review the change "
+                "and re-pin it in the receiver's trusted_scripts"
+            )
+        allowed_env = {str(name) for name in entry.get("env") or []}
+        for assignment in env_assignments or []:
+            name = assignment.partition("=")[0]
+            if name not in allowed_env:
+                return _ask(
+                    f"{prefix} is pinned without the env assignment {name!r}; "
+                    "list it in the pin's env or drop the prefix"
+                )
+        return ALLOW
+
+    return _ask(
+        f"{prefix} is not registered under the receiver's trusted_scripts; "
+        "pin it with oacp trust pin-script or run its commands directly"
+    )
+
+
+def _token_minting_compound(command: str) -> Optional[str]:
+    """The final ``gh`` segment of an App-identity token-minting compound.
+
+    The App-identity recipe captures a token first and chains with ``&&``:
+    ``T=$(<path>/<token-helper> <app>) && GH_TOKEN="$T" gh …``. Every segment
+    before the last is such a mint, every join is ``&&`` (a ``;`` would run
+    gh on an empty token), and the last segment is ``gh`` behind nothing but
+    ``GH_TOKEN`` set from a minted name. Nothing in that prefix can retarget
+    gh — no ``cd``, no export, no ``GH_REPO``/``GH_HOST`` — so the caller
+    judges the final segment as the standalone command it is. Any other
+    shape returns None and keeps the compound rule.
+    """
+    try:
+        parts = _split_shell_segments_with_operators(command)
+    except ValueError:
+        return None
+    if len(parts) < 2 or parts[-1][1] != "":
+        return None
+    names = set()
+    for segment, operator in parts[:-1]:
+        if operator != "&&":
+            return None
+        match = MINT_ASSIGNMENT_RE.match(segment)
+        if match is None:
+            return None
+        names.add(match.group(1))
+    final = parts[-1][0]
+    try:
+        tokens = _shell_tokens(final)
+    except ValueError:
+        return None
+    rest, needs_ask, assignments = _strip_wrappers(tokens)
+    if needs_ask or not rest or rest[0].rsplit("/", 1)[-1] != "gh":
+        return None
+    for assignment in assignments:
+        name, _, value = assignment.partition("=")
+        reference = value[1:] if value.startswith("$") else ""
+        if reference.startswith("{") and reference.endswith("}"):
+            reference = reference[1:-1]
+        if name != "GH_TOKEN" or reference not in names:
+            return None
+    return final
+
+
 def classify_bash(
     command: str,
     cwd: str,
@@ -2300,12 +4072,9 @@ def classify_bash(
     sandboxed: bool = True,
 ) -> Decision:
     if not constraints.get("destructive_ops"):
-        for label, pattern in DESTRUCTIVE_PATTERNS:
-            if pattern.search(command):
-                return _deny(
-                    f"destructive command token {label!r} is outside the "
-                    "envelope (destructive_ops: false)"
-                )
+        decision = _destructive_token_decision(command)
+        if decision is not None:
+            return decision
 
     write_targets: List[str] = []
     try:
@@ -2317,6 +4086,10 @@ def classify_bash(
     # export) that could retarget a target-sensitive subcommand after
     # validation — the completion clear is sanctioned only in that form.
     standalone = len(segments) == 1
+    # The token-minting compound is the one multi-segment shape whose earlier
+    # segments provably cannot retarget the gh command they precede; its
+    # final segment is judged as standalone.
+    minted_final = None if standalone else _token_minting_compound(stripped)
     for segment in segments:
         try:
             tokens = _shell_tokens(segment)
@@ -2331,7 +4104,7 @@ def classify_bash(
             constraints,
             write_targets,
             context,
-            standalone=standalone,
+            standalone=standalone or segment == minted_final,
         )
         if decision is not None:
             return decision
@@ -2755,6 +4528,13 @@ def process(payload: Dict[str, Any], receiver: str = "claude") -> Decision:
         foreign_session = bool(
             bound_session and session_id and bound_session != session_id
         )
+        context = WorkspaceContext(
+            oacp_root=oacp_root,
+            project=str(envelope.get("project") or project),
+            receiver=str(envelope.get("receiver") or receiver),
+            message_id=str(envelope.get("message_id") or ""),
+            message_sha256=str(envelope.get("message_sha256") or ""),
+        )
         if foreign_session:
             # Session-bound envelope, different session: pre-envelope
             # behavior — no classification, no files_touched accounting.
@@ -2771,27 +4551,22 @@ def process(payload: Dict[str, Any], receiver: str = "claude") -> Decision:
                 # protecting the bound session — deny outright rather than
                 # trusting classification, which allows some mutation
                 # spellings (e.g. plain rm with a $VAR operand).
-                return _with_message_id(
+                decision = _with_message_id(
                     _deny(
                         "this call can modify envelope state bound to another "
                         "session; a concurrent session must not compile over, "
                         "clear, or edit the active envelope (read-only "
                         "inspection is exempt)"
                     ),
-                    str(envelope.get("message_id") or ""),
+                    context.message_id,
                 )
+                _record_decision(context, decision, payload, session_id)
+                return decision
             if affinity == "clear":
                 return ALLOW
             # Uncertain target (unresolved expansion / unparseable): stay
             # enforced through full classification, but never charge the
             # bound session's files_touched budget for foreign work.
-        context = WorkspaceContext(
-            oacp_root=oacp_root,
-            project=str(envelope.get("project") or project),
-            receiver=str(envelope.get("receiver") or receiver),
-            message_id=str(envelope.get("message_id") or ""),
-            message_sha256=str(envelope.get("message_sha256") or ""),
-        )
         decision = classify(
             str(payload.get("tool_name") or ""),
             payload.get("tool_input") or {},
@@ -2804,7 +4579,9 @@ def process(payload: Dict[str, Any], receiver: str = "claude") -> Decision:
             touched = list(counters.get("files_touched") or [])
             counters["files_touched"] = sorted(set(touched) | set(decision.new_files))
             write_envelope(target, envelope)
-    return _with_message_id(decision, context.message_id)
+        decision = _with_message_id(decision, context.message_id)
+        _record_decision(context, decision, payload, session_id)
+    return decision
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

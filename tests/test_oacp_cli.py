@@ -141,6 +141,21 @@ class TestOacpCli(unittest.TestCase):
         )
 
     @mock.patch("oacp.cli._run_script", return_value=0)
+    def test_dispatches_trust_pin_script(self, run_script) -> None:
+        code, stdout, stderr = self._run([
+            "trust", "pin-script", "/opt/tools/tidy.sh",
+            "--project", "demo", "--agent", "claude", "--env", "OACP_DONE_TYPE",
+        ])
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout, "")
+        self.assertEqual(stderr, "")
+        run_script.assert_called_once_with(
+            "trust_cli.py",
+            ["pin-script", "/opt/tools/tidy.sh", "--project", "demo",
+             "--agent", "claude", "--env", "OACP_DONE_TYPE"],
+        )
+
+    @mock.patch("oacp.cli._run_script", return_value=0)
     def test_help_for_subcommand(self, run_script) -> None:
         code, stdout, stderr = self._run(["help", "send"])
         self.assertEqual(code, 0)

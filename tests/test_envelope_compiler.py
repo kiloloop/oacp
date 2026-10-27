@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
@@ -32,6 +35,7 @@ from envelope_compiler import (  # noqa: E402
     load_envelope,
     main,
     read_receiver_runtime,
+    retargets_script,
     session_claim_path,
     workspace_hook_registration,
     write_session_claim,
@@ -221,6 +225,128 @@ def test_build_envelope_malformed_config_fails_closed() -> None:
             receiver="claude",
             project="test-proj",
         )
+
+
+PIN = {
+    "path": "~/skills/example/scripts/finish_task.sh",
+    "sha256": "a" * 64,
+    "env": ["OACP_DONE_TYPE"],
+}
+
+
+def _config_with_pins(*pins: Any) -> Dict[str, Any]:
+    config = dict(RECEIVER_CONFIG)
+    config["envelope"] = {"trusted_scripts": list(pins)}
+    return config
+
+
+def test_build_envelope_embeds_trusted_script_pins() -> None:
+    # Absent, the list compiles empty so the adapter never reads a missing
+    # key; present, each pin lands normalized (env defaults to no names).
+    without = build_envelope(
+        make_message(), RECEIVER_CONFIG, receiver="claude", project="test-proj"
+    )
+    assert without["constraints"]["trusted_scripts"] == []
+    envelope = build_envelope(
+        make_message(),
+        _config_with_pins(PIN, {"path": "/opt/tools/tidy.sh", "sha256": "b" * 64}),
+        receiver="claude",
+        project="test-proj",
+    )
+    assert envelope["constraints"]["trusted_scripts"] == [
+        PIN,
+        {"path": "/opt/tools/tidy.sh", "sha256": "b" * 64, "env": []},
+    ]
+
+
+@pytest.mark.parametrize(
+    "pin, needle",
+    [
+        ({**PIN, "path": "scripts/relative.sh"}, "absolute or ~/ path"),
+        ({**PIN, "path": "~/skills/$NAME/run.sh"}, "shell expansion"),
+        ({**PIN, "sha256": "ABC"}, "64 lowercase hex"),
+        ({**PIN, "env": "OACP_DONE_TYPE"}, "list of variable names"),
+        ({**PIN, "env": ["not a name"]}, "variable names"),
+        ({**PIN, "env": ["PATH"]}, "retargets the script"),
+        ({**PIN, "args": ["--commit"]}, "unknown key"),
+        ("not-a-mapping", "must be a mapping"),
+    ],
+)
+def test_build_envelope_rejects_malformed_trusted_script_pins(pin: Any, needle: str) -> None:
+    with pytest.raises(EnvelopeCompileError, match=needle):
+        build_envelope(
+            make_message(),
+            _config_with_pins(pin),
+            receiver="claude",
+            project="test-proj",
+        )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "ZDOTDIR", "FPATH", "MODULE_PATH", "BASH_LOADABLES_PATH", "EXECIGNORE",
+        "ENV", "BASH_ENV", "LD_AUDIT", "DYLD_INSERT_LIBRARIES", "PYTHONUSERBASE",
+        "PERLLIB", "GEM_PATH", "GIT_CONFIG_GLOBAL", "GIT_TEMPLATE_DIR",
+        "GH_CONFIG_DIR", "GITHUB_TOKEN", "XDG_CONFIG_HOME", "PAGER", "LESSOPEN",
+        "SSH_ASKPASS", "GIT_ASKPASS", "OP_SERVICE_ACCOUNT_TOKEN",
+        "CLAUDE_CONFIG_DIR", "OACP_ENVELOPE_RECEIVER", "AGENT_MEMORY_HOME", "TMP",
+    ],
+)
+def test_trusted_script_env_refuses_names_that_retarget_the_script(name: str) -> None:
+    # Startup files and function or module paths of the script shells, loader
+    # and interpreter search paths, the programs a tool execs, and where a
+    # tool reads its configuration or identity: each runs or targets
+    # something other than the pinned bytes.
+    assert retargets_script(name)
+    with pytest.raises(EnvelopeCompileError, match=f"must not list {name}"):
+        build_envelope(
+            make_message(),
+            _config_with_pins({**PIN, "env": [name]}),
+            receiver="claude",
+            project="test-proj",
+        )
+
+
+@pytest.mark.parametrize("name", ["OACP_DONE_TYPE", "DRY_RUN", "VERBOSE", "LEVEL"])
+def test_trusted_script_env_keeps_data_only_names(name: str) -> None:
+    assert not retargets_script(name)
+    envelope = build_envelope(
+        make_message(),
+        _config_with_pins({**PIN, "env": [name]}),
+        receiver="claude",
+        project="test-proj",
+    )
+    assert envelope["constraints"]["trusted_scripts"][0]["env"] == [name]
+
+
+@pytest.mark.skipif(shutil.which("zsh") is None, reason="zsh is not installed")
+def test_zdotdir_runs_startup_code_before_a_script(tmp_path: Path) -> None:
+    # The fact the ZDOTDIR refusal rests on: a non-interactive zsh sources
+    # $ZDOTDIR/.zshenv before the script named on its command line, so a
+    # prefix naming it runs bytes no pin covers.
+    startup = tmp_path / "startup"
+    startup.mkdir()
+    (startup / ".zshenv").write_text("print startup-ran\n", encoding="utf-8")
+    script = tmp_path / "pinned.sh"
+    script.write_text(":\n", encoding="utf-8")
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(tmp_path),
+        "ZDOTDIR": str(startup),
+    }
+    run = subprocess.run(
+        ["zsh", str(script)], env=env, capture_output=True, text=True, check=False
+    )
+    assert "startup-ran" in run.stdout
+
+
+@pytest.mark.parametrize("section", ["pins", {"trusted_scripts": "~/x.sh"}])
+def test_build_envelope_rejects_malformed_envelope_section(section: Any) -> None:
+    config = dict(RECEIVER_CONFIG)
+    config["envelope"] = section
+    with pytest.raises(EnvelopeCompileError, match="receiver config malformed"):
+        build_envelope(make_message(), config, receiver="claude", project="test-proj")
 
 
 def test_build_envelope_missing_message_id_fails_closed() -> None:

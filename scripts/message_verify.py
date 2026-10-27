@@ -545,12 +545,21 @@ def quarantine_write_aside(
 # ---------------------------------------------------------------------------
 
 def attach_message_auth(
-    audit_path: Path, message_auth: Dict[str, Any], *, replace: bool = False
+    audit_path: Path,
+    message_auth: Dict[str, Any],
+    *,
+    replace: bool = False,
+    message_sha256: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Record a message_auth block into an existing autonomy audit record.
 
     Additive to schema v2 (like ``human_outcome``): locked read-modify-write,
     atomic replace, refuses to overwrite a recorded block unless *replace*.
+    With *message_sha256* (the digest of the message bytes that produced
+    the block) the write is refused unless it equals the record's own
+    ``message_sha256``: the stamp binds to the snapshot the record admitted,
+    never to another message's bytes. A record without a digest (pre-v2
+    shapes) carries no binding to check.
     Warn mode: the block records identity and grants no authority — gates
     consume it as telemetry only.
 
@@ -572,6 +581,12 @@ def attach_message_auth(
         result = audit.get("result")
         if not isinstance(result, dict):
             raise ValueError("audit.result must be a mapping")
+        recorded = audit.get("message_sha256")
+        if message_sha256 is not None and recorded and str(recorded) != message_sha256:
+            raise ValueError(
+                "message bytes do not match the audit record's accepted snapshot "
+                "(message_sha256)"
+            )
         existing = result.get("message_auth")
         if not replace and isinstance(existing, dict) and existing.get("status"):
             raise ValueError(
@@ -991,7 +1006,11 @@ def main() -> int:
 
     if args.attach_audit:
         try:
-            attach_message_auth(Path(args.attach_audit), message_auth)
+            attach_message_auth(
+                Path(args.attach_audit),
+                message_auth,
+                message_sha256=hashlib.sha256(raw).hexdigest(),
+            )
         except (OSError, ValueError) as exc:
             print(f"ERROR: attach-audit failed: {exc}", file=sys.stderr)
             return 2
